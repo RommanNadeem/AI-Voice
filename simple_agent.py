@@ -92,6 +92,21 @@ def get_from_memory(category: str, key: str):
         print(f"[MEMORY ERROR] Failed to get: {e}")
         return None
 
+def is_onboarding_complete():
+    """Check if onboarding is complete based on responses."""
+    return len(onboarding_state["responses"]) >= len(ONBOARDING_QUESTIONS)
+
+def reset_onboarding_state():
+    """Reset onboarding state for new session."""
+    global onboarding_state
+    onboarding_state = {
+        "is_active": True,
+        "current_question": 0,
+        "responses": [],
+        "story_told": False
+    }
+    print("[ONBOARDING] State reset for new session")
+
 # ---------------------------
 # Simple Onboarding Functions
 # ---------------------------
@@ -133,11 +148,14 @@ async def handle_onboarding_response(user_text: str, session):
     
     # Move to next question
     onboarding_state["current_question"] += 1
+    print(f"[ONBOARDING] Moved to question {onboarding_state['current_question']}")
     
     # Check if onboarding is complete
-    if onboarding_state["current_question"] >= len(ONBOARDING_QUESTIONS):
+    if is_onboarding_complete():
+        print("[ONBOARDING] All questions answered, completing onboarding...")
         await complete_onboarding(session)
     else:
+        print(f"[ONBOARDING] Asking next question {onboarding_state['current_question'] + 1}...")
         await ask_next_question(session)
 
 async def complete_onboarding(session):
@@ -186,13 +204,16 @@ class SimpleAssistant(Agent):
         """Handle user input."""
         user_text = new_message.text_content
         print(f"[USER INPUT] {user_text}")
+        print(f"[ONBOARDING STATE] Active: {onboarding_state['is_active']}, Question: {onboarding_state['current_question']}, Responses: {len(onboarding_state['responses'])}")
         
         # If onboarding is active, handle onboarding response
-        if onboarding_state["is_active"]:
+        if not is_onboarding_complete():
+            print("[ONBOARDING] Handling onboarding response...")
             await handle_onboarding_response(user_text, turn_ctx.session)
             return
         
         # Normal conversation - save to memory
+        print("[CONVERSATION] Handling normal conversation...")
         save_to_memory("CONVERSATION", "user_input", user_text)
         
         # Generate response with memory context
@@ -238,7 +259,7 @@ async def entrypoint(ctx: agents.JobContext):
     )
     
     # Check if onboarding is needed
-    if onboarding_state["is_active"]:
+    if not is_onboarding_complete():
         print("[AGENT] Starting onboarding...")
         await start_onboarding(session)
     else:
