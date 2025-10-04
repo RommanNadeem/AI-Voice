@@ -1,0 +1,6 @@
+# Minimal requirements for uplift_tts.py
+# Essential dependencies only
+
+livekit-agents
+python-socketio
+loguru

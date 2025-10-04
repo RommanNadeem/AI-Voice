@@ -1,0 +1,12 @@
+# Requirements for uplift_tts.py
+# Uplift TTS Plugin for LiveKit
+
+# Core dependencies
+livekit-agents>=1.2.0
+python-socketio>=5.0.0
+loguru>=0.7.0
+
+# Optional dependencies for enhanced functionality
+# (uncomment if needed)
+# websockets>=11.0.0
+# aiohttp>=3.8.0
