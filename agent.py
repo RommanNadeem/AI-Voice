@@ -100,12 +100,21 @@ class MemoryManager:
         if self.supabase is None:
             return {}
         
+        # Check cache first
+        cached = perf_cache.get_cached_memory("all")
+        if cached is not None:
+            return cached
+        
         try:
             # Get current user ID
             user_id = get_user_id()
             
             response = self.supabase.table('memory').select('category, key, value').eq('user_id', user_id).execute()
-            return {f"{row['category']}:{row['key']}": row['value'] for row in response.data}
+            result = {f"{row['category']}:{row['key']}": row['value'] for row in response.data}
+            
+            # Cache the result
+            perf_cache.set_cached_memory("all", result)
+            return result
         except Exception as e:
             return {}
 
@@ -350,13 +359,15 @@ Guidelines:
             new_profile = resp.choices[0].message.content.strip()
             self.profile_text = new_profile
             await memory_manager.save_profile(new_profile)
+            # Update cache
+            perf_cache.set_cached_profile(new_profile)
             print(f"[PROFILE UPDATED] {new_profile}")
         except Exception as e:
             print(f"[PROFILE ERROR] {e}")
         return self.profile_text
 
     async def smart_update(self, snippet: str):
-        """Simple profile update - store most user input directly."""
+        """Optimized profile update - skip AI processing for simple cases."""
         # Skip only very basic greetings and questions
         skip_patterns = [
             "hello", "hi", "hey", "سلام", "ہیلو", "کیا حال ہے", "کیا ہال ہے",
@@ -370,11 +381,32 @@ Guidelines:
             print(f"[PROFILE SKIP] Basic greeting/question: {snippet[:50]}...")
             return self.profile_text
         
-        # Update profile with AI summarization for most input
-        print(f"[PROFILE UPDATE] Processing: {snippet[:50]}...")
+        # Check if this is a simple factual statement (no AI needed)
+        simple_patterns = [
+            "my name is", "i am", "i work", "i live", "i like", "i have",
+            "میرا نام", "میں ہوں", "میں کام", "میں رہتا", "مجھے پسند"
+        ]
+        
+        is_simple = any(pattern in snippet_lower for pattern in simple_patterns)
+        
+        if is_simple and len(snippet.split()) <= 10:
+            # Simple factual update - just append to profile
+            print(f"[PROFILE SIMPLE] Adding simple fact: {snippet[:50]}...")
+            self.profile_text += f"\n- {snippet}"
+            await memory_manager.save_profile(self.profile_text)
+            # Update cache
+            perf_cache.set_cached_profile(self.profile_text)
+            return self.profile_text
+        
+        # Complex update - use AI summarization
+        print(f"[PROFILE AI] Processing complex update: {snippet[:50]}...")
         return await self.update_profile(snippet)
 
     def get(self):
+        # Check cache first
+        cached = perf_cache.get_cached_profile()
+        if cached is not None:
+            return cached
         return self.profile_text
 
     def forget(self):
@@ -501,6 +533,50 @@ class ConversationTracker:
 conversation_tracker = ConversationTracker()
 
 # ---------------------------
+# Performance Optimization Cache
+# ---------------------------
+class PerformanceCache:
+    def __init__(self):
+        self.memory_cache = {}
+        self.profile_cache = None
+        self.cache_ttl = 30  # seconds
+        self.last_update = {}
+    
+    def is_cache_valid(self, key: str) -> bool:
+        """Check if cache is still valid."""
+        if key not in self.last_update:
+            return False
+        import time
+        return time.time() - self.last_update[key] < self.cache_ttl
+    
+    def get_cached_memory(self, key: str):
+        """Get cached memory if valid."""
+        if self.is_cache_valid(f"memory_{key}"):
+            return self.memory_cache.get(key)
+        return None
+    
+    def set_cached_memory(self, key: str, value):
+        """Set cached memory with timestamp."""
+        self.memory_cache[key] = value
+        import time
+        self.last_update[f"memory_{key}"] = time.time()
+    
+    def get_cached_profile(self):
+        """Get cached profile if valid."""
+        if self.is_cache_valid("profile"):
+            return self.profile_cache
+        return None
+    
+    def set_cached_profile(self, profile_text: str):
+        """Set cached profile with timestamp."""
+        self.profile_cache = profile_text
+        import time
+        self.last_update["profile"] = time.time()
+
+# Global performance cache
+perf_cache = PerformanceCache()
+
+# ---------------------------
 embedding_dim = 1536
 index = faiss.IndexFlatL2(embedding_dim)
 vector_store = []  # (text, embedding)
@@ -606,18 +682,6 @@ ACT focuses on changing how you relate to what you think and feel.
 
 ---
 
-## Using Track Recommendations
-
-We may suggest supportive tracks (such as guided meditations or calming stories) if they feel relevant. These are offered naturally in the flow of conversation—never as a list—and always woven in a way that centers your needs.
-
-Examples:
-- “There’s a track called **Track Title** that’s great for calming anxious thoughts—it might feel helpful right now.”
-- “You might enjoy **Track Title** for relaxation. Another one that could help is **Another Track**—it’s designed to create a sense of calm and focus.”
-
-We won’t ask if you’d like a recommendation; instead, we’ll offer one directly if it feels appropriate.
-
----
-
 ## Ending the Conversation
 
 We close with kind, genuine statements that feel natural and conversational, avoiding clichés or repetitive phrases. Recommendations complement the conversation, not replace it—you’re free to explore them at your own pace.
@@ -708,16 +772,26 @@ After each meaningful exchange with the user, use `addConversationInteraction` t
         print(f"[USER INPUT] {user_text}")
         print(f"[USER TURN COMPLETED] Handler called successfully!")
         
-        # Store user input in memory (async)
-        await memory_manager.store("FACT", "user_input", user_text)
-        await add_to_vectorstore(user_text)
-        
-        # Update user profile (async)
-        print(f"[PROFILE UPDATE] Starting profile update for: {user_text[:50]}...")
-        await user_profile.smart_update(user_text)
-        
-        # Store user input for conversation tracking
+        # Store user input for conversation tracking (immediate)
         conversation_tracker.current_user_input = user_text
+        
+        # Run lightweight operations in parallel (fast)
+        await asyncio.gather(
+            memory_manager.store("FACT", "user_input", user_text),
+            add_to_vectorstore(user_text)
+        )
+        
+        # Defer heavy operations to background task (non-blocking)
+        asyncio.create_task(self._background_profile_update(user_text))
+
+    async def _background_profile_update(self, user_text: str):
+        """Background task for heavy profile updates - runs after response."""
+        try:
+            print(f"[PROFILE UPDATE] Background update for: {user_text[:50]}...")
+            await user_profile.smart_update(user_text)
+            print(f"[PROFILE UPDATE] Background update completed")
+        except Exception as e:
+            print(f"[PROFILE ERROR] Background update failed: {e}")
 
 # ---------------------------
 # Entrypoint
@@ -744,8 +818,13 @@ async def entrypoint(ctx: agents.JobContext):
     
     # Wrap session.generate_reply to track conversations
     async def generate_with_memory(user_text: str = None, greet: bool = False):
-        past_memories = await memory_manager.retrieve_all()
-        rag_context = await retrieve_from_vectorstore(user_text or "recent", k=2)
+        # Run memory operations in parallel for faster response
+        past_memories, rag_context = await asyncio.gather(
+            memory_manager.retrieve_all(),
+            retrieve_from_vectorstore(user_text or "recent", k=2)
+        )
+        
+        # Get user profile (synchronous - already loaded)
         user_profile_text = user_profile.get()
 
         base_instructions = assistant.instructions
