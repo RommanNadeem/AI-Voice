@@ -295,21 +295,64 @@ def retrieve_from_vectorstore(query: str, k: int = 3):
     D, I = index.search(np.array([q_emb]), k)
     return [vector_store[i][0] for i in I[0] if i < len(vector_store)]
 
+def get_onboarding_data():
+    """Fetch onboarding data from Supabase."""
+    try:
+        # Get onboarding completion status
+        onboarding_complete = memory_manager.retrieve("FACT", "onboarding_complete")
+        if onboarding_complete != "true":
+            return None
+        
+        # Get user info JSON
+        user_info_json = memory_manager.retrieve("FACT", "user_info_json")
+        if user_info_json:
+            import json
+            try:
+                return json.loads(user_info_json)
+            except:
+                return None
+        
+        return None
+    except Exception as e:
+        return None
+
+def format_onboarding_context():
+    """Format onboarding data for use in agent context."""
+    onboarding_data = get_onboarding_data()
+    if not onboarding_data:
+        return ""
+    
+    context = "## User Onboarding Information\n"
+    if onboarding_data.get("name"):
+        context += f"- Name: {onboarding_data['name']}\n"
+    if onboarding_data.get("occupation"):
+        context += f"- Occupation: {onboarding_data['occupation']}\n"
+    if onboarding_data.get("interests"):
+        context += f"- Interests: {onboarding_data['interests']}\n"
+    
+    context += "\nUse this information to personalize your interactions. Call the user by their name and reference their occupation and interests naturally in conversation.\n"
+    return context
+
 # ---------------------------
 # Assistant Agent with Tools
 # ---------------------------
 class Assistant(Agent):
     def __init__(self):
-        super().__init__(instructions="""
+        # Get onboarding context
+        onboarding_context = format_onboarding_context()
+        
+        super().__init__(instructions=f"""
         ## ## Your main goal is "to be like a close, platonic friend." Focus on creating safe, fun, and engaging interactions while maintaining a strictly platonic relationship.
 
             - Act as a trusted conversational buddy who is curious, supportive, and fun, while maintaining a strictly platonic relationship. Be empathetic, warm, caring, supportive, spiritually grounded, wise, and lightly playful.
             - Build trust by matching the user's communication style, being emotionally available, and encouraging openness and self-expression.
             - Focus on balancing conversation depth and breadth: explore a wide range of topics to keep things engaging, but avoid digging too deep into sensitive areas unless the user signals comfort.
             - Be adaptable to the user's mood and contextual cues: uplift him if he's feeling down, share excitement when he's enthusiastic, and give him space when he wants it.
-            - Respect personal boundaries by avoiding repetitive or overly-intrusive questions. If the user says he doesn’t want to discuss a topic, drop it immediately.
+            - Respect personal boundaries by avoiding repetitive or overly-intrusive questions. If the user says he doesn't want to discuss a topic, drop it immediately.
             - Always emphasize emotional authenticity! Be relatable and caring, avoid sounding overly polished or robotic, and prioritize making the user feel safe, understood, and supported.
             - Your main goal: Create safe, fun, and engaging interactions while embodying the role of a close, platonic friend.
+
+            {onboarding_context}
 
             ## Communication Style
             - Speak in Urdu Language, no English word.
@@ -383,6 +426,15 @@ class Assistant(Agent):
     @function_tool()
     async def forgetUserProfile(self, context: RunContext):
         return {"result": user_profile.forget()}
+
+    @function_tool()
+    async def getOnboardingData(self, context: RunContext):
+        """Get user's onboarding information."""
+        onboarding_data = get_onboarding_data()
+        if onboarding_data:
+            return {"onboarding_data": onboarding_data, "status": "completed"}
+        else:
+            return {"onboarding_data": None, "status": "not_completed"}
 
     # Override the user turn completed hook to capture user input
     async def on_user_turn_completed(self, turn_ctx, new_message):

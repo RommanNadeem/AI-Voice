@@ -344,9 +344,16 @@ class OnboardingAgent(Agent):
         - Do NOT engage in topics outside of name, occupation, and interests
         - Complete all 3 core questions before allowing other topics
 
+        ## Handover Process
+        - Once you have collected the user's name, occupation, and interests, use the 'extractUserInfoJSON' tool
+        - After extracting the information, clearly announce: "اب میں آپ کو اپنے اہم ساتھی کے حوالے کر رہا ہوں"
+        - Output the exact signal: >>> HANDOVER_TO_CORE
+        - This signals that onboarding is complete and the Core Agent should take over
+
         ## Tool Usage
         - Use 'storeInMemory' to save important user information
         - Use 'updateUserProfile' to build their profile
+        - Use 'extractUserInfoJSON' when you have enough information to complete onboarding
         - Use 'getUserProfile' to reference what you know about them
         """)
 
@@ -370,10 +377,23 @@ class OnboardingAgent(Agent):
 
     @function_tool()
     async def extractUserInfoJSON(self, context: RunContext, user_responses: str):
-        """Extract user information in JSON format."""
+        """Extract user information in JSON format and trigger handover to Core Agent."""
         json_data = extract_user_info_to_json(user_responses)
         print(f"[JSON EXTRACTED] {json_data}")
-        return {"user_info": json_data}
+        
+        # Store the extracted information
+        memory_manager.store("FACT", "user_info_json", str(json_data))
+        
+        # Mark onboarding as complete and trigger handover
+        memory_manager.store("FACT", "onboarding_complete", "true")
+        
+        # Signal handover to Core Agent
+        print("\n" + "="*50)
+        print(">>> HANDOVER_TO_CORE")
+        print("="*50)
+        print("Onboarding complete! Handing over to Core Agent...")
+        
+        return {"user_info": json_data, "handover": ">>> HANDOVER_TO_CORE"}
 
     # Override the user turn completed hook to capture user input
     async def on_user_turn_completed(self, turn_ctx, new_message):
