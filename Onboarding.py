@@ -1,9 +1,9 @@
 import os
-import sqlite3
 import faiss
 import numpy as np
 from dotenv import load_dotenv
 from openai import OpenAI
+from supabase import create_client, Client
 
 from livekit import agents
 from livekit.agents import AgentSession, Agent, RoomInputOptions, function_tool, RunContext
@@ -27,66 +27,105 @@ class MemoryManager:
         "PRESENTATION", "RELATIONSHIP"
     }
 
-    def __init__(self, db_path="onboarding_memory.db"):
-        self.conn = sqlite3.connect(db_path, check_same_thread=False)
-        self.create_tables()
-
-    def create_tables(self):
-        with self.conn:
-            self.conn.execute("""
-                CREATE TABLE IF NOT EXISTS memory (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    category TEXT NOT NULL,
-                    key TEXT NOT NULL,
-                    value TEXT NOT NULL,
-                    UNIQUE(category, key)
-                )
-            """)
-            self.conn.execute("""
-                CREATE TABLE IF NOT EXISTS profiles (
-                    user_id TEXT PRIMARY KEY,
-                    profile_text TEXT NOT NULL
-                )
-            """)
+    def __init__(self):
+        # Supabase configuration
+        self.supabase_url = os.getenv('SUPABASE_URL', 'https://your-project.supabase.co')
+        self.supabase_key = os.getenv('SUPABASE_ANON_KEY', 'your-anon-key')
+        
+        # Check if Supabase credentials are properly configured
+        if self.supabase_url == 'https://your-project.supabase.co' or self.supabase_key == 'your-anon-key':
+            print(f"[SUPABASE WARNING] Using placeholder credentials. Please set SUPABASE_URL and SUPABASE_ANON_KEY in .env file")
+            self.supabase = None
+            self.connection_error = "Supabase credentials not configured"
+        else:
+            try:
+                self.supabase: Client = create_client(self.supabase_url, self.supabase_key)
+                print(f"[SUPABASE CONNECTED] Successfully connected to Supabase")
+                self.connection_error = None
+            except Exception as e:
+                print(f"[SUPABASE ERROR] Connection failed: {e}")
+                self.supabase = None
+                self.connection_error = str(e)
 
     def store(self, category: str, key: str, value: str):
         category = category.upper()
         if category not in self.ALLOWED_CATEGORIES:
             category = "FACT"
-        with self.conn:
-            self.conn.execute("""
-                INSERT INTO memory (category, key, value)
-                VALUES (?, ?, ?)
-                ON CONFLICT(category, key) DO UPDATE SET value=excluded.value
-            """, (category, key, value))
-        print(f"[MEMORY STORED] [{category}] {key} = {value}")
-        return f"Stored: [{category}] {key} = {value}"
+        
+        if self.supabase is None:
+            print(f"[MEMORY STORED] [{category}] {key} = {value} (Supabase not available)")
+            return f"Stored: [{category}] {key} = {value} (offline mode)"
+        
+        try:
+            # Use upsert to insert or update
+            response = self.supabase.table('memory').upsert({
+                'category': category,
+                'key': key,
+                'value': value
+            }).execute()
+            
+            print(f"[MEMORY STORED] [{category}] {key} = {value}")
+            return f"Stored: [{category}] {key} = {value}"
+        except Exception as e:
+            print(f"[SUPABASE ERROR] Store failed: {e}")
+            return f"Error storing: {e}"
 
     def retrieve(self, category: str, key: str):
-        cur = self.conn.cursor()
-        cur.execute("SELECT value FROM memory WHERE category=? AND key=?", (category, key))
-        row = cur.fetchone()
-        return row[0] if row else None
+        if self.supabase is None:
+            print(f"[MEMORY RETRIEVE] [{category}] {key} (Supabase not available)")
+            return None
+        
+        try:
+            response = self.supabase.table('memory').select('value').eq('category', category).eq('key', key).execute()
+            if response.data:
+                return response.data[0]['value']
+            return None
+        except Exception as e:
+            print(f"[SUPABASE ERROR] Retrieve failed: {e}")
+            return None
 
     def retrieve_all(self):
-        cur = self.conn.cursor()
-        cur.execute("SELECT category, key, value FROM memory")
-        return {f"{cat}:{key}": val for cat, key, val in cur.fetchall()}
+        if self.supabase is None:
+            print(f"[MEMORY RETRIEVE ALL] (Supabase not available)")
+            return {}
+        
+        try:
+            response = self.supabase.table('memory').select('category, key, value').execute()
+            return {f"{row['category']}:{row['key']}": row['value'] for row in response.data}
+        except Exception as e:
+            print(f"[SUPABASE ERROR] Retrieve all failed: {e}")
+            return {}
 
     def save_profile(self, user_id: str, profile_text: str):
-        with self.conn:
-            self.conn.execute("""
-                INSERT INTO profiles (user_id, profile_text)
-                VALUES (?, ?)
-                ON CONFLICT(user_id) DO UPDATE SET profile_text=excluded.profile_text
-            """, (user_id, profile_text))
-        print(f"[PROFILE STORED] for {user_id}")
+        if self.supabase is None:
+            print(f"[PROFILE STORED] for {user_id} (Supabase not available)")
+            return
+        
+        try:
+            # Use user_profiles table with proper upsert
+            response = self.supabase.table('user_profiles').upsert({
+                'user_id': user_id,
+                'profile_text': profile_text
+            }).execute()
+            
+            print(f"[PROFILE STORED] for {user_id}")
+        except Exception as e:
+            print(f"[SUPABASE ERROR] Save profile failed: {e}")
 
     def load_profile(self, user_id: str):
-        cur = self.conn.cursor()
-        cur.execute("SELECT profile_text FROM profiles WHERE user_id=?", (user_id,))
-        row = cur.fetchone()
-        return row[0] if row else ""
+        if self.supabase is None:
+            print(f"[PROFILE LOAD] for {user_id} (Supabase not available)")
+            return ""
+        
+        try:
+            # Use user_profiles table
+            response = self.supabase.table('user_profiles').select('profile_text').eq('user_id', user_id).execute()
+            if response.data:
+                return response.data[0]['profile_text']
+            return ""
+        except Exception as e:
+            print(f"[SUPABASE ERROR] Load profile failed: {e}")
+            return ""
 
 
 memory_manager = MemoryManager()
@@ -167,11 +206,20 @@ Guidelines:
         return self.profile_text
 
     def forget(self):
-        with memory_manager.conn:
-            memory_manager.conn.execute("DELETE FROM profiles WHERE user_id=?", (self.user_id,))
-        self.profile_text = ""
-        print(f"[PROFILE FORGOT] for {self.user_id}")
-        return f"Profile deleted for {self.user_id}"
+        if memory_manager.supabase is None:
+            print(f"[PROFILE FORGOT] for {self.user_id} (Supabase not available)")
+            self.profile_text = ""
+            return f"Profile deleted for {self.user_id} (offline mode)"
+        
+        try:
+            # Use user_profiles table
+            response = memory_manager.supabase.table('user_profiles').delete().eq('user_id', self.user_id).execute()
+            self.profile_text = ""
+            print(f"[PROFILE FORGOT] for {self.user_id}")
+            return f"Profile deleted for {self.user_id}"
+        except Exception as e:
+            print(f"[SUPABASE ERROR] Forget profile failed: {e}")
+            return f"Error deleting profile: {e}"
 
 
 user_profile = UserProfile(user_id="onboarding_user")

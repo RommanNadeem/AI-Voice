@@ -31,13 +31,27 @@ class MemoryManager:
         # Supabase configuration
         self.supabase_url = os.getenv('SUPABASE_URL', 'https://your-project.supabase.co')
         self.supabase_key = os.getenv('SUPABASE_ANON_KEY', 'your-anon-key')
-        self.supabase: Client = create_client(self.supabase_url, self.supabase_key)
-        print(f"[SUPABASE CONNECTED] Successfully connected to Supabase")
+        
+        # Check if Supabase credentials are properly configured
+        if self.supabase_url == 'https://your-project.supabase.co' or self.supabase_key == 'your-anon-key':
+            self.supabase = None
+            self.connection_error = "Supabase credentials not configured"
+        else:
+            try:
+                self.supabase: Client = create_client(self.supabase_url, self.supabase_key)
+                print(f"[SUPABASE] Connected")
+                self.connection_error = None
+            except Exception as e:
+                self.supabase = None
+                self.connection_error = str(e)
 
     def store(self, category: str, key: str, value: str):
         category = category.upper()
         if category not in self.ALLOWED_CATEGORIES:
             category = "FACT"
+        
+        if self.supabase is None:
+            return f"Stored: [{category}] {key} = {value} (offline)"
         
         try:
             # Use upsert to insert or update
@@ -47,62 +61,116 @@ class MemoryManager:
                 'value': value
             }).execute()
             
-            print(f"[MEMORY STORED] [{category}] {key} = {value}")
             return f"Stored: [{category}] {key} = {value}"
         except Exception as e:
-            print(f"[SUPABASE ERROR] Store failed: {e}")
             return f"Error storing: {e}"
 
     def retrieve(self, category: str, key: str):
+        if self.supabase is None:
+            return None
+        
         try:
             response = self.supabase.table('memory').select('value').eq('category', category).eq('key', key).execute()
             if response.data:
                 return response.data[0]['value']
             return None
         except Exception as e:
-            print(f"[SUPABASE ERROR] Retrieve failed: {e}")
             return None
 
     def retrieve_all(self):
+        if self.supabase is None:
+            return {}
+        
         try:
             response = self.supabase.table('memory').select('category, key, value').execute()
             return {f"{row['category']}:{row['key']}": row['value'] for row in response.data}
         except Exception as e:
-            print(f"[SUPABASE ERROR] Retrieve all failed: {e}")
             return {}
 
     def forget(self, category: str, key: str):
+        if self.supabase is None:
+            return f"Forgot: [{category}] {key} (offline)"
+        
         try:
             response = self.supabase.table('memory').delete().eq('category', category).eq('key', key).execute()
-            print(f"[MEMORY FORGOT] [{category}] {key}")
             return f"Forgot: [{category}] {key}"
         except Exception as e:
-            print(f"[SUPABASE ERROR] Forget failed: {e}")
             return f"Error forgetting: {e}"
 
     def save_profile(self, user_id: str, profile_text: str):
+        if self.supabase is None:
+            return
+        
         try:
-            response = self.supabase.table('profiles').upsert({
+            # Use user_profiles table with proper upsert
+            response = self.supabase.table('user_profiles').upsert({
                 'user_id': user_id,
                 'profile_text': profile_text
             }).execute()
-            
-            print(f"[PROFILE STORED] for {user_id}")
         except Exception as e:
-            print(f"[SUPABASE ERROR] Save profile failed: {e}")
+            pass
 
     def load_profile(self, user_id: str):
+        if self.supabase is None:
+            return ""
+        
         try:
-            response = self.supabase.table('profiles').select('profile_text').eq('user_id', user_id).execute()
+            # Use user_profiles table
+            response = self.supabase.table('user_profiles').select('profile_text').eq('user_id', user_id).execute()
             if response.data:
                 return response.data[0]['profile_text']
             return ""
         except Exception as e:
-            print(f"[SUPABASE ERROR] Load profile failed: {e}")
             return ""
 
 
 memory_manager = MemoryManager()
+
+# ---------------------------
+# Helper Functions
+# ---------------------------
+# RLS Policy for user_profiles table:
+# CREATE POLICY "Users can manage their own profiles" ON user_profiles
+# FOR ALL USING (auth.uid()::text = user_id);
+
+def save_user_profile(user_id: str, profile_text: str):
+    """
+    Helper function to save user profile to user_profiles table.
+    
+    Args:
+        user_id (str): The user's ID (should match auth.users.id)
+        profile_text (str): The profile text content
+    
+    Returns:
+        bool: True if successful, False otherwise
+    """
+    try:
+        response = memory_manager.supabase.table('user_profiles').upsert({
+            'user_id': user_id,
+            'profile_text': profile_text
+        }).execute()
+        
+        return True
+    except Exception as e:
+        return False
+
+def get_user_profile(user_id: str):
+    """
+    Helper function to get user profile from user_profiles table.
+    
+    Args:
+        user_id (str): The user's ID
+    
+    Returns:
+        str: Profile text or empty string if not found
+    """
+    try:
+        response = memory_manager.supabase.table('user_profiles').select('profile_text').eq('user_id', user_id).execute()
+        if response.data:
+            return response.data[0]['profile_text']
+        return ""
+    except Exception as e:
+        return ""
 
 # ---------------------------
 # User Profile Manager
@@ -112,9 +180,9 @@ class UserProfile:
         self.user_id = user_id
         self.profile_text = memory_manager.load_profile(user_id)
         if self.profile_text:
-            print(f"[PROFILE LOADED] for {user_id}: {self.profile_text}")
+            pass  # Profile loaded silently
         else:
-            print(f"[PROFILE EMPTY] No existing profile for {user_id}")
+            pass  # No existing profile
 
 
     def update_profile(self, snippet: str):
@@ -137,6 +205,7 @@ Create a well-structured profile that includes:
 - Preferences and opinions
 - Experiences and stories
 - Current activities and projects
+- Communication styles, type of tone, way of speaking, slangs, etc. 
 
 Guidelines:
 - Keep it concise but comprehensive (max 10 lines)
@@ -181,8 +250,14 @@ Guidelines:
         return self.profile_text
 
     def forget(self):
+        if memory_manager.supabase is None:
+            print(f"[PROFILE FORGOT] for {self.user_id} (Supabase not available)")
+            self.profile_text = ""
+            return f"Profile deleted for {self.user_id} (offline mode)"
+        
         try:
-            response = memory_manager.supabase.table('profiles').delete().eq('user_id', self.user_id).execute()
+            # Use user_profiles table
+            response = memory_manager.supabase.table('user_profiles').delete().eq('user_id', self.user_id).execute()
             self.profile_text = ""
             print(f"[PROFILE FORGOT] for {self.user_id}")
             return f"Profile deleted for {self.user_id}"
@@ -238,6 +313,7 @@ class Assistant(Agent):
 
             ## Communication Style
             - Speak in Urdu Language, no English word.
+            - Use users communication style, way of speaking, slangs, etc.
             - Speak in casual urdu words, instead of difficult literature urdu.
             - Give short responses. 
             - Embody the speaking style of a close friend to create the feeling of familiarity and closeness with the user.
