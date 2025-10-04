@@ -626,6 +626,80 @@ async def save_onboarding_response(user_text: str):
     except Exception as e:
         print(f"[ONBOARDING ERROR] Failed to save response: {e}")
 
+async def ask_next_onboarding_question(session):
+    """Ask the next onboarding question with acknowledgment."""
+    global user_state
+    
+    answered_questions = user_state.get("answered_questions", [])
+    
+    # Find next unanswered question
+    next_unanswered_index = None
+    for i in range(len(ONBOARDING_QUESTIONS)):
+        if i not in answered_questions:
+            next_unanswered_index = i
+            break
+    
+    if next_unanswered_index is not None:
+        question = ONBOARDING_QUESTIONS[next_unanswered_index]
+        user_state["current_question_index"] = next_unanswered_index
+        
+        # Get the previous response for acknowledgment
+        previous_response = ""
+        if len(user_state["user_responses"]) > 0:
+            previous_response = user_state["user_responses"][-1]
+        
+        # Generate smooth transition with acknowledgment using OpenAI
+        transition_prompt = f"""
+        Acknowledge the user's previous response briefly and smoothly transition to the next question.
+        
+        Previous response: "{previous_response}"
+        Next question: "{question}"
+        
+        Instructions:
+        1. Briefly acknowledge their previous answer (1-2 words in Urdu)
+        2. Smoothly transition to the next question
+        3. Ask the question naturally in Urdu
+        
+        Example transitions:
+        - If they said their name: "شکریہ! اب بتائیے..."
+        - If they said their work: "اچھا! اب..."
+        - If they said their interests: "بہت اچھا! آخر میں..."
+        
+        Respond in Urdu only, be natural and conversational.
+        """
+        
+        try:
+            response = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": "You are a helpful AI assistant that responds in Urdu. Be natural, conversational, and acknowledge previous responses smoothly."},
+                    {"role": "user", "content": transition_prompt}
+                ]
+            )
+            transition_text = response.choices[0].message.content.strip()
+        except Exception as e:
+            print(f"[ONBOARDING ERROR] Failed to generate transition message: {e}")
+            # Fallback to simple transitions
+            if previous_response:
+                if next_unanswered_index == 1:  # Second question
+                    transition_text = f"شکریہ! اب بتائیے، {question}"
+                elif next_unanswered_index == 2:  # Third question
+                    transition_text = f"اچھا! آخر میں، {question}"
+                else:
+                    transition_text = question
+            else:
+                transition_text = question
+        
+        print(f"[ONBOARDING] Asking question {next_unanswered_index + 1}/{len(ONBOARDING_QUESTIONS)} with acknowledgment")
+        
+        # Send transition message
+        await session.generate_reply(
+            instructions=f"Say this in Urdu: {transition_text}"
+        )
+    else:
+        print("[ONBOARDING] All questions answered, completing onboarding...")
+        await complete_onboarding(session)
+
 async def complete_onboarding(session):
     """Complete the onboarding process and extract user information."""
     global user_state
@@ -1182,10 +1256,10 @@ async def entrypoint(ctx: agents.JobContext):
         if answered_count == 0:
             print("[MAIN] Starting onboarding flow...")
             await run_onboarding(session)
-        # If some questions answered but not all, continue with next question
+        # If some questions answered but not all, ask next question
         elif answered_count < len(ONBOARDING_QUESTIONS):
             print(f"[MAIN] Continuing onboarding - {answered_count}/{len(ONBOARDING_QUESTIONS)} questions answered")
-            await continue_onboarding(session)
+            await ask_next_onboarding_question(session)
         # If all questions answered, complete onboarding
         else:
             print("[MAIN] Completing onboarding...")
