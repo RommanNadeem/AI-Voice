@@ -608,6 +608,94 @@ async def run_onboarding(turn_ctx):
     else:
         print("[ONBOARDING] All questions already answered")
 
+async def save_onboarding_response(user_text: str):
+    """Save onboarding response to memory, RAG, and user profile."""
+    try:
+        # Save to memory
+        memory_manager.store("ONBOARDING", f"response_{len(user_state['user_responses'])}", user_text)
+        print(f"[ONBOARDING] Saved to memory: {user_text[:30]}...")
+        
+        # Save to RAG (vector store)
+        add_to_vectorstore(user_text)
+        print(f"[ONBOARDING] Saved to RAG: {user_text[:30]}...")
+        
+        # Save to user profile
+        user_profile.smart_update(user_text)
+        print(f"[ONBOARDING] Updated user profile: {user_text[:30]}...")
+        
+    except Exception as e:
+        print(f"[ONBOARDING ERROR] Failed to save response: {e}")
+
+async def complete_onboarding(session):
+    """Complete the onboarding process and extract user information."""
+    global user_state
+    
+    print("[ONBOARDING] Completing onboarding process...")
+    
+    # Extract user information from all responses
+    all_responses = " ".join(user_state["user_responses"])
+    user_info = extract_user_info_to_json(all_responses)
+    
+    # Store user information for future use
+    user_name = user_info.get("name", "")
+    if user_name:
+        # Store name in memory for greeting
+        memory_manager.store("FACT", "user_name", user_name)
+        print(f"[ONBOARDING] Stored user name: {user_name}")
+    
+    # Mark onboarding as complete using Supabase flags
+    update_onboarding_flag("is_onboarding_done", True)
+    update_onboarding_flag("onboarding_questions", True)
+    update_onboarding_flag("is_new_user", False)
+    
+    # Generate personalized completion message using OpenAI
+    completion_prompt = f"""
+    Thank the user for completing the onboarding and greet them by name.
+    
+    User's name: {user_name if user_name else "User"}
+    User's responses: {all_responses}
+    
+    Instructions:
+    1. Thank them warmly for sharing their information
+    2. Greet them by name if available: "ہیلو {user_name}!" (if name exists)
+    3. Let them know you're ready to help them with their goals and interests
+    4. Say in Urdu: "اب میں آپ کو اپنے اہم ساتھی کے حوالے کر رہا ہوں"
+    5. Then output exactly: >>> HANDOVER_TO_CORE
+    
+    Respond in Urdu only, be warm and personal.
+    """
+    
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "You are a helpful AI assistant that responds in Urdu. Be warm, personal, and conversational."},
+                {"role": "user", "content": completion_prompt}
+            ]
+        )
+        completion_message = response.choices[0].message.content.strip()
+    except Exception as e:
+        print(f"[ONBOARDING ERROR] Failed to generate completion message: {e}")
+        completion_message = f"""
+        Thank the user for completing the onboarding and greet them by name.
+        
+        User's name: {user_name if user_name else "User"}
+        
+        Instructions:
+        1. Thank them warmly for sharing their information
+        2. Greet them by name if available: "ہیلو {user_name}!" (if name exists)
+        3. Let them know you're ready to help them with their goals and interests
+        4. Say in Urdu: "اب میں آپ کو اپنے اہم ساتھی کے حوالے کر رہا ہوں"
+        5. Then output exactly: >>> HANDOVER_TO_CORE
+        """
+    
+    # Send completion message
+    await session.generate_reply(
+        instructions=completion_message
+    )
+    
+    print("[ONBOARDING] Onboarding completed successfully!")
+
 async def continue_onboarding_with_turn_ctx(turn_ctx):
     """Continue onboarding with next question or complete if done using turn_ctx."""
     global user_state
@@ -984,8 +1072,22 @@ Your main goal is "to be like a close, platonic friend." Focus on creating safe,
             user_state["user_responses"].append(user_text)
             print(f"[ONBOARDING] Collected response {len(user_state['user_responses'])}: {user_text}")
             
-            # Continue onboarding with next question or complete
-            await continue_onboarding_with_turn_ctx(turn_ctx)
+            # Save onboarding response to memory, RAG, and user profile
+            await save_onboarding_response(user_text)
+            
+            # Mark current question as answered
+            current_index = user_state["current_question_index"]
+            answered_questions = user_state.get("answered_questions", [])
+            if current_index not in answered_questions:
+                answered_questions.append(current_index)
+                user_state["answered_questions"] = answered_questions
+                print(f"[ONBOARDING] Marked question {current_index + 1} as answered")
+            
+            # Update flags to trigger next question in main flow
+            update_onboarding_flag("current_question_index", current_index)
+            update_onboarding_flag("answered_questions", answered_questions)
+            update_onboarding_flag("user_responses", user_state["user_responses"])
+            
             return
         
         # Store user input in memory (only after onboarding)
@@ -1074,8 +1176,20 @@ async def entrypoint(ctx: agents.JobContext):
 
     # Check if user needs onboarding
     if user_state["is_new_user"] and not user_state["onboarding_questions"]:
-        print("[MAIN] Starting onboarding flow...")
-        await run_onboarding(session)
+        answered_count = len(user_state.get("answered_questions", []))
+        
+        # If no questions answered yet, start with story and first question
+        if answered_count == 0:
+            print("[MAIN] Starting onboarding flow...")
+            await run_onboarding(session)
+        # If some questions answered but not all, continue with next question
+        elif answered_count < len(ONBOARDING_QUESTIONS):
+            print(f"[MAIN] Continuing onboarding - {answered_count}/{len(ONBOARDING_QUESTIONS)} questions answered")
+            await continue_onboarding(session)
+        # If all questions answered, complete onboarding
+        else:
+            print("[MAIN] Completing onboarding...")
+            await complete_onboarding(session)
     else:
         # Send initial greeting with memory context (only after onboarding)
         if user_state["onboarding_questions"]:
