@@ -109,45 +109,6 @@ class UserProfile:
         else:
             print(f"[PROFILE EMPTY] No existing profile for {user_id}")
 
-    def should_update_profile(self, snippet: str):
-        """Determine if the snippet contains important information worth updating the profile."""
-        try:
-            resp = client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[
-                    {
-                        "role": "system",
-                        "content": """Analyze if this user input contains important information that should update their profile.
-Important information includes:
-- Personal facts (age, location, occupation, family)
-- Preferences (food, music, hobbies, activities)
-- Goals and aspirations
-- Values and beliefs
-- Personality traits
-- Relationships and social connections
-- Skills and abilities
-- Experiences and achievements
-
-NOT important:
-- Temporary moods or feelings
-- One-time events or experiences
-- Casual conversation
-- Questions or requests
-- Weather or current events
-- Greetings or small talk
-
-Respond with only "YES" or "NO" followed by a brief reason."""
-                    },
-                    {"role": "user", "content": snippet}
-                ]
-            )
-            decision = resp.choices[0].message.content.strip()
-            is_important = decision.upper().startswith("YES")
-            print(f"[PROFILE IMPORTANCE CHECK] {is_important}: {decision}")
-            return is_important
-        except Exception as e:
-            print(f"[PROFILE IMPORTANCE ERROR] {e}")
-            return False
 
     def update_profile(self, snippet: str):
         """Update profile using OpenAI summarization to build a comprehensive user profile."""
@@ -166,13 +127,17 @@ Create a well-structured profile that includes:
 - Personality traits
 - Values and beliefs
 - Relationships and social connections
+- Preferences and opinions
+- Experiences and stories
+- Current activities and projects
 
 Guidelines:
-- Keep it concise but comprehensive (max 8 lines)
-- Only include enduring facts, not temporary moods
+- Keep it concise but comprehensive (max 10 lines)
+- Include both enduring facts and current interests
 - If there are contradictions, resolve them by keeping the most recent information
 - Use clear, organized format
-- Focus on information that helps understand the user better"""
+- Capture as much useful information as possible to understand the user better
+- Do not hallucinate information and do not make up information which user has not shared"""
                     },
                     {"role": "system", "content": f"Current profile:\n{self.profile_text}"},
                     {"role": "user", "content": f"New information to incorporate:\n{snippet}"}
@@ -187,13 +152,22 @@ Guidelines:
         return self.profile_text
 
     def smart_update(self, snippet: str):
-        """Intelligently update profile only if the snippet contains important information."""
-        # Check if information is important enough to update profile
-        if not self.should_update_profile(snippet):
-            print(f"[PROFILE SKIP] Not important enough: {snippet[:50]}...")
+        """Simple profile update - store most user input directly."""
+        # Skip only very basic greetings and questions
+        skip_patterns = [
+            "hello", "hi", "hey", "سلام", "ہیلو", "کیا حال ہے", "کیا ہال ہے",
+            "what", "how", "when", "where", "why", "کیا", "کیسے", "کب", "کہاں", "کیوں"
+        ]
+        
+        snippet_lower = snippet.lower()
+        should_skip = any(pattern in snippet_lower for pattern in skip_patterns)
+        
+        if should_skip and len(snippet.split()) <= 3:
+            print(f"[PROFILE SKIP] Basic greeting/question: {snippet[:50]}...")
             return self.profile_text
         
-        # Update profile with AI summarization
+        # Update profile with AI summarization for most input
+        print(f"[PROFILE UPDATE] Processing: {snippet[:50]}...")
         return self.update_profile(snippet)
 
     def get(self):
@@ -329,10 +303,15 @@ class Assistant(Agent):
         """Handle user input when their turn is completed."""
         user_text = new_message.text_content
         print(f"[USER INPUT] {user_text}")
+        print(f"[USER TURN COMPLETED] Handler called successfully!")
         
         # Store user input in memory
         memory_manager.store("FACT", "user_input", user_text)
         add_to_vectorstore(user_text)
+        
+        # Update user profile
+        print(f"[PROFILE UPDATE] Starting profile update for: {user_text[:50]}...")
+        user_profile.smart_update(user_text)
 
 # ---------------------------
 # Entrypoint
