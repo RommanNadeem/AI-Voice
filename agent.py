@@ -416,7 +416,7 @@ JSON_TEMPLATE = {
 # Onboarding Flag Management
 # ---------------------------
 def get_onboarding_flags():
-    """Get onboarding flags from Supabase profiles table for current user."""
+    """Get onboarding flags from Supabase auth user metadata for current user."""
     try:
         if memory_manager.supabase is None:
             print("[FLAGS] Supabase not available, using default flags")
@@ -426,14 +426,11 @@ def get_onboarding_flags():
                 "onboarding_questions": False
             }
         
-        user_id = get_user_id()
-        
-        # Try to get flags from profiles table (we'll add user_metadata column)
+        # Try to get current user and their metadata
         try:
-            response = memory_manager.supabase.table('profiles').select('user_metadata').eq('id', user_id).execute()
-            
-            if response.data and response.data[0].get('user_metadata'):
-                metadata = response.data[0]['user_metadata']
+            user_response = memory_manager.supabase.auth.get_user()
+            if user_response.user and user_response.user.user_metadata:
+                metadata = user_response.user.user_metadata
                 flags = metadata.get('data', {})
                 
                 # Ensure all required flags exist
@@ -441,10 +438,10 @@ def get_onboarding_flags():
                 flags.setdefault('is_onboarding_done', False)
                 flags.setdefault('onboarding_questions', False)
                 
-                print(f"[FLAGS] Loaded from user metadata: {flags}")
+                print(f"[FLAGS] Loaded from auth user metadata: {flags}")
                 return flags
         except Exception as e:
-            print(f"[FLAGS] user_metadata column not found, using defaults: {e}")
+            print(f"[FLAGS] Auth user metadata access failed, using defaults: {e}")
         
         # Fallback: return default flags
         default_flags = {
@@ -464,26 +461,26 @@ def get_onboarding_flags():
         }
 
 def set_onboarding_flags(flags):
-    """Set onboarding flags in Supabase profiles table for current user."""
+    """Set onboarding flags in Supabase auth user metadata for current user."""
     try:
         if memory_manager.supabase is None:
             print("[FLAGS] Supabase not available, cannot save flags")
             return False
         
-        user_id = get_user_id()
-        
-        # Try to update flags in profiles table user_metadata
+        # Try to update user metadata through auth API
         try:
-            response = memory_manager.supabase.table('profiles').update({
-                'user_metadata': {
-                    'data': flags
-                }
-            }).eq('id', user_id).execute()
+            response = memory_manager.supabase.auth.update_user({
+                'data': flags
+            })
             
-            print(f"[FLAGS] Saved to user metadata: {flags}")
-            return True
+            if response.user:
+                print(f"[FLAGS] Saved to auth user metadata: {flags}")
+                return True
+            else:
+                print(f"[FLAGS] Failed to update user metadata")
+                return False
         except Exception as e:
-            print(f"[FLAGS] user_metadata column not found, cannot save: {e}")
+            print(f"[FLAGS] Auth user metadata update failed: {e}")
             return False
         
     except Exception as e:

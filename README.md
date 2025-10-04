@@ -137,13 +137,32 @@ CREATE TABLE user_profiles (
 );
 ```
 
-### Profiles Table (with User Metadata)
+### Auth Users Metadata
+```python
+# The auth.users table contains user metadata accessible through Supabase Auth API
+# Structure: user_metadata.data.{is_new_user, is_onboarding_done, onboarding_questions}
+
+# Get user metadata:
+user_response = supabase.auth.get_user()
+if user_response.user and user_response.user.user_metadata:
+    flags = user_response.user.user_metadata.get('data', {})
+
+# Update user metadata:
+response = supabase.auth.update_user({
+    'data': {
+        'is_new_user': True,
+        'is_onboarding_done': False,
+        'onboarding_questions': False
+    }
+})
+```
+
+### Profiles Table
 ```sql
 CREATE TABLE profiles (
     id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
     email TEXT UNIQUE,
     is_first_login BOOLEAN DEFAULT true,
-    user_metadata JSONB DEFAULT '{"data": {"is_new_user": true, "is_onboarding_done": false, "onboarding_questions": false}}',
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 ```
