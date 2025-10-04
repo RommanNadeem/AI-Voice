@@ -626,14 +626,46 @@ async def continue_onboarding(session):
         all_responses = " ".join(user_state["user_responses"])
         user_info = extract_user_info_to_json(all_responses)
         
+        # Store user information for future use
+        user_name = user_info.get("name", "")
+        if user_name:
+            # Store name in memory for greeting
+            memory_manager.store("FACT", "user_name", user_name)
+            print(f"[ONBOARDING] Stored user name: {user_name}")
+        
         # Mark onboarding as complete using Supabase flags
         update_onboarding_flag("is_onboarding_done", True)
         update_onboarding_flag("onboarding_questions", True)
         update_onboarding_flag("is_new_user", False)
         
-        # Announce handover
+        # Create personalized completion message
+        if user_name:
+            completion_message = f"""
+            Thank the user for completing the onboarding and greet them by name.
+            
+            User's name: {user_name}
+            
+            Instructions:
+            1. Thank them warmly for sharing their information
+            2. Greet them by name: "ہیلو {user_name}!"
+            3. Let them know you're ready to help them with their goals and interests
+            4. Say in Urdu: "اب میں آپ کو اپنے اہم ساتھی کے حوالے کر رہا ہوں"
+            5. Then output exactly: >>> HANDOVER_TO_CORE
+            """
+        else:
+            completion_message = """
+            Thank the user for completing the onboarding.
+            
+            Instructions:
+            1. Thank them warmly for sharing their information
+            2. Let them know you're ready to help them with their goals and interests
+            3. Say in Urdu: "اب میں آپ کو اپنے اہم ساتھی کے حوالے کر رہا ہوں"
+            4. Then output exactly: >>> HANDOVER_TO_CORE
+            """
+        
+        # Announce handover with personalized message
         await session.generate_reply(
-            instructions="Say in Urdu: 'اب میں آپ کو اپنے اہم ساتھی کے حوالے کر رہا ہوں' and then output exactly: >>> HANDOVER_TO_CORE"
+            instructions=completion_message
         )
         
         print("[ONBOARDING] Onboarding completed successfully!")
@@ -649,10 +681,34 @@ async def continue_onboarding(session):
     if next_unanswered_index is not None:
         question = ONBOARDING_QUESTIONS[next_unanswered_index]
         user_state["current_question_index"] = next_unanswered_index
-        print(f"[ONBOARDING] Asking question {next_unanswered_index + 1}/{len(ONBOARDING_QUESTIONS)}: {question}")
+        
+        # Get the previous response for acknowledgment
+        previous_response = ""
+        if len(user_state["user_responses"]) > 0:
+            previous_response = user_state["user_responses"][-1]
+        
+        # Create smooth transition with acknowledgment
+        transition_instructions = f"""
+        Acknowledge the user's previous response briefly and smoothly transition to the next question.
+        
+        Previous response: "{previous_response}"
+        Next question: "{question}"
+        
+        Instructions:
+        1. Briefly acknowledge their previous answer (1-2 words)
+        2. Smoothly transition to the next question
+        3. Ask the question naturally in Urdu
+        
+        Example transitions:
+        - If they said their name: "شکریہ! اب بتائیے..."
+        - If they said their work: "اچھا! اب..."
+        - If they said their interests: "بہت اچھا! آخر میں..."
+        """
+        
+        print(f"[ONBOARDING] Asking question {next_unanswered_index + 1}/{len(ONBOARDING_QUESTIONS)} with acknowledgment")
         
         await session.generate_reply(
-            instructions=f"Ask this question in Urdu: {question}"
+            instructions=transition_instructions
         )
     else:
         print("[ONBOARDING] All questions answered, completing onboarding...")
@@ -888,6 +944,9 @@ async def entrypoint(ctx: agents.JobContext):
         past_memories = memory_manager.retrieve_all()
         rag_context = retrieve_from_vectorstore(user_text or "recent", k=2)
         user_profile_text = user_profile.get()
+        
+        # Get user name for personalized greeting
+        user_name = memory_manager.retrieve("FACT", "user_name")
 
         base_instructions = assistant.instructions
         extra_context = f"""
@@ -897,8 +956,38 @@ async def entrypoint(ctx: agents.JobContext):
         """
 
         if greet:
+            if user_name:
+                greeting_instructions = f"""
+                Greet the user warmly in Urdu by their name.
+                
+                User's name: {user_name}
+                
+                Instructions:
+                1. Greet them by name: "ہیلو {user_name}!"
+                2. Welcome them warmly
+                3. Let them know you're ready to help them
+                4. Use their profile information to personalize the greeting
+                
+                {base_instructions}
+                
+                {extra_context}
+                """
+            else:
+                greeting_instructions = f"""
+                Greet the user warmly in Urdu.
+                
+                Instructions:
+                1. Welcome them warmly
+                2. Let them know you're ready to help them
+                3. Use their profile information to personalize the greeting
+                
+                {base_instructions}
+                
+                {extra_context}
+                """
+            
             await session.generate_reply(
-                instructions=f"Greet the user warmly in Urdu.\n\n{base_instructions}\n\n{extra_context}"
+                instructions=greeting_instructions
             )
         else:
             await session.generate_reply(
