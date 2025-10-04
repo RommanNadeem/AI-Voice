@@ -608,7 +608,142 @@ async def run_onboarding(turn_ctx):
     else:
         print("[ONBOARDING] All questions already answered")
 
-async def continue_onboarding(turn_ctx):
+async def continue_onboarding_with_turn_ctx(turn_ctx):
+    """Continue onboarding with next question or complete if done using turn_ctx."""
+    global user_state
+    
+    current_index = user_state["current_question_index"]
+    
+    # Add current question to answered questions if not already there
+    answered_questions = user_state.get("answered_questions", [])
+    if current_index not in answered_questions:
+        answered_questions.append(current_index)
+        user_state["answered_questions"] = answered_questions
+        print(f"[ONBOARDING] Marked question {current_index + 1} as answered")
+    
+    # Check if we have answered all questions
+    if len(answered_questions) >= len(ONBOARDING_QUESTIONS):
+        all_responses = " ".join(user_state["user_responses"])
+        user_info = extract_user_info_to_json(all_responses)
+        
+        # Store user information for future use
+        user_name = user_info.get("name", "")
+        if user_name:
+            # Store name in memory for greeting
+            memory_manager.store("FACT", "user_name", user_name)
+            print(f"[ONBOARDING] Stored user name: {user_name}")
+        
+        # Mark onboarding as complete using Supabase flags
+        update_onboarding_flag("is_onboarding_done", True)
+        update_onboarding_flag("onboarding_questions", True)
+        update_onboarding_flag("is_new_user", False)
+        
+        # Generate personalized completion message using OpenAI
+        completion_prompt = f"""
+        Thank the user for completing the onboarding and greet them by name.
+        
+        User's name: {user_name if user_name else "User"}
+        User's responses: {all_responses}
+        
+        Instructions:
+        1. Thank them warmly for sharing their information
+        2. Greet them by name if available: "ہیلو {user_name}!" (if name exists)
+        3. Let them know you're ready to help them with their goals and interests
+        4. Say in Urdu: "اب میں آپ کو اپنے اہم ساتھی کے حوالے کر رہا ہوں"
+        5. Then output exactly: >>> HANDOVER_TO_CORE
+        
+        Respond in Urdu only, be warm and personal.
+        """
+        
+        try:
+            response = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": "You are a helpful AI assistant that responds in Urdu. Be warm, personal, and conversational."},
+                    {"role": "user", "content": completion_prompt}
+                ]
+            )
+            completion_text = response.choices[0].message.content.strip()
+        except Exception as e:
+            print(f"[ONBOARDING ERROR] Failed to generate completion message: {e}")
+            completion_text = f"ہیلو {user_name}! آپ کا شکریہ۔ اب میں آپ کو اپنے اہم ساتھی کے حوالے کر رہا ہوں۔ >>> HANDOVER_TO_CORE"
+        
+        # Send completion message
+        await turn_ctx.send_message(completion_text)
+        
+        print("[ONBOARDING] Onboarding completed successfully!")
+        return True
+    
+    # Find next unanswered question
+    next_unanswered_index = None
+    for i in range(len(ONBOARDING_QUESTIONS)):
+        if i not in answered_questions:
+            next_unanswered_index = i
+            break
+    
+    if next_unanswered_index is not None:
+        question = ONBOARDING_QUESTIONS[next_unanswered_index]
+        user_state["current_question_index"] = next_unanswered_index
+        
+        # Get the previous response for acknowledgment
+        previous_response = ""
+        if len(user_state["user_responses"]) > 0:
+            previous_response = user_state["user_responses"][-1]
+        
+        # Generate smooth transition with acknowledgment using OpenAI
+        transition_prompt = f"""
+        Acknowledge the user's previous response briefly and smoothly transition to the next question.
+        
+        Previous response: "{previous_response}"
+        Next question: "{question}"
+        
+        Instructions:
+        1. Briefly acknowledge their previous answer (1-2 words in Urdu)
+        2. Smoothly transition to the next question
+        3. Ask the question naturally in Urdu
+        
+        Example transitions:
+        - If they said their name: "شکریہ! اب بتائیے..."
+        - If they said their work: "اچھا! اب..."
+        - If they said their interests: "بہت اچھا! آخر میں..."
+        
+        Respond in Urdu only, be natural and conversational.
+        """
+        
+        try:
+            response = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": "You are a helpful AI assistant that responds in Urdu. Be natural, conversational, and acknowledge previous responses smoothly."},
+                    {"role": "user", "content": transition_prompt}
+                ]
+            )
+            transition_text = response.choices[0].message.content.strip()
+        except Exception as e:
+            print(f"[ONBOARDING ERROR] Failed to generate transition message: {e}")
+            # Fallback to simple transitions
+            if previous_response:
+                if next_unanswered_index == 1:  # Second question
+                    transition_text = f"شکریہ! اب بتائیے، {question}"
+                elif next_unanswered_index == 2:  # Third question
+                    transition_text = f"اچھا! آخر میں، {question}"
+                else:
+                    transition_text = question
+            else:
+                transition_text = question
+        
+        print(f"[ONBOARDING] Asking question {next_unanswered_index + 1}/{len(ONBOARDING_QUESTIONS)} with acknowledgment")
+        
+        # Send transition message
+        await turn_ctx.send_message(transition_text)
+    else:
+        print("[ONBOARDING] All questions answered, completing onboarding...")
+        # This shouldn't happen due to the check above, but just in case
+        await continue_onboarding_with_turn_ctx(turn_ctx)
+    
+    return False
+
+async def continue_onboarding(session):
     """Continue onboarding with next question or complete if done."""
     global user_state
     
@@ -664,7 +799,7 @@ async def continue_onboarding(turn_ctx):
             """
         
         # Announce handover with personalized message
-        await turn_ctx.generate_reply(
+        await session.generate_reply(
             instructions=completion_message
         )
         
@@ -707,13 +842,13 @@ async def continue_onboarding(turn_ctx):
         
         print(f"[ONBOARDING] Asking question {next_unanswered_index + 1}/{len(ONBOARDING_QUESTIONS)} with acknowledgment")
         
-        await turn_ctx.generate_reply(
+        await session.generate_reply(
             instructions=transition_instructions
         )
     else:
         print("[ONBOARDING] All questions answered, completing onboarding...")
         # This shouldn't happen due to the check above, but just in case
-        await continue_onboarding(turn_ctx)
+        await continue_onboarding(session)
     
     return False
 
@@ -850,7 +985,7 @@ Your main goal is "to be like a close, platonic friend." Focus on creating safe,
             print(f"[ONBOARDING] Collected response {len(user_state['user_responses'])}: {user_text}")
             
             # Continue onboarding with next question or complete
-            await continue_onboarding(turn_ctx)
+            await continue_onboarding_with_turn_ctx(turn_ctx)
             return
         
         # Store user input in memory (only after onboarding)
