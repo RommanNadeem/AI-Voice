@@ -730,8 +730,7 @@ async def complete_onboarding(session):
         1. Thank them warmly for sharing their information
         2. Greet them by name: "ہیلو {user_name}!"
         3. Let them know you're ready to help them with their goals and interests
-        4. Say in Urdu: "اب میں آپ کو اپنے اہم ساتھی کے حوالے کر رہا ہوں"
-        5. Then output exactly: >>> HANDOVER_TO_CORE
+        4. Say in Urdu: "اب میں آپ کی مدد کے لیے تیار ہوں"
         """
     else:
         completion_message = """
@@ -740,8 +739,7 @@ async def complete_onboarding(session):
         Instructions:
         1. Thank them warmly for sharing their information
         2. Let them know you're ready to help them with their goals and interests
-        3. Say in Urdu: "اب میں آپ کو اپنے اہم ساتھی کے حوالے کر رہا ہوں"
-        4. Then output exactly: >>> HANDOVER_TO_CORE
+        3. Say in Urdu: "اب میں آپ کی مدد کے لیے تیار ہوں"
         """
     
     # Send completion message
@@ -792,8 +790,7 @@ async def continue_onboarding_with_turn_ctx(turn_ctx):
         1. Thank them warmly for sharing their information
         2. Greet them by name if available: "ہیلو {user_name}!" (if name exists)
         3. Let them know you're ready to help them with their goals and interests
-        4. Say in Urdu: "اب میں آپ کو اپنے اہم ساتھی کے حوالے کر رہا ہوں"
-        5. Then output exactly: >>> HANDOVER_TO_CORE
+        4. Say in Urdu: "اب میں آپ کی مدد کے لیے تیار ہوں"
         
         Respond in Urdu only, be warm and personal.
         """
@@ -809,7 +806,7 @@ async def continue_onboarding_with_turn_ctx(turn_ctx):
             completion_text = response.choices[0].message.content.strip()
         except Exception as e:
             print(f"[ONBOARDING ERROR] Failed to generate completion message: {e}")
-            completion_text = f"ہیلو {user_name}! آپ کا شکریہ۔ اب میں آپ کو اپنے اہم ساتھی کے حوالے کر رہا ہوں۔ >>> HANDOVER_TO_CORE"
+            completion_text = f"ہیلو {user_name}! آپ کا شکریہ۔ اب میں آپ کی مدد کے لیے تیار ہوں۔"
         
         # Send completion message
         await turn_ctx.send_message(completion_text)
@@ -927,8 +924,7 @@ async def continue_onboarding(session):
             1. Thank them warmly for sharing their information
             2. Greet them by name: "ہیلو {user_name}!"
             3. Let them know you're ready to help them with their goals and interests
-            4. Say in Urdu: "اب میں آپ کو اپنے اہم ساتھی کے حوالے کر رہا ہوں"
-            5. Then output exactly: >>> HANDOVER_TO_CORE
+            4. Say in Urdu: "اب میں آپ کی مدد کے لیے تیار ہوں"
             """
         else:
             completion_message = """
@@ -937,8 +933,7 @@ async def continue_onboarding(session):
             Instructions:
             1. Thank them warmly for sharing their information
             2. Let them know you're ready to help them with their goals and interests
-            3. Say in Urdu: "اب میں آپ کو اپنے اہم ساتھی کے حوالے کر رہا ہوں"
-            4. Then output exactly: >>> HANDOVER_TO_CORE
+            3. Say in Urdu: "اب میں آپ کی مدد کے لیے تیار ہوں"
             """
         
         # Announce handover with personalized message
