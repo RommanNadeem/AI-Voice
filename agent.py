@@ -609,22 +609,40 @@ async def run_onboarding(turn_ctx):
         print("[ONBOARDING] All questions already answered")
 
 async def save_onboarding_response(user_text: str):
-    """Save onboarding response to memory, RAG, and user profile."""
+    """Save onboarding response temporarily - defer heavy processing until completion."""
     try:
-        # Save to memory
-        memory_manager.store("ONBOARDING", f"response_{len(user_state['user_responses'])}", user_text)
-        print(f"[ONBOARDING] Saved to memory: {user_text[:30]}...")
+        # Only store temporarily during onboarding - no heavy processing
+        print(f"[ONBOARDING] Temporarily stored response: {user_text[:30]}...")
         
-        # Save to RAG (vector store)
-        add_to_vectorstore(user_text)
-        print(f"[ONBOARDING] Saved to RAG: {user_text[:30]}...")
-        
-        # Save to user profile
-        user_profile.smart_update(user_text)
-        print(f"[ONBOARDING] Updated user profile: {user_text[:30]}...")
+        # Heavy processing will be done in complete_onboarding()
         
     except Exception as e:
-        print(f"[ONBOARDING ERROR] Failed to save response: {e}")
+        print(f"[ONBOARDING ERROR] Failed to store response: {e}")
+
+async def process_all_onboarding_responses():
+    """Process all onboarding responses at once after completion."""
+    global user_state
+    
+    try:
+        print("[ONBOARDING] Processing all responses for storage...")
+        
+        # Process all responses together
+        all_responses = " ".join(user_state["user_responses"])
+        
+        # Save to memory (bulk)
+        for i, response in enumerate(user_state["user_responses"]):
+            memory_manager.store("ONBOARDING", f"response_{i+1}", response)
+        
+        # Save to RAG (bulk)
+        add_to_vectorstore(all_responses)
+        
+        # Save to user profile (bulk)
+        user_profile.smart_update(all_responses)
+        
+        print(f"[ONBOARDING] Bulk processing completed for {len(user_state['user_responses'])} responses")
+        
+    except Exception as e:
+        print(f"[ONBOARDING ERROR] Failed to process responses: {e}")
 
 async def ask_next_onboarding_question(session):
     """Ask the next onboarding question with acknowledgment."""
@@ -674,6 +692,9 @@ async def complete_onboarding(session):
     global user_state
     
     print("[ONBOARDING] Completing onboarding process...")
+    
+    # Process all onboarding responses for storage (bulk processing)
+    await process_all_onboarding_responses()
     
     # Extract user information from all responses
     all_responses = " ".join(user_state["user_responses"])
@@ -1099,7 +1120,7 @@ Your main goal is "to be like a close, platonic friend." Focus on creating safe,
             user_state["user_responses"].append(user_text)
             print(f"[ONBOARDING] Collected response {len(user_state['user_responses'])}: {user_text}")
             
-            # Save onboarding response to memory, RAG, and user profile
+            # Light processing only - defer heavy operations
             await save_onboarding_response(user_text)
             
             # Mark current question as answered
