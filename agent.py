@@ -387,6 +387,144 @@ Guidelines:
 user_profile = UserProfile()
 
 # ---------------------------
+# Onboarding Content
+# ---------------------------
+WELCOME_STORY = """
+آپ کا خیر مقدم! میں آپ کو ایک چھوٹی سی کہانی سناتا ہوں۔
+
+ایک بار ایک گاؤں میں دو دوست رہتے تھے - علی اور حسن۔ وہ بچپن سے ساتھ کھیلتے، پڑھتے اور بڑے ہوتے رہے۔ علی کو گاڑیاں چلانے کا شوق تھا، جبکہ حسن کو کمپیوٹر میں دلچسپی تھی۔
+
+سالوں بعد، علی ایک اچھا ڈرائیور بن گیا اور حسن نے سافٹ ویئر انجینئرنگ سیکھی۔ دونوں نے اپنے خوابوں کو حقیقت بنایا۔
+
+یہ کہانی اس لیے سنائی کہ میں چاہتا ہوں کہ ہم بھی دوست بنیں۔ آپ کے خواب، خواہشات اور دلچسپیاں جاننا چاہتا ہوں تاکہ میں آپ کی بہتر مدد کر سکوں۔
+"""
+
+ONBOARDING_QUESTIONS = [
+    "آپ کا نام کیا ہے؟",
+    "آپ کیا کام کرتے ہیں یا کیا پڑھتے ہیں؟",
+    "آپ کو کیا کرنے کا شوق ہے؟ کوئی خاص ہابی یا دلچسپی؟"
+]
+
+# JSON extraction template
+JSON_TEMPLATE = {
+    "name": "",
+    "occupation": "",
+    "interests": ""
+}
+
+# ---------------------------
+# State Management
+# ---------------------------
+user_state = {
+    "is_new_user": True,
+    "is_onboarding_done": False,
+    "onboarding_questions": False,
+    "current_question_index": 0,
+    "user_responses": []
+}
+
+# ---------------------------
+# Onboarding Functions
+# ---------------------------
+def extract_user_info_to_json(user_responses: str):
+    """Extract name, occupation, and interests from user responses and return JSON."""
+    try:
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": """Extract the following information from the user's responses and return ONLY a JSON object:
+                    - name: User's name
+                    - occupation: What they do for work/study
+                    - interests: Their hobbies/interests
+                    
+                    Return only valid JSON, no other text."""
+                },
+                {"role": "user", "content": user_responses}
+            ]
+        )
+        
+        json_str = resp.choices[0].message.content.strip()
+        # Try to parse JSON to validate
+        import json
+        user_info = json.loads(json_str)
+        
+        # Store in memory
+        memory_manager.store("FACT", "user_name", user_info.get("name", ""))
+        memory_manager.store("FACT", "user_occupation", user_info.get("occupation", ""))
+        memory_manager.store("INTEREST", "user_interests", user_info.get("interests", ""))
+        
+        # Update user profile
+        profile_text = f"Name: {user_info.get('name', '')}, Occupation: {user_info.get('occupation', '')}, Interests: {user_info.get('interests', '')}"
+        user_profile.smart_update(profile_text)
+        
+        print(f"[ONBOARDING COMPLETE] User info extracted: {user_info}")
+        return user_info
+        
+    except Exception as e:
+        print(f"[ONBOARDING ERROR] Failed to extract user info: {e}")
+        return JSON_TEMPLATE
+
+async def run_onboarding(session):
+    """Run the onboarding flow: story + questions."""
+    global user_state
+    
+    print("[ONBOARDING] Starting onboarding flow...")
+    
+    # Tell the welcome story
+    await session.generate_reply(
+        instructions=f"Tell the user this welcome story in Urdu: {WELCOME_STORY}"
+    )
+    
+    # Ask the first question
+    if len(user_state["user_responses"]) == 0:
+        question = ONBOARDING_QUESTIONS[0]
+        user_state["current_question_index"] = 0
+        print(f"[ONBOARDING] Asking question 1/{len(ONBOARDING_QUESTIONS)}: {question}")
+        
+        await session.generate_reply(
+            instructions=f"Ask this question in Urdu: {question}"
+        )
+
+async def continue_onboarding(session):
+    """Continue onboarding with next question or complete if done."""
+    global user_state
+    
+    current_index = user_state["current_question_index"]
+    
+    # If we have responses for all questions, complete onboarding
+    if len(user_state["user_responses"]) >= len(ONBOARDING_QUESTIONS):
+        all_responses = " ".join(user_state["user_responses"])
+        user_info = extract_user_info_to_json(all_responses)
+        
+        # Mark onboarding as complete
+        user_state["is_onboarding_done"] = True
+        user_state["onboarding_questions"] = True
+        user_state["is_new_user"] = False
+        
+        # Announce handover
+        await session.generate_reply(
+            instructions="Say in Urdu: 'اب میں آپ کو اپنے اہم ساتھی کے حوالے کر رہا ہوں' and then output exactly: >>> HANDOVER_TO_CORE"
+        )
+        
+        print("[ONBOARDING] Onboarding completed successfully!")
+        return True
+    
+    # Ask next question
+    next_index = current_index + 1
+    if next_index < len(ONBOARDING_QUESTIONS):
+        question = ONBOARDING_QUESTIONS[next_index]
+        user_state["current_question_index"] = next_index
+        print(f"[ONBOARDING] Asking question {next_index + 1}/{len(ONBOARDING_QUESTIONS)}: {question}")
+        
+        await session.generate_reply(
+            instructions=f"Ask this question in Urdu: {question}"
+        )
+    
+    return False
+
+# ---------------------------
 # FAISS Vector Store (RAG)
 # ---------------------------
 embedding_dim = 1536
@@ -564,17 +702,29 @@ We close with kind, genuine statements that feel natural and conversational, avo
     # Override the user turn completed hook to capture user input
     async def on_user_turn_completed(self, turn_ctx, new_message):
         """Handle user input when their turn is completed."""
+        global user_state
+        
         user_text = new_message.text_content
         print(f"[USER INPUT] {user_text}")
         print(f"[USER TURN COMPLETED] Handler called successfully!")
         
-        # Store user input in memory
-        memory_manager.store("FACT", "user_input", user_text)
-        add_to_vectorstore(user_text)
+        # If we're in onboarding mode, collect the response
+        if user_state["is_new_user"] and not user_state["onboarding_questions"]:
+            user_state["user_responses"].append(user_text)
+            print(f"[ONBOARDING] Collected response {len(user_state['user_responses'])}: {user_text}")
+            
+            # Continue onboarding with next question or complete
+            await continue_onboarding(turn_ctx.session)
+            return
         
-        # Update user profile
-        print(f"[PROFILE UPDATE] Starting profile update for: {user_text[:50]}...")
-        user_profile.smart_update(user_text)
+        # Store user input in memory (only after onboarding)
+        if user_state["onboarding_questions"]:
+            memory_manager.store("FACT", "user_input", user_text)
+            add_to_vectorstore(user_text)
+            
+            # Update user profile
+            print(f"[PROFILE UPDATE] Starting profile update for: {user_text[:50]}...")
+            user_profile.smart_update(user_text)
 
 # ---------------------------
 # Entrypoint
@@ -616,10 +766,16 @@ async def entrypoint(ctx: agents.JobContext):
         else:
             await session.generate_reply(
                 instructions=f"{base_instructions}\n\nUse this context:\n{extra_context}\nUser said: {user_text}"
-    )
+            )
 
-    # Send initial greeting with memory context
-    await generate_with_memory(greet=True)
+    # Check if user needs onboarding
+    if user_state["is_new_user"] and not user_state["onboarding_questions"]:
+        print("[MAIN] Starting onboarding flow...")
+        await run_onboarding(session)
+    else:
+        # Send initial greeting with memory context (only after onboarding)
+        if user_state["onboarding_questions"]:
+            await generate_with_memory(greet=True)
 
 if __name__ == "__main__":
     agents.cli.run_app(agents.WorkerOptions(
