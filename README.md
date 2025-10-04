@@ -1,10 +1,9 @@
 # AI Voice Project
 
-A comprehensive multi-agent voice AI system with Supabase integration, user profiling, and intelligent onboarding capabilities.
+A comprehensive voice AI agent system with Supabase integration, user profiling, and intelligent onboarding capabilities.
 
 ## 🚀 Features
 
-- **Multi-Agent System**: Coordinated Onboarding Agent → Core Agent handover
 - **Voice AI Agent**: LiveKit-based voice interaction with OpenAI GPT-4
 - **User Profiling**: Intelligent user profile building and management
 - **Onboarding System**: Structured user onboarding with Urdu storytelling
@@ -12,30 +11,24 @@ A comprehensive multi-agent voice AI system with Supabase integration, user prof
 - **Memory Management**: Persistent memory storage with FAISS vector search
 - **Text-to-Speech**: Custom TTS integration with Uplift API
 
-## 🤖 Multi-Agent Architecture
+## 🤖 Agent Architecture
 
-### 1. Onboarding Agent (`Onboarding.py`)
+### 1. Core Agent (`agent.py`)
+- **Purpose**: Main AI companion with full functionality
+- **Features**:
+  - Long-term memory and reflection
+  - Context-aware conversations
+  - User profile management
+  - Urdu language support
+  - RAG (Retrieval-Augmented Generation) system
+
+### 2. Onboarding Agent (`Onboarding.py`)
 - **Purpose**: Collect essential user information (name, occupation, interests)
 - **Features**: 
   - Warm Urdu storytelling welcome
   - Structured question flow
   - JSON data extraction
-  - Automatic handover signal: `>>> HANDOVER_TO_CORE`
-
-### 2. Core Agent (`agent.py`)
-- **Purpose**: Main AI companion after onboarding
-- **Features**:
-  - Personalized interactions using onboarding data
-  - Long-term memory and reflection
-  - Context-aware conversations
-  - User profile management
-
-### 3. Multi-Agent Coordinator (`multi_agent_coordinator.py`)
-- **Purpose**: Manages handover between agents
-- **Features**:
-  - Automatic agent switching
-  - Data persistence across agents
-  - Status monitoring
+  - Focused conversation flow
 
 ## 📁 Project Structure
 
@@ -43,8 +36,6 @@ A comprehensive multi-agent voice AI system with Supabase integration, user prof
 ai_voice/
 ├── agent.py                    # Core voice agent with Supabase integration
 ├── Onboarding.py              # Onboarding agent with Urdu storytelling
-├── multi_agent_coordinator.py # Multi-agent coordination system
-├── launcher.py                # Agent launcher script
 ├── uplift_tts.py              # Text-to-speech integration
 ├── requirements.txt           # Full dependencies
 └── README.md                  # This file
@@ -81,54 +72,31 @@ LIVEKIT_API_KEY=your_livekit_api_key_here
 LIVEKIT_API_SECRET=your_livekit_api_secret_here
 ```
 
-### 3. Run the Multi-Agent System
+### 3. Run the Agents
 
-**Recommended: Use the Multi-Agent Coordinator**
+**Core Agent (Main Companion):**
 ```bash
-python launcher.py coordinator
+python agent.py dev
 ```
 
-**Alternative: Run Individual Agents**
+**Onboarding Agent:**
 ```bash
-# Onboarding Agent only
-python launcher.py onboarding
-
-# Core Agent only  
-python launcher.py core
+python Onboarding.py dev
 ```
-
-### 4. Agent Flow
-
-1. **New User**: Onboarding Agent starts → collects info → signals handover
-2. **Handover**: `>>> HANDOVER_TO_CORE` signal triggers Core Agent
-3. **Core Agent**: Uses onboarding data for personalized interactions
-4. **Returning User**: Core Agent starts directly (skips onboarding)
 
 ## 🎯 Core Components
-
-### Multi-Agent Coordinator (`multi_agent_coordinator.py`)
-- **Agent Management**: Handles handover between Onboarding and Core agents
-- **Status Monitoring**: Checks onboarding completion status
-- **Data Persistence**: Ensures seamless data flow between agents
-
-### Onboarding Agent (`Onboarding.py`)
-- **Welcome Story**: Engaging Urdu storytelling
-- **Essential Questions**: Structured user information gathering
-- **JSON Extraction**: Automatic data extraction (name, occupation, interests)
-- **Handover Signal**: `>>> HANDOVER_TO_CORE` when complete
-- **User Restrictions**: Focused conversation flow
 
 ### Core Agent (`agent.py`)
 - **MemoryManager**: Supabase-based memory storage and retrieval
 - **UserProfile**: AI-powered user profile building
 - **Assistant**: LiveKit voice agent with Urdu language support
 - **RAG System**: FAISS vector search for contextual responses
-- **Onboarding Integration**: Uses onboarding data for personalization
 
-### Launcher (`launcher.py`)
-- **Agent Selection**: Choose which agent to run
-- **Coordinator Mode**: Recommended multi-agent experience
-- **Individual Modes**: Run specific agents for testing
+### Onboarding Agent (`Onboarding.py`)
+- **Welcome Story**: Engaging Urdu storytelling
+- **Essential Questions**: Structured user information gathering
+- **JSON Extraction**: Automatic data extraction (name, occupation, interests)
+- **User Restrictions**: Focused conversation flow
 
 ## 📊 Database Schema
 
