@@ -394,7 +394,107 @@ Guidelines:
 user_profile = UserProfile()
 
 # ---------------------------
-# FAISS Vector Store (RAG)
+# Conversation Summary System
+# ---------------------------
+class ConversationTracker:
+    def __init__(self):
+        self.interactions = []  # Store recent interactions
+        self.max_interactions = 5  # Keep last 5 interactions
+        self.current_user_input = None  # Store current user input
+        
+    def add_interaction(self, user_input: str, assistant_response: str):
+        """Add a new interaction to the conversation history."""
+        interaction = {
+            "timestamp": __import__("datetime").datetime.now().isoformat(),
+            "user_input": user_input,
+            "assistant_response": assistant_response
+        }
+        
+        self.interactions.append(interaction)
+        
+        # Keep only the last max_interactions
+        if len(self.interactions) > self.max_interactions:
+            self.interactions = self.interactions[-self.max_interactions:]
+        
+        print(f"[CONVERSATION] Added interaction {len(self.interactions)}/{self.max_interactions}")
+    
+    def capture_assistant_response(self, assistant_response: str):
+        """Capture assistant response and add to conversation history."""
+        if self.current_user_input:
+            self.add_interaction(self.current_user_input, assistant_response)
+            self.current_user_input = None  # Reset after capturing
+        else:
+            print("[CONVERSATION] No user input to pair with assistant response")
+    
+    def get_recent_interactions(self):
+        """Get the recent interactions for context."""
+        return self.interactions.copy()
+    
+    def generate_summary(self):
+        """Generate a summary of recent interactions using OpenAI."""
+        if not self.interactions:
+            return "No recent conversation history."
+        
+        try:
+            # Prepare conversation text
+            conversation_text = ""
+            for i, interaction in enumerate(self.interactions, 1):
+                conversation_text += f"Interaction {i}:\n"
+                conversation_text += f"User: {interaction['user_input']}\n"
+                conversation_text += f"Assistant: {interaction['assistant_response']}\n\n"
+            
+            # Generate summary
+            response = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": """Create a concise summary of the recent conversation between the user and assistant. 
+                        
+                        Focus on:
+                        - Key topics discussed
+                        - User's main concerns or interests
+                        - Important information shared by the user
+                        - Any ongoing themes or patterns
+                        
+                        Keep it brief (2-3 sentences) and useful for providing context in future conversations.
+                        Write in a natural, conversational tone."""
+                    },
+                    {"role": "user", "content": f"Recent conversation:\n{conversation_text}"}
+                ]
+            )
+            
+            summary = response.choices[0].message.content.strip()
+            print(f"[CONVERSATION SUMMARY] Generated: {summary[:100]}...")
+            return summary
+            
+        except Exception as e:
+            print(f"[CONVERSATION ERROR] Failed to generate summary: {e}")
+            return "Unable to generate conversation summary."
+    
+    def save_summary(self, summary: str):
+        """Save the conversation summary to memory."""
+        try:
+            memory_manager.store("FACT", "last_conversation_summary", summary)
+            print(f"[CONVERSATION] Summary saved to memory")
+        except Exception as e:
+            print(f"[CONVERSATION ERROR] Failed to save summary: {e}")
+    
+    def load_summary(self):
+        """Load the last conversation summary from memory."""
+        try:
+            summary = memory_manager.retrieve("FACT", "last_conversation_summary")
+            if summary:
+                print(f"[CONVERSATION] Loaded previous summary: {summary[:100]}...")
+                return summary
+            return None
+        except Exception as e:
+            print(f"[CONVERSATION ERROR] Failed to load summary: {e}")
+            return None
+
+# Global conversation tracker
+conversation_tracker = ConversationTracker()
+
 # ---------------------------
 embedding_dim = 1536
 index = faiss.IndexFlatL2(embedding_dim)
@@ -521,6 +621,8 @@ We close with kind, genuine statements that feel natural and conversational, avo
 
 - Remembering Facts: Use the `storeInMemory` tool to save user-specific facts or preferences for future personalization.
 - Recalling Memories: Use the `retrieveFromMemory` tool to recall previously shared facts, avoiding repetition and keeping interactions natural.
+- Conversation Tracking: Use `addConversationInteraction` to track user input and your response for creating conversation summaries.
+- Conversation Summary: Use `generateConversationSummary` to create a summary of recent interactions for future context.
 
 ### Memory Categories
 
@@ -535,6 +637,10 @@ We close with kind, genuine statements that feel natural and conversational, avo
 - PREFERENCE – likes/dislikes that reflect identity
 - PRESENTATION – self-expression or style
 - RELATIONSHIP – significant interpersonal info
+
+### Conversation Tracking
+
+After each meaningful exchange with the user, use `addConversationInteraction` to store the user's input and your response. This helps create conversation summaries for future sessions.
         """)
 
     @function_tool()
@@ -568,6 +674,26 @@ We close with kind, genuine statements that feel natural and conversational, avo
     async def forgetUserProfile(self, context: RunContext):
         return {"result": user_profile.forget()}
 
+    # ---- Conversation Tracking Tools ----
+    @function_tool()
+    async def addConversationInteraction(self, context: RunContext, user_input: str, assistant_response: str):
+        """Add a conversation interaction to the tracker."""
+        conversation_tracker.add_interaction(user_input, assistant_response)
+        return {"status": "interaction_added"}
+    
+    @function_tool()
+    async def generateConversationSummary(self, context: RunContext):
+        """Generate a summary of recent conversations."""
+        summary = conversation_tracker.generate_summary()
+        conversation_tracker.save_summary(summary)
+        return {"summary": summary}
+    
+    @function_tool()
+    async def getConversationHistory(self, context: RunContext):
+        """Get recent conversation history."""
+        interactions = conversation_tracker.get_recent_interactions()
+        return {"interactions": interactions}
+
     # Override the user turn completed hook to capture user input
     async def on_user_turn_completed(self, turn_ctx, new_message):
         """Handle user input when their turn is completed."""
@@ -582,6 +708,9 @@ We close with kind, genuine statements that feel natural and conversational, avo
         # Update user profile
         print(f"[PROFILE UPDATE] Starting profile update for: {user_text[:50]}...")
         user_profile.smart_update(user_text)
+        
+        # Store user input for conversation tracking
+        conversation_tracker.current_user_input = user_text
 
 # ---------------------------
 # Entrypoint
@@ -603,7 +732,10 @@ async def entrypoint(ctx: agents.JobContext):
         room_input_options=RoomInputOptions(),
     )
 
-    # Wrap session.generate_reply so every reply includes memory + rag + profile
+    # Load previous conversation summary
+    previous_summary = conversation_tracker.load_summary()
+    
+    # Wrap session.generate_reply to track conversations
     async def generate_with_memory(user_text: str = None, greet: bool = False):
         past_memories = memory_manager.retrieve_all()
         rag_context = retrieve_from_vectorstore(user_text or "recent", k=2)
@@ -615,18 +747,38 @@ async def entrypoint(ctx: agents.JobContext):
         Known memories: {past_memories}
         Related knowledge: {rag_context}
         """
+        
+        # Add conversation summary if available
+        if previous_summary:
+            extra_context += f"\nPrevious conversation context: {previous_summary}"
 
         if greet:
-            await session.generate_reply(
-                instructions=f"Greet the user warmly in Urdu.\n\n{base_instructions}\n\n{extra_context}"
-            )
+            # Generate greeting response
+            greeting_instructions = f"Greet the user warmly in Urdu. Reference the previous conversation context if available.\n\n{base_instructions}\n\n{extra_context}"
+            await session.generate_reply(instructions=greeting_instructions)
         else:
-            await session.generate_reply(
-                instructions=f"{base_instructions}\n\nUse this context:\n{extra_context}\nUser said: {user_text}"
-    )
+            # Generate response to user input
+            response_instructions = f"{base_instructions}\n\nUse this context:\n{extra_context}\nUser said: {user_text}"
+            await session.generate_reply(instructions=response_instructions)
+            
+            # Note: The actual assistant response will be captured by the session
+            # We'll need to hook into the session's response generation to capture it
 
     # Send initial greeting with memory context
     await generate_with_memory(greet=True)
+    
+    # Track conversation end and generate summary
+    async def end_conversation():
+        """Generate and save conversation summary when conversation ends."""
+        if conversation_tracker.get_recent_interactions():
+            print("[CONVERSATION] Generating summary for next session...")
+            summary = conversation_tracker.generate_summary()
+            conversation_tracker.save_summary(summary)
+            print(f"[CONVERSATION] Summary ready for next session: {summary[:100]}...")
+    
+    # Register cleanup handler
+    import atexit
+    atexit.register(lambda: __import__("asyncio").create_task(end_conversation()))
 
 if __name__ == "__main__":
     agents.cli.run_app(agents.WorkerOptions(
