@@ -2,6 +2,7 @@ import os
 import faiss
 import numpy as np
 import logging
+import asyncio
 from dotenv import load_dotenv
 from openai import OpenAI
 from supabase import create_client, Client
@@ -52,7 +53,7 @@ class MemoryManager:
                 self.supabase = None
                 self.connection_error = str(e)
 
-    def store(self, category: str, key: str, value: str):
+    async def store(self, category: str, key: str, value: str):
         category = category.upper()
         if category not in self.ALLOWED_CATEGORIES:
             category = "FACT"
@@ -80,7 +81,7 @@ class MemoryManager:
         except Exception as e:
             return f"Error storing: {e}"
 
-    def retrieve(self, category: str, key: str):
+    async def retrieve(self, category: str, key: str):
         if self.supabase is None:
             return None
         
@@ -95,7 +96,7 @@ class MemoryManager:
         except Exception as e:
             return None
 
-    def retrieve_all(self):
+    async def retrieve_all(self):
         if self.supabase is None:
             return {}
         
@@ -108,7 +109,7 @@ class MemoryManager:
         except Exception as e:
             return {}
 
-    def forget(self, category: str, key: str):
+    async def forget(self, category: str, key: str):
         if self.supabase is None:
             return f"Forgot: [{category}] {key} (offline)"
         
@@ -121,7 +122,7 @@ class MemoryManager:
         except Exception as e:
             return f"Error forgetting: {e}"
 
-    def save_profile(self, profile_text: str):
+    async def save_profile(self, profile_text: str):
         if self.supabase is None:
             return
         
@@ -310,15 +311,16 @@ class UserProfile:
             pass  # No existing profile
 
 
-    def update_profile(self, snippet: str):
+    async def update_profile(self, snippet: str):
         """Update profile using OpenAI summarization to build a comprehensive user profile."""
         try:
-            resp = client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[
-                    {
-                        "role": "system",
-                        "content": """You are a system that builds and maintains a comprehensive user profile.
+            resp = await asyncio.to_thread(
+                lambda: client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": """You are a system that builds and maintains a comprehensive user profile.
 Create a well-structured profile that includes:
 - Personal information (age, location, occupation, family)
 - Interests and hobbies
@@ -339,20 +341,21 @@ Guidelines:
 - Use clear, organized format
 - Capture as much useful information as possible to understand the user better
 - Do not hallucinate information and do not make up information which user has not shared"""
-                    },
-                    {"role": "system", "content": f"Current profile:\n{self.profile_text}"},
-                    {"role": "user", "content": f"New information to incorporate:\n{snippet}"}
-                ]
+                        },
+                        {"role": "system", "content": f"Current profile:\n{self.profile_text}"},
+                        {"role": "user", "content": f"New information to incorporate:\n{snippet}"}
+                    ]
+                )
             )
             new_profile = resp.choices[0].message.content.strip()
             self.profile_text = new_profile
-            memory_manager.save_profile(new_profile)
+            await memory_manager.save_profile(new_profile)
             print(f"[PROFILE UPDATED] {new_profile}")
         except Exception as e:
             print(f"[PROFILE ERROR] {e}")
         return self.profile_text
 
-    def smart_update(self, snippet: str):
+    async def smart_update(self, snippet: str):
         """Simple profile update - store most user input directly."""
         # Skip only very basic greetings and questions
         skip_patterns = [
@@ -369,7 +372,7 @@ Guidelines:
         
         # Update profile with AI summarization for most input
         print(f"[PROFILE UPDATE] Processing: {snippet[:50]}...")
-        return self.update_profile(snippet)
+        return await self.update_profile(snippet)
 
     def get(self):
         return self.profile_text
@@ -430,7 +433,7 @@ class ConversationTracker:
         """Get the recent interactions for context."""
         return self.interactions.copy()
     
-    def generate_summary(self):
+    async def generate_summary(self):
         """Generate a summary of recent interactions using OpenAI."""
         if not self.interactions:
             return "No recent conversation history."
@@ -444,24 +447,26 @@ class ConversationTracker:
                 conversation_text += f"Assistant: {interaction['assistant_response']}\n\n"
             
             # Generate summary
-            response = client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[
-                    {
-                        "role": "system",
-                        "content": """Create a concise summary of the recent conversation between the user and assistant. 
-                        
-                        Focus on:
-                        - Key topics discussed
-                        - User's main concerns or interests
-                        - Important information shared by the user
-                        - Any ongoing themes or patterns
-                        
-                        Keep it brief (2-3 sentences) and useful for providing context in future conversations.
-                        Write in a natural, conversational tone."""
-                    },
-                    {"role": "user", "content": f"Recent conversation:\n{conversation_text}"}
-                ]
+            response = await asyncio.to_thread(
+                lambda: client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": """Create a concise summary of the recent conversation between the user and assistant. 
+                            
+                            Focus on:
+                            - Key topics discussed
+                            - User's main concerns or interests
+                            - Important information shared by the user
+                            - Any ongoing themes or patterns
+                            
+                            Keep it brief (2-3 sentences) and useful for providing context in future conversations.
+                            Write in a natural, conversational tone."""
+                        },
+                        {"role": "user", "content": f"Recent conversation:\n{conversation_text}"}
+                    ]
+                )
             )
             
             summary = response.choices[0].message.content.strip()
@@ -472,18 +477,18 @@ class ConversationTracker:
             print(f"[CONVERSATION ERROR] Failed to generate summary: {e}")
             return "Unable to generate conversation summary."
     
-    def save_summary(self, summary: str):
+    async def save_summary(self, summary: str):
         """Save the conversation summary to memory."""
         try:
-            memory_manager.store("FACT", "last_conversation_summary", summary)
+            await memory_manager.store("FACT", "last_conversation_summary", summary)
             print(f"[CONVERSATION] Summary saved to memory")
         except Exception as e:
             print(f"[CONVERSATION ERROR] Failed to save summary: {e}")
     
-    def load_summary(self):
+    async def load_summary(self):
         """Load the last conversation summary from memory."""
         try:
-            summary = memory_manager.retrieve("FACT", "last_conversation_summary")
+            summary = await memory_manager.retrieve("FACT", "last_conversation_summary")
             if summary:
                 print(f"[CONVERSATION] Loaded previous summary: {summary[:100]}...")
                 return summary
@@ -500,23 +505,25 @@ embedding_dim = 1536
 index = faiss.IndexFlatL2(embedding_dim)
 vector_store = []  # (text, embedding)
 
-def embed_text(text: str):
-    emb = client.embeddings.create(
-        model="text-embedding-3-small",
-        input=text
-    ).data[0].embedding
+async def embed_text(text: str):
+    emb = await asyncio.to_thread(
+        lambda: client.embeddings.create(
+            model="text-embedding-3-small",
+            input=text
+        ).data[0].embedding
+    )
     return np.array(emb, dtype="float32")
 
-def add_to_vectorstore(text: str):
-    emb = embed_text(text)
+async def add_to_vectorstore(text: str):
+    emb = await embed_text(text)
     index.add(np.array([emb]))
     vector_store.append((text, emb))
     print(f"[RAG STORED] {text[:60]}...")
 
-def retrieve_from_vectorstore(query: str, k: int = 3):
+async def retrieve_from_vectorstore(query: str, k: int = 3):
     if not vector_store:
         return []
-    q_emb = embed_text(query)
+    q_emb = await embed_text(query)
     D, I = index.search(np.array([q_emb]), k)
     return [vector_store[i][0] for i in I[0] if i < len(vector_store)]
 
@@ -645,25 +652,25 @@ After each meaningful exchange with the user, use `addConversationInteraction` t
 
     @function_tool()
     async def storeInMemory(self, context: RunContext, category: str, key: str, value: str):
-        return {"result": memory_manager.store(category, key, value)}
+        return {"result": await memory_manager.store(category, key, value)}
 
     @function_tool()
     async def retrieveFromMemory(self, context: RunContext, category: str, key: str):
-        val = memory_manager.retrieve(category, key)
+        val = await memory_manager.retrieve(category, key)
         return {"value": val or ""}
 
     @function_tool()
     async def forgetMemory(self, context: RunContext, category: str, key: str):
-        return {"result": memory_manager.forget(category, key)}
+        return {"result": await memory_manager.forget(category, key)}
 
     @function_tool()
     async def listAllMemories(self, context: RunContext):
-        return {"memories": memory_manager.retrieve_all()}
+        return {"memories": await memory_manager.retrieve_all()}
 
     # ---- Profile Tools ----
     @function_tool()
     async def updateUserProfile(self, context: RunContext, new_info: str):
-        updated_profile = user_profile.update_profile(new_info)
+        updated_profile = await user_profile.update_profile(new_info)
         return {"updated_profile": updated_profile}
 
     @function_tool()
@@ -684,8 +691,8 @@ After each meaningful exchange with the user, use `addConversationInteraction` t
     @function_tool()
     async def generateConversationSummary(self, context: RunContext):
         """Generate a summary of recent conversations."""
-        summary = conversation_tracker.generate_summary()
-        conversation_tracker.save_summary(summary)
+        summary = await conversation_tracker.generate_summary()
+        await conversation_tracker.save_summary(summary)
         return {"summary": summary}
     
     @function_tool()
@@ -701,13 +708,13 @@ After each meaningful exchange with the user, use `addConversationInteraction` t
         print(f"[USER INPUT] {user_text}")
         print(f"[USER TURN COMPLETED] Handler called successfully!")
         
-        # Store user input in memory
-        memory_manager.store("FACT", "user_input", user_text)
-        add_to_vectorstore(user_text)
+        # Store user input in memory (async)
+        await memory_manager.store("FACT", "user_input", user_text)
+        await add_to_vectorstore(user_text)
         
-        # Update user profile
+        # Update user profile (async)
         print(f"[PROFILE UPDATE] Starting profile update for: {user_text[:50]}...")
-        user_profile.smart_update(user_text)
+        await user_profile.smart_update(user_text)
         
         # Store user input for conversation tracking
         conversation_tracker.current_user_input = user_text
@@ -733,12 +740,12 @@ async def entrypoint(ctx: agents.JobContext):
     )
 
     # Load previous conversation summary
-    previous_summary = conversation_tracker.load_summary()
+    previous_summary = await conversation_tracker.load_summary()
     
     # Wrap session.generate_reply to track conversations
     async def generate_with_memory(user_text: str = None, greet: bool = False):
-        past_memories = memory_manager.retrieve_all()
-        rag_context = retrieve_from_vectorstore(user_text or "recent", k=2)
+        past_memories = await memory_manager.retrieve_all()
+        rag_context = await retrieve_from_vectorstore(user_text or "recent", k=2)
         user_profile_text = user_profile.get()
 
         base_instructions = assistant.instructions
@@ -772,8 +779,8 @@ async def entrypoint(ctx: agents.JobContext):
         """Generate and save conversation summary when conversation ends."""
         if conversation_tracker.get_recent_interactions():
             print("[CONVERSATION] Generating summary for next session...")
-            summary = conversation_tracker.generate_summary()
-            conversation_tracker.save_summary(summary)
+            summary = await conversation_tracker.generate_summary()
+            await conversation_tracker.save_summary(summary)
             print(f"[CONVERSATION] Summary ready for next session: {summary[:100]}...")
     
     # Register cleanup handler
