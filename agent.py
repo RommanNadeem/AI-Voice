@@ -12,7 +12,7 @@ logging.getLogger("hpack.table").setLevel(logging.WARNING)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 
-from livekit import agents
+import livekit.agents as agents
 from livekit.agents import AgentSession, Agent, RoomInputOptions, function_tool, RunContext
 from livekit.plugins import openai as lk_openai
 from livekit.plugins import silero
@@ -455,12 +455,21 @@ def extract_key_information(user_input: str):
 # ---------------------------
 class Assistant(Agent):
     def __init__(self):
-        super().__init__()
+        super().__init__(instructions="""
+        You are a helpful AI assistant that speaks in Urdu.
+        
+        - Speak in casual Urdu, not formal language
+        - Keep responses short and friendly
+        - Be like a close friend
+        - Ask follow-up questions to keep conversation going
+        - Remember what the user has told you
+        """)
         self.tts = TTS()
 
     async def on_user_turn_completed(self, turn_ctx: agents.ChatContext):
         """Handle user turn completion."""
         user_text = turn_ctx.user_message.content
+        print(f"[USER INPUT] {user_text}")
         
         # Check if input is important
         if check_importance(user_text):
@@ -511,20 +520,18 @@ async def entrypoint(ctx: agents.JobContext):
     # Initialize agent
     assistant = Assistant()
     
+    # Start the agent with proper configuration
+    await session.start(
+        room=ctx.room,
+        agent=assistant,
+        room_input_options=RoomInputOptions(),
+    )
+    
     # Send initial greeting
-    greeting = "Hello! I'm your AI assistant. How can I help you today?"
-    await session.send_message(greeting)
-    
-    # Convert greeting to speech
-    try:
-        tts = TTS()
-        audio_data = tts.synthesize(greeting)
-        await session.send_audio(audio_data)
-    except Exception as e:
-        print(f"[TTS ERROR] {e}")
-    
-    # Start the agent
-    await assistant.start(session)
+    greeting = "ہیلو! میں آپ کی مدد کے لیے یہاں ہوں۔"
+    await session.generate_reply(instructions=f"Say this in Urdu: {greeting}")
 
 if __name__ == "__main__":
-    agents.cli.run_app(entrypoint)
+    agents.cli.run_app(agents.WorkerOptions(
+        entrypoint_fnc=entrypoint,
+    ))
