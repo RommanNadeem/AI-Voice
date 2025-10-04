@@ -1,0 +1,32 @@
+# ---- Python ----
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.db
+*.sqlite3
+
+# ---- Virtual Envs ----
+.env
+.venv/
+venv/
+ENV/
+
+# ---- Environment / Secrets ----
+.env
+*.key
+*.pem
+
+# ---- VS Code ----
+.vscode/
+.settings/
+
+# ---- macOS ----
+.DS_Store
+
+# ---- Logs ----
+*.log
+
+# ---- Supabase (local dev) ----
+supabase/.temp/
+supabase/.branches/
