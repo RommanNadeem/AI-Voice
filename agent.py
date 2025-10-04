@@ -423,7 +423,11 @@ def get_onboarding_flags():
             return {
                 "is_new_user": True,
                 "is_onboarding_done": False,
-                "onboarding_questions": False
+                "onboarding_questions": False,
+                "story_told": False,
+                "answered_questions": [],
+                "current_question_index": 0,
+                "user_responses": []
             }
         
         # Try to get current user and their metadata
@@ -447,7 +451,11 @@ def get_onboarding_flags():
         default_flags = {
             "is_new_user": True,
             "is_onboarding_done": False,
-            "onboarding_questions": False
+            "onboarding_questions": False,
+            "story_told": False,
+            "answered_questions": [],
+            "current_question_index": 0,
+            "user_responses": []
         }
         print(f"[FLAGS] Using defaults: {default_flags}")
         return default_flags
@@ -457,7 +465,11 @@ def get_onboarding_flags():
         return {
             "is_new_user": True,
             "is_onboarding_done": False,
-            "onboarding_questions": False
+            "onboarding_questions": False,
+            "story_told": False,
+            "answered_questions": [],
+            "current_question_index": 0,
+            "user_responses": []
         }
 
 def set_onboarding_flags(flags):
@@ -498,7 +510,11 @@ def update_onboarding_flag(flag_name, value):
     flags_to_save = {
         "is_new_user": user_state.get("is_new_user", True),
         "is_onboarding_done": user_state.get("is_onboarding_done", False),
-        "onboarding_questions": user_state.get("onboarding_questions", False)
+        "onboarding_questions": user_state.get("onboarding_questions", False),
+        "story_told": user_state.get("story_told", False),
+        "answered_questions": user_state.get("answered_questions", []),
+        "current_question_index": user_state.get("current_question_index", 0),
+        "user_responses": user_state.get("user_responses", [])
     }
     
     set_onboarding_flags(flags_to_save)
@@ -510,7 +526,9 @@ def update_onboarding_flag(flag_name, value):
 # Initialize user state with flags from Supabase
 user_state = {
     "current_question_index": 0,
-    "user_responses": []
+    "user_responses": [],
+    "story_told": False,
+    "answered_questions": []
 }
 
 # Load onboarding flags from Supabase
@@ -566,20 +584,29 @@ async def run_onboarding(session):
     
     print("[ONBOARDING] Starting onboarding flow...")
     
-    # Tell the welcome story
-    await session.generate_reply(
-        instructions=f"Tell the user this welcome story in Urdu: {WELCOME_STORY}"
-    )
+    # Tell the welcome story only if not told before
+    if not user_state.get("story_told", False):
+        await session.generate_reply(
+            instructions=f"Tell the user this welcome story in Urdu: {WELCOME_STORY}"
+        )
+        user_state["story_told"] = True
+        print("[ONBOARDING] Welcome story told")
+    else:
+        print("[ONBOARDING] Welcome story already told, skipping")
     
-    # Ask the first question
-    if len(user_state["user_responses"]) == 0:
-        question = ONBOARDING_QUESTIONS[0]
-        user_state["current_question_index"] = 0
-        print(f"[ONBOARDING] Asking question 1/{len(ONBOARDING_QUESTIONS)}: {question}")
+    # Find the first unanswered question
+    answered_count = len(user_state.get("answered_questions", []))
+    if answered_count < len(ONBOARDING_QUESTIONS):
+        question_index = answered_count
+        question = ONBOARDING_QUESTIONS[question_index]
+        user_state["current_question_index"] = question_index
+        print(f"[ONBOARDING] Asking question {question_index + 1}/{len(ONBOARDING_QUESTIONS)}: {question}")
         
         await session.generate_reply(
             instructions=f"Ask this question in Urdu: {question}"
         )
+    else:
+        print("[ONBOARDING] All questions already answered")
 
 async def continue_onboarding(session):
     """Continue onboarding with next question or complete if done."""
@@ -587,8 +614,15 @@ async def continue_onboarding(session):
     
     current_index = user_state["current_question_index"]
     
-    # If we have responses for all questions, complete onboarding
-    if len(user_state["user_responses"]) >= len(ONBOARDING_QUESTIONS):
+    # Add current question to answered questions if not already there
+    answered_questions = user_state.get("answered_questions", [])
+    if current_index not in answered_questions:
+        answered_questions.append(current_index)
+        user_state["answered_questions"] = answered_questions
+        print(f"[ONBOARDING] Marked question {current_index + 1} as answered")
+    
+    # Check if we have answered all questions
+    if len(answered_questions) >= len(ONBOARDING_QUESTIONS):
         all_responses = " ".join(user_state["user_responses"])
         user_info = extract_user_info_to_json(all_responses)
         
@@ -605,16 +639,25 @@ async def continue_onboarding(session):
         print("[ONBOARDING] Onboarding completed successfully!")
         return True
     
-    # Ask next question
-    next_index = current_index + 1
-    if next_index < len(ONBOARDING_QUESTIONS):
-        question = ONBOARDING_QUESTIONS[next_index]
-        user_state["current_question_index"] = next_index
-        print(f"[ONBOARDING] Asking question {next_index + 1}/{len(ONBOARDING_QUESTIONS)}: {question}")
+    # Find next unanswered question
+    next_unanswered_index = None
+    for i in range(len(ONBOARDING_QUESTIONS)):
+        if i not in answered_questions:
+            next_unanswered_index = i
+            break
+    
+    if next_unanswered_index is not None:
+        question = ONBOARDING_QUESTIONS[next_unanswered_index]
+        user_state["current_question_index"] = next_unanswered_index
+        print(f"[ONBOARDING] Asking question {next_unanswered_index + 1}/{len(ONBOARDING_QUESTIONS)}: {question}")
         
         await session.generate_reply(
             instructions=f"Ask this question in Urdu: {question}"
         )
+    else:
+        print("[ONBOARDING] All questions answered, completing onboarding...")
+        # This shouldn't happen due to the check above, but just in case
+        await continue_onboarding(session)
     
     return False
 
