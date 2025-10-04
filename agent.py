@@ -648,47 +648,16 @@ async def ask_next_onboarding_question(session):
         if len(user_state["user_responses"]) > 0:
             previous_response = user_state["user_responses"][-1]
         
-        # Generate smooth transition with acknowledgment using OpenAI
-        transition_prompt = f"""
-        Acknowledge the user's previous response briefly and smoothly transition to the next question.
-        
-        Previous response: "{previous_response}"
-        Next question: "{question}"
-        
-        Instructions:
-        1. Briefly acknowledge their previous answer (1-2 words in Urdu)
-        2. Smoothly transition to the next question
-        3. Ask the question naturally in Urdu
-        
-        Example transitions:
-        - If they said their name: "شکریہ! اب بتائیے..."
-        - If they said their work: "اچھا! اب..."
-        - If they said their interests: "بہت اچھا! آخر میں..."
-        
-        Respond in Urdu only, be natural and conversational.
-        """
-        
-        try:
-            response = client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[
-                    {"role": "system", "content": "You are a helpful AI assistant that responds in Urdu. Be natural, conversational, and acknowledge previous responses smoothly."},
-                    {"role": "user", "content": transition_prompt}
-                ]
-            )
-            transition_text = response.choices[0].message.content.strip()
-        except Exception as e:
-            print(f"[ONBOARDING ERROR] Failed to generate transition message: {e}")
-            # Fallback to simple transitions
-            if previous_response:
-                if next_unanswered_index == 1:  # Second question
-                    transition_text = f"شکریہ! اب بتائیے، {question}"
-                elif next_unanswered_index == 2:  # Third question
-                    transition_text = f"اچھا! آخر میں، {question}"
-                else:
-                    transition_text = question
+        # Simple, fast transitions without OpenAI
+        if previous_response:
+            if next_unanswered_index == 1:  # Second question
+                transition_text = f"شکریہ! اب بتائیے، {question}"
+            elif next_unanswered_index == 2:  # Third question
+                transition_text = f"اچھا! آخر میں، {question}"
             else:
                 transition_text = question
+        else:
+            transition_text = question
         
         print(f"[ONBOARDING] Asking question {next_unanswered_index + 1}/{len(ONBOARDING_QUESTIONS)} with acknowledgment")
         
@@ -722,45 +691,29 @@ async def complete_onboarding(session):
     update_onboarding_flag("onboarding_questions", True)
     update_onboarding_flag("is_new_user", False)
     
-    # Generate personalized completion message using OpenAI
-    completion_prompt = f"""
-    Thank the user for completing the onboarding and greet them by name.
-    
-    User's name: {user_name if user_name else "User"}
-    User's responses: {all_responses}
-    
-    Instructions:
-    1. Thank them warmly for sharing their information
-    2. Greet them by name if available: "ہیلو {user_name}!" (if name exists)
-    3. Let them know you're ready to help them with their goals and interests
-    4. Say in Urdu: "اب میں آپ کو اپنے اہم ساتھی کے حوالے کر رہا ہوں"
-    5. Then output exactly: >>> HANDOVER_TO_CORE
-    
-    Respond in Urdu only, be warm and personal.
-    """
-    
-    try:
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": "You are a helpful AI assistant that responds in Urdu. Be warm, personal, and conversational."},
-                {"role": "user", "content": completion_prompt}
-            ]
-        )
-        completion_message = response.choices[0].message.content.strip()
-    except Exception as e:
-        print(f"[ONBOARDING ERROR] Failed to generate completion message: {e}")
+    # Create fast completion message without OpenAI
+    if user_name:
         completion_message = f"""
         Thank the user for completing the onboarding and greet them by name.
         
-        User's name: {user_name if user_name else "User"}
+        User's name: {user_name}
         
         Instructions:
         1. Thank them warmly for sharing their information
-        2. Greet them by name if available: "ہیلو {user_name}!" (if name exists)
+        2. Greet them by name: "ہیلو {user_name}!"
         3. Let them know you're ready to help them with their goals and interests
         4. Say in Urdu: "اب میں آپ کو اپنے اہم ساتھی کے حوالے کر رہا ہوں"
         5. Then output exactly: >>> HANDOVER_TO_CORE
+        """
+    else:
+        completion_message = """
+        Thank the user for completing the onboarding.
+        
+        Instructions:
+        1. Thank them warmly for sharing their information
+        2. Let them know you're ready to help them with their goals and interests
+        3. Say in Urdu: "اب میں آپ کو اپنے اہم ساتھی کے حوالے کر رہا ہوں"
+        4. Then output exactly: >>> HANDOVER_TO_CORE
         """
     
     # Send completion message
@@ -1251,6 +1204,9 @@ async def entrypoint(ctx: agents.JobContext):
     # Check if user needs onboarding
     if user_state["is_new_user"] and not user_state["onboarding_questions"]:
         answered_count = len(user_state.get("answered_questions", []))
+        
+        print(f"[MAIN DEBUG] Onboarding check - answered_count: {answered_count}, total_questions: {len(ONBOARDING_QUESTIONS)}")
+        print(f"[MAIN DEBUG] User state: {user_state}")
         
         # If no questions answered yet, start with story and first question
         if answered_count == 0:
