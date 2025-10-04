@@ -416,7 +416,7 @@ JSON_TEMPLATE = {
 # Onboarding Flag Management
 # ---------------------------
 def get_onboarding_flags():
-    """Get onboarding flags from Supabase for current user."""
+    """Get onboarding flags from Supabase profiles table for current user."""
     try:
         if memory_manager.supabase is None:
             print("[FLAGS] Supabase not available, using default flags")
@@ -428,22 +428,32 @@ def get_onboarding_flags():
         
         user_id = get_user_id()
         
-        # Try to get flags from user_profiles table
-        response = memory_manager.supabase.table('user_profiles').select('onboarding_flags').eq('user_id', user_id).execute()
+        # Try to get flags from profiles table (we'll add user_metadata column)
+        try:
+            response = memory_manager.supabase.table('profiles').select('user_metadata').eq('id', user_id).execute()
+            
+            if response.data and response.data[0].get('user_metadata'):
+                metadata = response.data[0]['user_metadata']
+                flags = metadata.get('data', {})
+                
+                # Ensure all required flags exist
+                flags.setdefault('is_new_user', True)
+                flags.setdefault('is_onboarding_done', False)
+                flags.setdefault('onboarding_questions', False)
+                
+                print(f"[FLAGS] Loaded from user metadata: {flags}")
+                return flags
+        except Exception as e:
+            print(f"[FLAGS] user_metadata column not found, using defaults: {e}")
         
-        if response.data and response.data[0].get('onboarding_flags'):
-            flags = response.data[0]['onboarding_flags']
-            print(f"[FLAGS] Loaded from Supabase: {flags}")
-            return flags
-        else:
-            # No flags found, return default for new user
-            default_flags = {
-                "is_new_user": True,
-                "is_onboarding_done": False,
-                "onboarding_questions": False
-            }
-            print(f"[FLAGS] No flags found, using defaults: {default_flags}")
-            return default_flags
+        # Fallback: return default flags
+        default_flags = {
+            "is_new_user": True,
+            "is_onboarding_done": False,
+            "onboarding_questions": False
+        }
+        print(f"[FLAGS] Using defaults: {default_flags}")
+        return default_flags
             
     except Exception as e:
         print(f"[FLAGS ERROR] Failed to get flags: {e}")
@@ -454,7 +464,7 @@ def get_onboarding_flags():
         }
 
 def set_onboarding_flags(flags):
-    """Set onboarding flags in Supabase for current user."""
+    """Set onboarding flags in Supabase profiles table for current user."""
     try:
         if memory_manager.supabase is None:
             print("[FLAGS] Supabase not available, cannot save flags")
@@ -462,14 +472,19 @@ def set_onboarding_flags(flags):
         
         user_id = get_user_id()
         
-        # Update flags in user_profiles table
-        response = memory_manager.supabase.table('user_profiles').upsert({
-            'user_id': user_id,
-            'onboarding_flags': flags
-        }).execute()
-        
-        print(f"[FLAGS] Saved to Supabase: {flags}")
-        return True
+        # Try to update flags in profiles table user_metadata
+        try:
+            response = memory_manager.supabase.table('profiles').update({
+                'user_metadata': {
+                    'data': flags
+                }
+            }).eq('id', user_id).execute()
+            
+            print(f"[FLAGS] Saved to user metadata: {flags}")
+            return True
+        except Exception as e:
+            print(f"[FLAGS] user_metadata column not found, cannot save: {e}")
+            return False
         
     except Exception as e:
         print(f"[FLAGS ERROR] Failed to save flags: {e}")

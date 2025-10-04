@@ -132,9 +132,19 @@ CREATE TABLE memory (
 CREATE TABLE user_profiles (
     user_id UUID PRIMARY KEY REFERENCES profiles(id) ON DELETE CASCADE,
     profile_text TEXT,
-    onboarding_flags JSONB DEFAULT '{"is_new_user": true, "is_onboarding_done": false, "onboarding_questions": false}',
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+```
+
+### Profiles Table (with User Metadata)
+```sql
+CREATE TABLE profiles (
+    id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
+    email TEXT UNIQUE,
+    is_first_login BOOLEAN DEFAULT true,
+    user_metadata JSONB DEFAULT '{"data": {"is_new_user": true, "is_onboarding_done": false, "onboarding_questions": false}}',
+    created_at TIMESTAMPTZ DEFAULT NOW()
 );
 ```
 
