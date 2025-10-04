@@ -1,9 +1,16 @@
 import os
 import faiss
 import numpy as np
+import logging
 from dotenv import load_dotenv
 from openai import OpenAI
 from supabase import create_client, Client
+
+# Disable verbose HTTP/2 logging
+logging.getLogger("hpack.hpack").setLevel(logging.WARNING)
+logging.getLogger("hpack.table").setLevel(logging.WARNING)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 from livekit import agents
 from livekit.agents import AgentSession, Agent, RoomInputOptions, function_tool, RunContext

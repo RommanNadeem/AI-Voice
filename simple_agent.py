@@ -3,8 +3,15 @@
 import os
 import asyncio
 import json
+import logging
 from typing import Optional
 from dotenv import load_dotenv
+
+# Disable verbose HTTP/2 logging
+logging.getLogger("hpack.hpack").setLevel(logging.WARNING)
+logging.getLogger("hpack.table").setLevel(logging.WARNING)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 # Load environment variables
 load_dotenv()
