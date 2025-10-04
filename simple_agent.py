@@ -52,8 +52,8 @@ if SUPABASE_URL and SUPABASE_KEY:
 # Simple onboarding questions
 ONBOARDING_QUESTIONS = [
     "آپ کا نام کیا ہے؟",
-    "آپ کیا کام کرتے ہیں؟", 
-    "آپ کو کیا کرنے کا شوق ہے؟"
+    "آپ کیا کام کرتے ہیں یا کیا پڑھتے ہیں؟",
+    "آپ کو کیا کرنے کا شوق ہے؟ کوئی خاص ہابی یا دلچسپی؟"
 ]
 
 # Simple onboarding state
