@@ -57,6 +57,10 @@ class MemoryManager:
             # Get current user ID
             user_id = get_user_id()
             
+            # Ensure profile exists first
+            if not ensure_profile_exists(user_id):
+                return f"Error storing: Profile not found for user {user_id}"
+            
             # Use upsert to insert or update
             response = self.supabase.table('memory').upsert({
                 'user_id': user_id,
@@ -118,6 +122,11 @@ class MemoryManager:
             # Get current user ID
             user_id = get_user_id()
             
+            # Ensure profile exists first
+            if not ensure_profile_exists(user_id):
+                print(f"[PROFILE ERROR] Profile not found for user {user_id}")
+                return
+            
             # Use user_profiles table with proper upsert
             response = self.supabase.table('user_profiles').upsert({
                 'user_id': user_id,
@@ -166,14 +175,38 @@ def get_current_user():
         print(f"[AUTH ERROR] Failed to get current user: {e}")
         return None
 
+def ensure_profile_exists(user_id: str):
+    """
+    Ensure a profile exists in the profiles table for the given user_id.
+    This is required due to foreign key constraints.
+    """
+    try:
+        if memory_manager.supabase is None:
+            return True  # Skip check if Supabase not available
+        
+        # Check if profile exists using 'id' column
+        response = memory_manager.supabase.table('profiles').select('id').eq('id', user_id).execute()
+        
+        if not response.data:
+            # For development/testing, we'll skip profile creation since it requires auth.users
+            # In production, this should be handled by the authentication system
+            print(f"[PROFILE SKIP] Profile creation skipped for user {user_id} (requires auth.users)")
+            return False  # Return False to indicate profile doesn't exist
+        
+        return True
+    except Exception as e:
+        print(f"[PROFILE ERROR] Failed to ensure profile exists: {e}")
+        return False
+
 def get_user_id():
-    """Get the current user's ID, fallback to default if not authenticated."""
+    """Get the current user's ID, fallback to existing profile if not authenticated."""
     user = get_current_user()
     if user:
         return user.id
     else:
-        print("[AUTH] Using default user ID")
-        return "default_user"
+        print("[AUTH] Using existing profile for testing")
+        # Use the existing profile ID for testing
+        return "8f086b67-b0e9-4a2a-b772-3c56b0a3b4b7"
 
 # ---------------------------
 # Helper Functions
@@ -194,6 +227,10 @@ def save_user_profile(profile_text: str):
     """
     try:
         user_id = get_user_id()
+        # Ensure profile exists first
+        if not ensure_profile_exists(user_id):
+            return False
+            
         response = memory_manager.supabase.table('user_profiles').upsert({
             'user_id': user_id,
             'profile_text': profile_text
@@ -236,6 +273,10 @@ def save_memory(category: str, key: str, value: str):
     """
     try:
         user_id = get_user_id()
+        # Ensure profile exists first
+        if not ensure_profile_exists(user_id):
+            return False
+            
         response = memory_manager.supabase.table('memory').upsert({
             'user_id': user_id,
             'category': category,
@@ -575,7 +616,7 @@ async def entrypoint(ctx: agents.JobContext):
         else:
             await session.generate_reply(
                 instructions=f"{base_instructions}\n\nUse this context:\n{extra_context}\nUser said: {user_text}"
-            )
+    )
 
     # Send initial greeting with memory context
     await generate_with_memory(greet=True)

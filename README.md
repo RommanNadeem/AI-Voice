@@ -100,11 +100,25 @@ python Onboarding.py dev
 
 ## 📊 Database Schema
 
+### Database Schema
+
+**Note:** The actual database has foreign key constraints that require `user_id` to exist in the `profiles` table first.
+
+### Profiles Table (Base Table)
+```sql
+CREATE TABLE profiles (
+    user_id UUID PRIMARY KEY,
+    email VARCHAR(255),
+    is_first_login BOOLEAN DEFAULT true,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+```
+
 ### Memory Table
 ```sql
 CREATE TABLE memory (
     id BIGSERIAL PRIMARY KEY,
-    user_id VARCHAR(255) NOT NULL,
+    user_id UUID NOT NULL REFERENCES profiles(user_id),
     category VARCHAR(50) NOT NULL,
     key VARCHAR(255) NOT NULL,
     value TEXT NOT NULL,
@@ -116,7 +130,7 @@ CREATE TABLE memory (
 ### User Profiles Table
 ```sql
 CREATE TABLE user_profiles (
-    user_id VARCHAR(255) PRIMARY KEY,
+    user_id UUID PRIMARY KEY REFERENCES profiles(user_id),
     profile_text TEXT NOT NULL,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
