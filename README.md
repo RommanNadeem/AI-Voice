@@ -130,10 +130,11 @@ CREATE TABLE memory (
 ### User Profiles Table
 ```sql
 CREATE TABLE user_profiles (
-    user_id UUID PRIMARY KEY REFERENCES profiles(user_id),
-    profile_text TEXT NOT NULL,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    user_id UUID PRIMARY KEY REFERENCES profiles(id) ON DELETE CASCADE,
+    profile_text TEXT,
+    onboarding_flags JSONB DEFAULT '{"is_new_user": true, "is_onboarding_done": false, "onboarding_questions": false}',
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 ```
 

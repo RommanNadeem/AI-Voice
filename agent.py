@@ -413,15 +413,97 @@ JSON_TEMPLATE = {
 }
 
 # ---------------------------
+# Onboarding Flag Management
+# ---------------------------
+def get_onboarding_flags():
+    """Get onboarding flags from Supabase for current user."""
+    try:
+        if memory_manager.supabase is None:
+            print("[FLAGS] Supabase not available, using default flags")
+            return {
+                "is_new_user": True,
+                "is_onboarding_done": False,
+                "onboarding_questions": False
+            }
+        
+        user_id = get_user_id()
+        
+        # Try to get flags from user_profiles table
+        response = memory_manager.supabase.table('user_profiles').select('onboarding_flags').eq('user_id', user_id).execute()
+        
+        if response.data and response.data[0].get('onboarding_flags'):
+            flags = response.data[0]['onboarding_flags']
+            print(f"[FLAGS] Loaded from Supabase: {flags}")
+            return flags
+        else:
+            # No flags found, return default for new user
+            default_flags = {
+                "is_new_user": True,
+                "is_onboarding_done": False,
+                "onboarding_questions": False
+            }
+            print(f"[FLAGS] No flags found, using defaults: {default_flags}")
+            return default_flags
+            
+    except Exception as e:
+        print(f"[FLAGS ERROR] Failed to get flags: {e}")
+        return {
+            "is_new_user": True,
+            "is_onboarding_done": False,
+            "onboarding_questions": False
+        }
+
+def set_onboarding_flags(flags):
+    """Set onboarding flags in Supabase for current user."""
+    try:
+        if memory_manager.supabase is None:
+            print("[FLAGS] Supabase not available, cannot save flags")
+            return False
+        
+        user_id = get_user_id()
+        
+        # Update flags in user_profiles table
+        response = memory_manager.supabase.table('user_profiles').upsert({
+            'user_id': user_id,
+            'onboarding_flags': flags
+        }).execute()
+        
+        print(f"[FLAGS] Saved to Supabase: {flags}")
+        return True
+        
+    except Exception as e:
+        print(f"[FLAGS ERROR] Failed to save flags: {e}")
+        return False
+
+def update_onboarding_flag(flag_name, value):
+    """Update a specific onboarding flag."""
+    global user_state
+    
+    # Update local state
+    user_state[flag_name] = value
+    
+    # Update Supabase
+    flags_to_save = {
+        "is_new_user": user_state.get("is_new_user", True),
+        "is_onboarding_done": user_state.get("is_onboarding_done", False),
+        "onboarding_questions": user_state.get("onboarding_questions", False)
+    }
+    
+    set_onboarding_flags(flags_to_save)
+    print(f"[FLAGS] Updated {flag_name} = {value}")
+
+# ---------------------------
 # State Management
 # ---------------------------
+# Initialize user state with flags from Supabase
 user_state = {
-    "is_new_user": True,
-    "is_onboarding_done": False,
-    "onboarding_questions": False,
     "current_question_index": 0,
     "user_responses": []
 }
+
+# Load onboarding flags from Supabase
+onboarding_flags = get_onboarding_flags()
+user_state.update(onboarding_flags)
 
 # ---------------------------
 # Onboarding Functions
@@ -498,10 +580,10 @@ async def continue_onboarding(session):
         all_responses = " ".join(user_state["user_responses"])
         user_info = extract_user_info_to_json(all_responses)
         
-        # Mark onboarding as complete
-        user_state["is_onboarding_done"] = True
-        user_state["onboarding_questions"] = True
-        user_state["is_new_user"] = False
+        # Mark onboarding as complete using Supabase flags
+        update_onboarding_flag("is_onboarding_done", True)
+        update_onboarding_flag("onboarding_questions", True)
+        update_onboarding_flag("is_new_user", False)
         
         # Announce handover
         await session.generate_reply(
