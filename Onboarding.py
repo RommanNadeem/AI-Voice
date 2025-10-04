@@ -57,8 +57,12 @@ class MemoryManager:
             return f"Stored: [{category}] {key} = {value} (offline mode)"
         
         try:
+            # Get current user ID
+            user_id = get_user_id()
+            
             # Use upsert to insert or update
             response = self.supabase.table('memory').upsert({
+                'user_id': user_id,
                 'category': category,
                 'key': key,
                 'value': value
@@ -76,7 +80,10 @@ class MemoryManager:
             return None
         
         try:
-            response = self.supabase.table('memory').select('value').eq('category', category).eq('key', key).execute()
+            # Get current user ID
+            user_id = get_user_id()
+            
+            response = self.supabase.table('memory').select('value').eq('user_id', user_id).eq('category', category).eq('key', key).execute()
             if response.data:
                 return response.data[0]['value']
             return None
@@ -90,18 +97,24 @@ class MemoryManager:
             return {}
         
         try:
-            response = self.supabase.table('memory').select('category, key, value').execute()
+            # Get current user ID
+            user_id = get_user_id()
+            
+            response = self.supabase.table('memory').select('category, key, value').eq('user_id', user_id).execute()
             return {f"{row['category']}:{row['key']}": row['value'] for row in response.data}
         except Exception as e:
             print(f"[SUPABASE ERROR] Retrieve all failed: {e}")
             return {}
 
-    def save_profile(self, user_id: str, profile_text: str):
+    def save_profile(self, profile_text: str):
         if self.supabase is None:
-            print(f"[PROFILE STORED] for {user_id} (Supabase not available)")
+            print(f"[PROFILE STORED] (Supabase not available)")
             return
         
         try:
+            # Get current user ID
+            user_id = get_user_id()
+            
             # Use user_profiles table with proper upsert
             response = self.supabase.table('user_profiles').upsert({
                 'user_id': user_id,
@@ -112,12 +125,15 @@ class MemoryManager:
         except Exception as e:
             print(f"[SUPABASE ERROR] Save profile failed: {e}")
 
-    def load_profile(self, user_id: str):
+    def load_profile(self):
         if self.supabase is None:
-            print(f"[PROFILE LOAD] for {user_id} (Supabase not available)")
+            print(f"[PROFILE LOAD] (Supabase not available)")
             return ""
         
         try:
+            # Get current user ID
+            user_id = get_user_id()
+            
             # Use user_profiles table
             response = self.supabase.table('user_profiles').select('profile_text').eq('user_id', user_id).execute()
             if response.data:
@@ -131,16 +147,46 @@ class MemoryManager:
 memory_manager = MemoryManager()
 
 # ---------------------------
+# Authentication Helpers
+# ---------------------------
+def get_current_user():
+    """Get the current authenticated user from Supabase Auth."""
+    try:
+        if memory_manager.supabase is None:
+            print("[AUTH] Supabase not available, using default user")
+            return None
+        
+        user = memory_manager.supabase.auth.get_user()
+        if user and user.user:
+            print(f"[AUTH] Authenticated user: {user.user.id}")
+            return user.user
+        else:
+            print("[AUTH] No authenticated user found")
+            return None
+    except Exception as e:
+        print(f"[AUTH ERROR] Failed to get current user: {e}")
+        return None
+
+def get_user_id():
+    """Get the current user's ID, fallback to default if not authenticated."""
+    user = get_current_user()
+    if user:
+        return user.id
+    else:
+        print("[AUTH] Using default user ID")
+        return "default_user"
+
+# ---------------------------
 # User Profile Manager
 # ---------------------------
 class UserProfile:
-    def __init__(self, user_id="default_user"):
-        self.user_id = user_id
-        self.profile_text = memory_manager.load_profile(user_id)
+    def __init__(self):
+        self.user_id = get_user_id()
+        self.profile_text = memory_manager.load_profile()
         if self.profile_text:
-            print(f"[PROFILE LOADED] for {user_id}: {self.profile_text}")
+            print(f"[PROFILE LOADED] for {self.user_id}: {self.profile_text}")
         else:
-            print(f"[PROFILE EMPTY] No existing profile for {user_id}")
+            print(f"[PROFILE EMPTY] No existing profile for {self.user_id}")
 
     def update_profile(self, snippet: str):
         """Update profile using OpenAI summarization to build a comprehensive user profile."""
@@ -177,7 +223,7 @@ Guidelines:
             )
             new_profile = resp.choices[0].message.content.strip()
             self.profile_text = new_profile
-            memory_manager.save_profile(self.user_id, new_profile)
+            memory_manager.save_profile(new_profile)
             print(f"[PROFILE UPDATED] {new_profile}")
         except Exception as e:
             print(f"[PROFILE ERROR] {e}")
@@ -222,7 +268,7 @@ Guidelines:
             return f"Error deleting profile: {e}"
 
 
-user_profile = UserProfile(user_id="onboarding_user")
+user_profile = UserProfile()
 
 # ---------------------------
 # Onboarding Content

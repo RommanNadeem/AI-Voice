@@ -104,22 +104,37 @@ python Onboarding.py dev
 ```sql
 CREATE TABLE memory (
     id BIGSERIAL PRIMARY KEY,
+    user_id VARCHAR(255) NOT NULL,
     category VARCHAR(50) NOT NULL,
     key VARCHAR(255) NOT NULL,
     value TEXT NOT NULL,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    UNIQUE(category, key)
+    UNIQUE(user_id, category, key)
 );
 ```
 
-### Profiles Table
+### User Profiles Table
 ```sql
-CREATE TABLE profiles (
+CREATE TABLE user_profiles (
     user_id VARCHAR(255) PRIMARY KEY,
     profile_text TEXT NOT NULL,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
+```
+
+### Row Level Security (RLS) Policies
+
+**Memory Table Policy:**
+```sql
+CREATE POLICY "Users can manage their own memory" ON memory
+FOR ALL USING (auth.uid()::text = user_id);
+```
+
+**User Profiles Table Policy:**
+```sql
+CREATE POLICY "Users can manage their own profiles" ON user_profiles
+FOR ALL USING (auth.uid()::text = user_id);
 ```
 
 ## 🔧 Configuration Options

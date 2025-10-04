@@ -54,8 +54,12 @@ class MemoryManager:
             return f"Stored: [{category}] {key} = {value} (offline)"
         
         try:
+            # Get current user ID
+            user_id = get_user_id()
+            
             # Use upsert to insert or update
             response = self.supabase.table('memory').upsert({
+                'user_id': user_id,
                 'category': category,
                 'key': key,
                 'value': value
@@ -70,7 +74,10 @@ class MemoryManager:
             return None
         
         try:
-            response = self.supabase.table('memory').select('value').eq('category', category).eq('key', key).execute()
+            # Get current user ID
+            user_id = get_user_id()
+            
+            response = self.supabase.table('memory').select('value').eq('user_id', user_id).eq('category', category).eq('key', key).execute()
             if response.data:
                 return response.data[0]['value']
             return None
@@ -82,7 +89,10 @@ class MemoryManager:
             return {}
         
         try:
-            response = self.supabase.table('memory').select('category, key, value').execute()
+            # Get current user ID
+            user_id = get_user_id()
+            
+            response = self.supabase.table('memory').select('category, key, value').eq('user_id', user_id).execute()
             return {f"{row['category']}:{row['key']}": row['value'] for row in response.data}
         except Exception as e:
             return {}
@@ -92,16 +102,22 @@ class MemoryManager:
             return f"Forgot: [{category}] {key} (offline)"
         
         try:
-            response = self.supabase.table('memory').delete().eq('category', category).eq('key', key).execute()
+            # Get current user ID
+            user_id = get_user_id()
+            
+            response = self.supabase.table('memory').delete().eq('user_id', user_id).eq('category', category).eq('key', key).execute()
             return f"Forgot: [{category}] {key}"
         except Exception as e:
             return f"Error forgetting: {e}"
 
-    def save_profile(self, user_id: str, profile_text: str):
+    def save_profile(self, profile_text: str):
         if self.supabase is None:
             return
         
         try:
+            # Get current user ID
+            user_id = get_user_id()
+            
             # Use user_profiles table with proper upsert
             response = self.supabase.table('user_profiles').upsert({
                 'user_id': user_id,
@@ -110,11 +126,14 @@ class MemoryManager:
         except Exception as e:
             pass
 
-    def load_profile(self, user_id: str):
+    def load_profile(self):
         if self.supabase is None:
             return ""
         
         try:
+            # Get current user ID
+            user_id = get_user_id()
+            
             # Use user_profiles table
             response = self.supabase.table('user_profiles').select('profile_text').eq('user_id', user_id).execute()
             if response.data:
@@ -127,58 +146,116 @@ class MemoryManager:
 memory_manager = MemoryManager()
 
 # ---------------------------
+# Authentication Helpers
+# ---------------------------
+def get_current_user():
+    """Get the current authenticated user from Supabase Auth."""
+    try:
+        if memory_manager.supabase is None:
+            print("[AUTH] Supabase not available, using default user")
+            return None
+        
+        user = memory_manager.supabase.auth.get_user()
+        if user and user.user:
+            print(f"[AUTH] Authenticated user: {user.user.id}")
+            return user.user
+        else:
+            print("[AUTH] No authenticated user found")
+            return None
+    except Exception as e:
+        print(f"[AUTH ERROR] Failed to get current user: {e}")
+        return None
+
+def get_user_id():
+    """Get the current user's ID, fallback to default if not authenticated."""
+    user = get_current_user()
+    if user:
+        return user.id
+    else:
+        print("[AUTH] Using default user ID")
+        return "default_user"
+
+# ---------------------------
 # Helper Functions
 # ---------------------------
 # RLS Policy for user_profiles table:
 # CREATE POLICY "Users can manage their own profiles" ON user_profiles
 # FOR ALL USING (auth.uid()::text = user_id);
 
-def save_user_profile(user_id: str, profile_text: str):
+def save_user_profile(profile_text: str):
     """
-    Helper function to save user profile to user_profiles table.
+    Helper function to save user profile to user_profiles table for current user.
     
     Args:
-        user_id (str): The user's ID (should match auth.users.id)
         profile_text (str): The profile text content
     
     Returns:
         bool: True if successful, False otherwise
     """
     try:
+        user_id = get_user_id()
         response = memory_manager.supabase.table('user_profiles').upsert({
             'user_id': user_id,
             'profile_text': profile_text
         }).execute()
         
+        print(f"[PROFILE SAVED] for user {user_id}")
         return True
     except Exception as e:
+        print(f"[PROFILE ERROR] Failed to save profile: {e}")
         return False
 
-def get_user_profile(user_id: str):
+def get_user_profile():
     """
-    Helper function to get user profile from user_profiles table.
-    
-    Args:
-        user_id (str): The user's ID
+    Helper function to get user profile from user_profiles table for current user.
     
     Returns:
         str: Profile text or empty string if not found
     """
     try:
+        user_id = get_user_id()
         response = memory_manager.supabase.table('user_profiles').select('profile_text').eq('user_id', user_id).execute()
         if response.data:
             return response.data[0]['profile_text']
         return ""
     except Exception as e:
+        print(f"[PROFILE ERROR] Failed to get profile: {e}")
         return ""
+
+def save_memory(category: str, key: str, value: str):
+    """
+    Helper function to save memory entry for current user.
+    
+    Args:
+        category (str): Memory category
+        key (str): Memory key
+        value (str): Memory value
+    
+    Returns:
+        bool: True if successful, False otherwise
+    """
+    try:
+        user_id = get_user_id()
+        response = memory_manager.supabase.table('memory').upsert({
+            'user_id': user_id,
+            'category': category,
+            'key': key,
+            'value': value
+        }).execute()
+        
+        print(f"[MEMORY SAVED] [{category}] {key} for user {user_id}")
+        return True
+    except Exception as e:
+        print(f"[MEMORY ERROR] Failed to save memory: {e}")
+        return False
 
 # ---------------------------
 # User Profile Manager
 # ---------------------------
 class UserProfile:
-    def __init__(self, user_id="default_user"):
-        self.user_id = user_id
-        self.profile_text = memory_manager.load_profile(user_id)
+    def __init__(self):
+        self.user_id = get_user_id()
+        self.profile_text = memory_manager.load_profile()
         if self.profile_text:
             pass  # Profile loaded silently
         else:
@@ -221,7 +298,7 @@ Guidelines:
             )
             new_profile = resp.choices[0].message.content.strip()
             self.profile_text = new_profile
-            memory_manager.save_profile(self.user_id, new_profile)
+            memory_manager.save_profile(new_profile)
             print(f"[PROFILE UPDATED] {new_profile}")
         except Exception as e:
             print(f"[PROFILE ERROR] {e}")
@@ -266,7 +343,7 @@ Guidelines:
             return f"Error deleting profile: {e}"
 
 
-user_profile = UserProfile(user_id="romman")
+user_profile = UserProfile()
 
 # ---------------------------
 # FAISS Vector Store (RAG)
