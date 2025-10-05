@@ -577,6 +577,57 @@ class PerformanceCache:
 perf_cache = PerformanceCache()
 
 # ---------------------------
+# Roman Urdu Conversion
+# ---------------------------
+async def convert_to_roman_urdu(text: str) -> str:
+    """Convert Urdu text to Roman Urdu using OpenAI for accurate transliteration."""
+    try:
+        # Check if text contains Urdu characters
+        urdu_chars = any('\u0600' <= char <= '\u06FF' for char in text)
+        if not urdu_chars:
+            return text  # Return as-is if no Urdu characters
+        
+        response = await asyncio.to_thread(
+            lambda: client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": """You are an expert in Urdu to Roman Urdu transliteration. 
+                        
+                        Convert the given Urdu text to Roman Urdu (Urdu written in English script).
+                        
+                        Rules:
+                        - Use standard Roman Urdu spelling conventions
+                        - Maintain proper pronunciation
+                        - Keep punctuation and spacing intact
+                        - For mixed text, only convert Urdu parts
+                        - Use common Roman Urdu spellings (e.g., 'aap' not 'ap', 'hai' not 'hay')
+                        
+                        Examples:
+                        - سلام → salam
+                        - آپ کا نام کیا ہے؟ → aap ka naam kya hai?
+                        - میں ٹھیک ہوں → main theek hun
+                        - شکریہ → shukriya
+                        - کیا حال ہے؟ → kya haal hai?
+                        
+                        Return only the Roman Urdu text, no explanations."""
+                    },
+                    {"role": "user", "content": f"Convert to Roman Urdu: {text}"}
+                ],
+                max_tokens=200,
+                temperature=0.1
+            )
+        )
+        
+        roman_text = response.choices[0].message.content.strip()
+        return roman_text
+        
+    except Exception as e:
+        print(f"[ROMAN URDU ERROR] Failed to convert: {e}")
+        return text  # Return original text if conversion fails
+
+# ---------------------------
 embedding_dim = 1536
 index = faiss.IndexFlatL2(embedding_dim)
 vector_store = []  # (text, embedding)
@@ -770,6 +821,11 @@ After each meaningful exchange with the user, use `addConversationInteraction` t
         """Handle user input when their turn is completed."""
         user_text = new_message.text_content
         print(f"[USER INPUT] {user_text}")
+        
+        # Print user input in Roman Urdu
+        roman_urdu_text = await convert_to_roman_urdu(user_text)
+        print(f"[USER INPUT ROMAN URDU] {roman_urdu_text}")
+        
         print(f"[USER TURN COMPLETED] Handler called successfully!")
         
         # Store user input for conversation tracking (immediate)
