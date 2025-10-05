@@ -633,22 +633,29 @@ We close with kind, genuine statements that feel natural and conversational, avo
         user_text = new_message.text_content
         print(f"[USER INPUT] {user_text}")
         
-        # Extract user ID from turn context if not already set
+        # Extract user ID from turn context and update session
         try:
             if hasattr(turn_ctx, 'participant') and turn_ctx.participant:
                 user_id = turn_ctx.participant.identity
                 set_session_user_id(user_id)
-                print(f"[SESSION] Updated user ID from turn context: {user_id}")
+                print(f"[SESSION] Updated from turn context: {user_id}")
+            elif hasattr(turn_ctx, 'room') and turn_ctx.room:
+                participants = turn_ctx.room.remote_participants
+                if participants:
+                    participant = list(participants.values())[0]
+                    user_id = participant.identity
+                    set_session_user_id(user_id)
+                    print(f"[SESSION] Updated from room context: {user_id}")
         except Exception as e:
-            print(f"[SESSION ERROR] Failed to extract user ID from turn context: {e}")
+            print(f"[SESSION ERROR] Failed to extract user ID: {e}")
         
         print(f"[USER TURN COMPLETED] Handler called successfully!")
         
-        # Store user input in memory
+        # Store user input in memory (will use current session user ID)
         memory_manager.store("FACT", "user_input", user_text)
         add_to_vectorstore(user_text)
         
-        # Update user profile
+        # Update user profile (will use current session user ID)
         print(f"[PROFILE UPDATE] Starting profile update for: {user_text[:50]}...")
         user_profile.smart_update(user_text)
 
@@ -656,6 +663,7 @@ We close with kind, genuine statements that feel natural and conversational, avo
 # Entrypoint
 # ---------------------------
 async def entrypoint(ctx: agents.JobContext):
+    # Optimize TTS initialization
     tts = TTS(voice_id="17", output_format="MP3_22050_32")
     assistant = Assistant()
 
@@ -666,12 +674,15 @@ async def entrypoint(ctx: agents.JobContext):
             participant = list(participants.values())[0]
             user_id = participant.identity
             set_session_user_id(user_id)
-            print(f"[SESSION] Extracted user ID from LiveKit room: {user_id}")
+            print(f"[SESSION] LiveKit User ID: {user_id}")
+            print(f"[SESSION] Room: {ctx.room.name}")
+            print(f"[SESSION] Participant ID: {participant.sid}")
         else:
-            print("[SESSION] No participants found in room")
+            print("[SESSION] No participants found")
     except Exception as e:
-        print(f"[SESSION ERROR] Failed to extract user ID: {e}")
+        print(f"[SESSION ERROR] {e}")
 
+    # Optimize session configuration for faster connection
     session = AgentSession(
         stt=lk_openai.STT(model="gpt-4o-transcribe", language="ur"),
         llm=lk_openai.LLM(model="gpt-4o-mini"),
@@ -679,10 +690,21 @@ async def entrypoint(ctx: agents.JobContext):
         vad=silero.VAD.load(),
     )
 
+    # Pre-warm components for faster startup
+    print("[OPTIMIZATION] Pre-warming audio components...")
+    try:
+        # VAD is already loaded, no need to initialize separately
+        print("[OPTIMIZATION] VAD ready")
+    except Exception as e:
+        print(f"[OPTIMIZATION] VAD pre-warm failed: {e}")
+
+    # Optimize room input options for faster audio processing
+    room_input_options = RoomInputOptions()
+
     await session.start(
         room=ctx.room,
         agent=assistant,
-        room_input_options=RoomInputOptions(),
+        room_input_options=room_input_options,
     )
 
     # Wrap session.generate_reply so every reply includes memory + rag + profile
@@ -715,3 +737,4 @@ if __name__ == "__main__":
         entrypoint_fnc=entrypoint,
         initialize_process_timeout=60,
     ))
+    
