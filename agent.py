@@ -429,9 +429,77 @@ class Assistant(Agent):
 
         return {"error": f"Unhandled route for key: {key}"}
 
+    @function_tool()
+    async def testMemorySave(self, context: RunContext, test_message: str):
+        """Test memory saving functionality manually"""
+        user_id = get_session_user_uuid()
+        livekit_identity = get_session_livekit_identity()
+        
+        print(f"[TEST] LiveKit Identity: {livekit_identity}")
+        print(f"[TEST] User UUID: {user_id}")
+        print(f"[TEST] Supabase Client: {'Connected' if SB else 'Not connected'}")
+        
+        if not user_id:
+            return {"error": "No user UUID - check LiveKit identity extraction"}
+        
+        if not SB:
+            return {"error": "Supabase not connected - check environment variables"}
+        
+        # Test memory save
+        import time
+        timestamp = int(time.time() * 1000)
+        memory_key = f"test_{timestamp}"
+        
+        success = upsert_memory(user_id, "FACT", memory_key, test_message)
+        
+        return {
+            "user_id": user_id,
+            "livekit_identity": livekit_identity,
+            "supabase_connected": SB is not None,
+            "memory_save_success": success,
+            "test_key": memory_key,
+            "test_message": test_message
+        }
+
     async def on_user_turn_completed(self, turn_ctx, new_message):
-        # Intentionally minimal (no auto writes)
-        print(f"[USER INPUT] {new_message.text_content}")
+        user_text = new_message.text_content
+        print(f"[USER INPUT] {user_text}")
+        
+        # Print LiveKit session ID for debugging
+        user_id = get_session_user_uuid()
+        livekit_identity = get_session_livekit_identity()
+        print(f"[SESSION DEBUG] LiveKit Identity: {livekit_identity}")
+        print(f"[SESSION DEBUG] User UUID: {user_id}")
+        
+        # Save user input to memory in background
+        if user_id:
+            import asyncio
+            import time
+            
+            async def save_user_input():
+                try:
+                    # Create unique memory key with timestamp
+                    timestamp = int(time.time() * 1000)
+                    memory_key = f"user_input_{timestamp}"
+                    
+                    # Save to memory
+                    success = upsert_memory(user_id, "FACT", memory_key, user_text)
+                    if success:
+                        print(f"[MEMORY SAVED] {memory_key}: {user_text[:50]}...")
+                    else:
+                        print(f"[MEMORY ERROR] Failed to save: {user_text[:50]}...")
+                        
+                    # Also update profile with new information
+                    merged_profile = merge_profile_text(user_id, user_text)
+                    print(f"[PROFILE UPDATED] {merged_profile[:100]}...")
+                    
+                except Exception as e:
+                    print(f"[SAVE ERROR] {e}")
+            
+            # Run in background without blocking response
+            asyncio.create_task(save_user_input())
+        else:
+            print("[MEMORY SKIP] No user UUID - cannot save memory")
 
 # ---------------------------
 # Entrypoint
@@ -454,6 +522,9 @@ async def entrypoint(ctx: agents.JobContext):
             livekit_identity = participant.identity  # e.g., 'user-02e0fa39-...'
             user_uuid = set_session_user_from_identity(livekit_identity)
             print(f"[SESSION INIT] Participant SID: {participant.sid}")
+            print(f"[SESSION INIT] LiveKit Identity: {livekit_identity}")
+            print(f"[SESSION INIT] Extracted User UUID: {user_uuid}")
+            print(f"[SESSION INIT] Supabase Connected: {'Yes' if SB else 'No'}")
         else:
             print("[SESSION] No remote participants. Running without DB-bound user.")
     except Exception as e:
