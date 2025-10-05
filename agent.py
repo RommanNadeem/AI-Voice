@@ -26,7 +26,7 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 from livekit import agents
 from livekit.agents import AgentSession, Agent, RoomInputOptions, function_tool, RunContext
 from livekit.plugins import openai as lk_openai
-from livekit.plugins import silero
+from livekit.plugins import silero, noise_cancellation
 from uplift_tts import TTS
 
 # ---------------------------
@@ -49,6 +49,11 @@ class Config:
     MAX_CACHE_SIZE = int(os.getenv('MAX_CACHE_SIZE', '1000'))
     REQUEST_TIMEOUT = int(os.getenv('REQUEST_TIMEOUT', '30'))  # seconds
     
+    # Latency optimization
+    ENABLE_RAG = os.getenv('ENABLE_RAG', 'false').lower() == 'true'
+    ENABLE_MEMORY_RETRIEVAL = os.getenv('ENABLE_MEMORY_RETRIEVAL', 'false').lower() == 'true'
+    ENABLE_ROMAN_URDU = os.getenv('ENABLE_ROMAN_URDU', 'true').lower() == 'true'
+    
     # Limits
     MAX_MEMORY_ENTRIES = int(os.getenv('MAX_MEMORY_ENTRIES', '10000'))
     MAX_CHAT_MESSAGES = int(os.getenv('MAX_CHAT_MESSAGES', '50'))
@@ -68,6 +73,23 @@ class Config:
 
 # Initialize OpenAI client
 client = OpenAI(api_key=Config.OPENAI_API_KEY)
+
+# ---------------------------
+# Audio Processing Configuration
+# ---------------------------
+class AudioConfig:
+    """Audio processing configuration for noise reduction"""
+    
+    # LiveKit Noise Cancellation Settings
+    NOISE_SUPPRESSION = os.getenv('NOISE_SUPPRESSION', 'true').lower() == 'true'
+    
+    # VAD (Voice Activity Detection) Settings - These are handled by Silero VAD
+    VAD_SENSITIVITY = float(os.getenv('VAD_SENSITIVITY', '0.3'))  # Lower = less sensitive to noise
+    VAD_ENABLED = os.getenv('VAD_ENABLED', 'true').lower() == 'true'
+    
+    # Additional Processing Options (for future use)
+    ECHO_CANCELLATION = os.getenv('ECHO_CANCELLATION', 'true').lower() == 'true'
+    AUTO_GAIN_CONTROL = os.getenv('AUTO_GAIN_CONTROL', 'true').lower() == 'true'
 
 # ---------------------------
 # Memory Manager
@@ -194,7 +216,7 @@ class MemoryManager:
             
             logger.info(f"Stored memory: [{category}] {key}")
             return f"Stored: [{category}] {key} = {value}"
-            
+
         except asyncio.TimeoutError:
             logger.error(f"Timeout storing memory: [{category}] {key}")
             return f"Error storing: Request timeout"
@@ -1413,41 +1435,75 @@ When saving, keep entries **short and concrete**.
         user_text = new_message.text_content
         print(f"[USER INPUT] {user_text}")
         
-        # Print user input in Roman Urdu
-        roman_urdu_text = await convert_to_roman_urdu(user_text)
-        print(f"[USER INPUT ROMAN URDU] {roman_urdu_text}")
-        
-        # Add user message to chat history
-        chat_history.add_user_message(user_text, roman_urdu_text)
-        
-        print(f"[USER TURN COMPLETED] Handler called successfully!")
-        
         # Store user input for conversation tracking (immediate)
         conversation_tracker.current_user_input = user_text
         
-        # Run lightweight operations in parallel (fast)
-        await asyncio.gather(
-            memory_manager.store("FACT", "user_input", user_text),
-            add_to_vectorstore(user_text)
-        )
+        # Defer ALL operations to background tasks (non-blocking)
+        asyncio.create_task(self._background_user_processing(user_text))
         
-        # Defer heavy operations to background task (non-blocking)
-        asyncio.create_task(self._background_profile_update(user_text))
+        print(f"[USER TURN COMPLETED] Handler called successfully!")
 
     async def capture_ai_response(self, ai_text: str):
-        """Capture AI response and add to chat history."""
+        """Capture AI response and add to chat history (non-blocking)."""
+        # Defer Roman Urdu conversion to background
+        asyncio.create_task(self._background_ai_response_processing(ai_text))
+        
+        print(f"[AI RESPONSE] {ai_text}")
+    
+    async def _background_ai_response_processing(self, ai_text: str):
+        """Background processing for AI response."""
         try:
-            # Convert AI response to Roman Urdu
-            roman_urdu_text = await convert_to_roman_urdu(ai_text)
-            
-            # Add AI message to chat history
-            chat_history.add_ai_message(ai_text, roman_urdu_text)
-            
-            print(f"[AI RESPONSE] {ai_text}")
-            print(f"[AI RESPONSE ROMAN URDU] {roman_urdu_text}")
+            if Config.ENABLE_ROMAN_URDU:
+                # Convert AI response to Roman Urdu
+                roman_urdu_text = await convert_to_roman_urdu(ai_text)
+                
+                # Add AI message to chat history
+                chat_history.add_ai_message(ai_text, roman_urdu_text)
+                
+                print(f"[AI RESPONSE ROMAN URDU] {roman_urdu_text}")
+            else:
+                # Add AI message without Roman Urdu conversion
+                chat_history.add_ai_message(ai_text, ai_text)
             
         except Exception as e:
             print(f"[AI RESPONSE ERROR] Failed to capture AI response: {e}")
+
+    async def _background_user_processing(self, user_text: str):
+        """Background task for all user input processing - runs after response."""
+        try:
+            print(f"[BACKGROUND PROCESSING] Starting for: {user_text[:50]}...")
+            
+            # Collect tasks based on configuration
+            tasks = []
+            
+            if Config.ENABLE_ROMAN_URDU:
+                tasks.append(self._process_roman_urdu(user_text))
+            
+            # Always store user input
+            tasks.append(memory_manager.store("FACT", "user_input", user_text))
+            
+            if Config.ENABLE_RAG:
+                tasks.append(add_to_vectorstore(user_text))
+            
+            # Always update profile
+            tasks.append(user_profile.smart_update(user_text))
+            
+            # Run tasks in parallel
+            if tasks:
+                await asyncio.gather(*tasks)
+            
+            print(f"[BACKGROUND PROCESSING] Completed for: {user_text[:50]}...")
+        except Exception as e:
+            print(f"[BACKGROUND PROCESSING ERROR] Failed: {e}")
+    
+    async def _process_roman_urdu(self, user_text: str):
+        """Process Roman Urdu conversion in background."""
+        try:
+            roman_urdu_text = await convert_to_roman_urdu(user_text)
+            print(f"[USER INPUT ROMAN URDU] {roman_urdu_text}")
+            chat_history.add_user_message(user_text, roman_urdu_text)
+        except Exception as e:
+            print(f"[ROMAN URDU ERROR] Failed: {e}")
 
     async def _background_profile_update(self, user_text: str):
         """Background task for heavy profile updates - runs after response."""
@@ -1465,57 +1521,55 @@ async def entrypoint(ctx: agents.JobContext):
     tts = TTS(voice_id="17", output_format="MP3_22050_32")
     assistant = Assistant()
 
+    # Configure VAD with noise reduction settings
+    vad = silero.VAD.load()
+    
+    # Configure audio processing options for noise reduction
+    # LiveKit's BVC (Background Voice Cancellation) uses AI to filter out:
+    # - Background voices and conversations
+    # - Ambient noise (fans, traffic, etc.)
+    # - Echo and feedback
+    # - Wind and air movement sounds
+    room_input_options = RoomInputOptions(
+        # Enable LiveKit's Background Voice Cancellation (BVC) for noise reduction
+        noise_cancellation=noise_cancellation.BVC() if AudioConfig.NOISE_SUPPRESSION else None,
+    )
+
     session = AgentSession(
         stt=lk_openai.STT(model="gpt-4o-transcribe", language="ur"),
         llm=lk_openai.LLM(model="gpt-4o-mini"),
         tts=tts,
-        vad=silero.VAD.load(),
+        vad=vad,
     )
 
     await session.start(
         room=ctx.room,
         agent=assistant,
-        room_input_options=RoomInputOptions(),
+        room_input_options=room_input_options,
     )
 
     # Load previous conversation summary
     previous_summary = await conversation_tracker.load_summary()
     print("[PREVIOUS SUMMARY]", previous_summary)
     
-    # Wrap session.generate_reply to track conversations
+    # Optimized response generation with minimal latency
     async def generate_with_memory(user_text: str = None, greet: bool = False):
-        # Run memory operations in parallel for faster response
-        past_memories, rag_context = await asyncio.gather(
-            memory_manager.retrieve_all(),
-            retrieve_from_vectorstore(user_text or "recent", k=2)
-        )
-        
-        # Get user profile (synchronous - already loaded)
+        # Use cached data for faster response (minimal database calls)
         user_profile_text = user_profile.get()
-
-        base_instructions = assistant.instructions
-        extra_context = f"""
-        User Profile: {user_profile_text}
-        Known memories: {past_memories}
-        Related knowledge: {rag_context}
-        """
         
-        # Add conversation summary if available
+        # Minimal context for faster response
+        extra_context = f"User Profile: {user_profile_text}"
+        
         if previous_summary:
             extra_context += f"\nPrevious conversation context: {previous_summary}"
 
         if greet:
-            # Print RAG context for QA
-            print(f"[RAG CONTEXT FOR FIRST MESSAGE] {rag_context}")
-            print(f"[USER PROFILE FOR FIRST MESSAGE] {user_profile_text}")
-            print(f"[MEMORIES FOR FIRST MESSAGE] {past_memories}")
-            
-            # Generate greeting response using RAG context and last_conversation_summary
-            greeting_instructions = f"Greet the user warmly in Urdu. Use the RAG context and previous conversation context to personalize the greeting.\n\n{base_instructions}\n\n{extra_context}"
+            # Generate greeting with minimal context
+            greeting_instructions = f"Greet the user warmly in Urdu. Use the user profile and previous conversation context to personalize the greeting.\n\n{assistant.instructions}\n\n{extra_context}"
             await session.generate_reply(instructions=greeting_instructions)
         else:
-            # Generate response to user input
-            response_instructions = f"{base_instructions}\n\nUse this context:\n{extra_context}\nUser said: {user_text}"
+            # Generate response to user input with minimal context
+            response_instructions = f"{assistant.instructions}\n\nUse this context:\n{extra_context}\nUser said: {user_text}"
             await session.generate_reply(instructions=response_instructions)
             
             # Note: The actual assistant response will be captured by the session
