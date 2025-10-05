@@ -251,6 +251,88 @@ def get_user_id():
     return get_current_user()
 
 # ---------------------------
+# Memory Categorization
+# ---------------------------
+def categorize_user_input(user_text: str) -> str:
+    """
+    Dynamically categorize user input based on content analysis.
+    Returns the most appropriate memory category.
+    """
+    user_text_lower = user_text.lower()
+    
+    # Goal-related patterns
+    goal_patterns = [
+        "want to", "want to be", "aspire to", "goal is", "hoping to", "planning to",
+        "dream of", "aim to", "strive for", "working towards", "trying to achieve",
+        "would like to", "my goal", "my dream", "my aspiration"
+    ]
+    if any(pattern in user_text_lower for pattern in goal_patterns):
+        return "GOAL"
+    
+    # Interest/hobby patterns
+    interest_patterns = [
+        "i like", "i love", "i enjoy", "i'm interested in", "my hobby", "hobbies",
+        "i'm passionate about", "favorite", "i prefer", "i'm into", "i'm a fan of"
+    ]
+    if any(pattern in user_text_lower for pattern in interest_patterns):
+        return "INTEREST"
+    
+    # Opinion patterns
+    opinion_patterns = [
+        "i think", "i believe", "in my opinion", "i feel", "i consider",
+        "i'm of the view", "my view is", "i'm convinced", "i disagree", "i agree"
+    ]
+    if any(pattern in user_text_lower for pattern in opinion_patterns):
+        return "OPINION"
+    
+    # Experience patterns
+    experience_patterns = [
+        "i experienced", "i went through", "happened to me", "i had", "i did",
+        "i've been", "i was", "i used to", "i remember", "i recall",
+        "my experience", "when i", "once i", "i used to"
+    ]
+    if any(pattern in user_text_lower for pattern in experience_patterns):
+        return "EXPERIENCE"
+    
+    # Preference patterns
+    preference_patterns = [
+        "i prefer", "i'd rather", "i like better", "my choice is", "i choose",
+        "i'd prefer", "instead of", "rather than", "i opt for", "over tea", "over coffee",
+        "better than", "more than", "rather have"
+    ]
+    if any(pattern in user_text_lower for pattern in preference_patterns):
+        return "PREFERENCE"
+    
+    # Plan patterns
+    plan_patterns = [
+        "i'm planning", "i plan to", "i will", "i'm going to", "i intend to",
+        "my plan is", "i'm thinking of", "i'm considering", "next week", "tomorrow",
+        "this weekend", "i'm going to", "i'll do"
+    ]
+    if any(pattern in user_text_lower for pattern in plan_patterns):
+        return "PLAN"
+    
+    # Relationship patterns
+    relationship_patterns = [
+        "my friend", "my family", "my partner", "my spouse", "my parents",
+        "my children", "my colleague", "my boss", "my teacher", "my mentor",
+        "my relationship", "we are", "they are", "he is", "she is"
+    ]
+    if any(pattern in user_text_lower for pattern in relationship_patterns):
+        return "RELATIONSHIP"
+    
+    # Campaign/project patterns
+    campaign_patterns = [
+        "my project", "working on", "i'm developing", "building", "creating",
+        "campaign", "initiative", "program", "my work on", "i'm building"
+    ]
+    if any(pattern in user_text_lower for pattern in campaign_patterns):
+        return "CAMPAIGNS"
+    
+    # Default to FACT for general statements, facts, or unclear content
+    return "FACT"
+
+# ---------------------------
 # Helper Functions
 # ---------------------------
 # RLS Policy for user_profiles table:
@@ -632,8 +714,12 @@ We close with kind, genuine statements that feel natural and conversational, avo
         timestamp = int(time.time() * 1000)  # milliseconds for uniqueness
         memory_key = f"user_input_{timestamp}"
         
-        # Store user input in memory with unique key (will use current session user ID)
-        memory_result = memory_manager.store("FACT", memory_key, user_text)
+        # Dynamically categorize user input
+        category = categorize_user_input(user_text)
+        print(f"[MEMORY CATEGORIZATION] '{user_text[:50]}...' -> {category}")
+        
+        # Store user input in memory with dynamic category and unique key (will use current session user ID)
+        memory_result = memory_manager.store(category, memory_key, user_text)
         print(f"[MEMORY STORED] {memory_result}")
         add_to_vectorstore(user_text)
         
