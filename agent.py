@@ -102,21 +102,45 @@ def ensure_profiles_row(user_id: str, email_hint: Optional[str] = None) -> bool:
     Ensure a row exists in public.profiles for the given user_id (FK to auth.users).
     NOTE: This succeeds only if auth.users already has this UUID.
     """
-    if not (SB and user_id):
+    print(f"[PROFILES DEBUG] Ensuring profiles row for user: {user_id}")
+    
+    if not SB:
+        print(f"[PROFILES ERROR] Supabase client not available")
         return False
+        
+    if not user_id:
+        print(f"[PROFILES ERROR] No user ID provided")
+        return False
+        
     try:
+        print(f"[PROFILES DEBUG] Checking if profile exists...")
         chk = SB.table("profiles").select("id").eq("id", user_id).limit(1).execute()
+        print(f"[PROFILES DEBUG] Check result: {chk}")
+        
         if chk.data:
+            print(f"[PROFILES SUCCESS] Profile already exists")
             return True
+            
+        print(f"[PROFILES DEBUG] Profile not found, creating new one...")
+        email = email_hint or f"user_{user_id[:8]}@local"
+        print(f"[PROFILES DEBUG] Using email: {email}")
+        
         # Insert a placeholder row; will fail if FK to auth.users is missing
-        SB.table("profiles").insert({
+        result = SB.table("profiles").insert({
             "id": user_id,
-            "email": email_hint or f"user_{user_id[:8]}@local",
+            "email": email,
             "is_first_login": True
         }).execute()
+        
+        print(f"[PROFILES DEBUG] Insert result: {result}")
+        print(f"[PROFILES SUCCESS] Profile created successfully")
         return True
+        
     except Exception as e:
-        print(f"[DB] ensure_profiles_row error: {e}")
+        print(f"[PROFILES ERROR] ensure_profiles_row failed: {e}")
+        print(f"[PROFILES ERROR] Exception type: {type(e).__name__}")
+        import traceback
+        print(f"[PROFILES ERROR] Full traceback: {traceback.format_exc()}")
         return False
 
 def fetch_profile_text(user_id: str) -> str:
@@ -205,20 +229,50 @@ def fetch_memories(user_id: str, limit: int = 100) -> List[Dict[str, Any]]:
         return []
 
 def upsert_memory(user_id: str, category: str, key: str, value: str) -> bool:
-    if not (SB and user_id):
+    print(f"[MEMORY DEBUG] Attempting to save memory:")
+    print(f"[MEMORY DEBUG] - User ID: {user_id}")
+    print(f"[MEMORY DEBUG] - Category: {category}")
+    print(f"[MEMORY DEBUG] - Key: {key}")
+    print(f"[MEMORY DEBUG] - Value: {value[:100]}...")
+    print(f"[MEMORY DEBUG] - Supabase Client: {'Connected' if SB else 'Not connected'}")
+    
+    if not SB:
+        print(f"[MEMORY ERROR] Supabase client not available")
+        print(f"[MEMORY ERROR] SUPABASE_URL: {SUPABASE_URL}")
+        print(f"[MEMORY ERROR] SUPABASE_SERVICE_ROLE_KEY: {'Set' if SUPABASE_SERVICE_ROLE_KEY else 'Not set'}")
+        print(f"[MEMORY ERROR] SUPABASE_ANON_KEY: {'Set' if SUPABASE_ANON_KEY else 'Not set'}")
         return False
+        
+    if not user_id:
+        print(f"[MEMORY ERROR] No user ID provided")
+        return False
+        
     try:
-        if not ensure_profiles_row(user_id):
+        print(f"[MEMORY DEBUG] Ensuring profiles row exists...")
+        profiles_ok = ensure_profiles_row(user_id)
+        print(f"[MEMORY DEBUG] Profiles row check: {'OK' if profiles_ok else 'FAILED'}")
+        
+        if not profiles_ok:
+            print(f"[MEMORY ERROR] Could not ensure profiles row exists")
             return False
-        SB.table("memory").upsert({
+            
+        print(f"[MEMORY DEBUG] Attempting database upsert...")
+        result = SB.table("memory").upsert({
             "user_id": user_id,
             "category": (category or "FACT").upper(),
             "key": key,
             "value": value
         }).execute()
+        
+        print(f"[MEMORY DEBUG] Database response: {result}")
+        print(f"[MEMORY SUCCESS] Memory saved successfully!")
         return True
+        
     except Exception as e:
-        print(f"[DB] memory upsert error: {e}")
+        print(f"[MEMORY ERROR] Database upsert failed: {e}")
+        print(f"[MEMORY ERROR] Exception type: {type(e).__name__}")
+        import traceback
+        print(f"[MEMORY ERROR] Full traceback: {traceback.format_exc()}")
         return False
 
 def fetch_memory_value(user_id: str, category: str, key: str) -> Optional[str]:
@@ -460,6 +514,52 @@ class Assistant(Agent):
             "test_key": memory_key,
             "test_message": test_message
         }
+
+    @function_tool()
+    async def debugProduction(self, context: RunContext):
+        """Debug production environment issues"""
+        user_id = get_session_user_uuid()
+        livekit_identity = get_session_livekit_identity()
+        
+        debug_info = {
+            "environment": {
+                "supabase_url": SUPABASE_URL,
+                "supabase_service_role_key_set": bool(SUPABASE_SERVICE_ROLE_KEY),
+                "supabase_anon_key_set": bool(SUPABASE_ANON_KEY),
+                "supabase_client_connected": SB is not None
+            },
+            "session": {
+                "livekit_identity": livekit_identity,
+                "user_uuid": user_id,
+                "uuid_extracted": bool(user_id)
+            },
+            "database": {}
+        }
+        
+        # Test database connectivity
+        if SB and user_id:
+            try:
+                # Test profiles table
+                profiles_test = SB.table("profiles").select("id").eq("id", user_id).limit(1).execute()
+                debug_info["database"]["profiles_table_accessible"] = True
+                debug_info["database"]["profiles_row_exists"] = bool(profiles_test.data)
+                
+                # Test memory table
+                memory_test = SB.table("memory").select("user_id").eq("user_id", user_id).limit(1).execute()
+                debug_info["database"]["memory_table_accessible"] = True
+                debug_info["database"]["memory_rows_count"] = len(memory_test.data or [])
+                
+                # Test user_profiles table
+                user_profiles_test = SB.table("user_profiles").select("user_id").eq("user_id", user_id).limit(1).execute()
+                debug_info["database"]["user_profiles_table_accessible"] = True
+                debug_info["database"]["user_profiles_row_exists"] = bool(user_profiles_test.data)
+                
+            except Exception as e:
+                debug_info["database"]["error"] = str(e)
+                debug_info["database"]["error_type"] = type(e).__name__
+        
+        print(f"[PRODUCTION DEBUG] {debug_info}")
+        return debug_info
 
     async def on_user_turn_completed(self, turn_ctx, new_message):
         user_text = new_message.text_content
