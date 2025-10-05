@@ -16,7 +16,17 @@ from livekit import agents
 from livekit.agents import AgentSession, Agent, RoomInputOptions, function_tool, RunContext
 from livekit.plugins import openai as lk_openai
 from livekit.plugins import silero
-from uplift_tts import TTS
+
+# Import TTS with fallback
+try:
+    from uplift_tts import TTS
+except ImportError:
+    print("[WARNING] uplift_tts not available, using default TTS")
+    # Fallback to a basic TTS implementation
+    class TTS:
+        def __init__(self, voice_id="17", output_format="MP3_22050_32"):
+            self.voice_id = voice_id
+            self.output_format = output_format
 
 # ---------------------------
 # Logging: keep output clean
@@ -31,12 +41,46 @@ for noisy in ("httpx", "httpcore", "hpack", "urllib3"):
 load_dotenv()
 
 # OpenAI
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+if not OPENAI_API_KEY:
+    print("[ERROR] OPENAI_API_KEY not found in environment variables")
+    client = None
+else:
+    try:
+        client = OpenAI(api_key=OPENAI_API_KEY)
+        print("[SUCCESS] OpenAI client initialized")
+    except Exception as e:
+        print(f"[ERROR] Failed to initialize OpenAI client: {e}")
+        client = None
 
 # Supabase env
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")  # preferred for server writes/reads
 SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")                  # fallback for public reads
+
+# Validate environment variables
+def validate_environment():
+    """Validate required environment variables"""
+    missing_vars = []
+    
+    if not OPENAI_API_KEY:
+        missing_vars.append("OPENAI_API_KEY")
+    
+    if not SUPABASE_URL:
+        missing_vars.append("SUPABASE_URL")
+    
+    if not SUPABASE_SERVICE_ROLE_KEY and not SUPABASE_ANON_KEY:
+        missing_vars.append("SUPABASE_SERVICE_ROLE_KEY or SUPABASE_ANON_KEY")
+    
+    if missing_vars:
+        print(f"[ERROR] Missing required environment variables: {', '.join(missing_vars)}")
+        return False
+    
+    print("[SUCCESS] All required environment variables found")
+    return True
+
+# Validate environment on startup
+validate_environment()
 
 # ---------------------------
 # Session Context (thread-safe)
@@ -87,9 +131,22 @@ def get_session_livekit_identity() -> Optional[str]:
 def get_sb_client() -> Optional[Client]:
     # Prefer service role for writes/reads with RLS-sensitive tables
     if SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY:
-        return create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+        try:
+            client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+            print("[SUCCESS] Supabase client initialized with service role key")
+            return client
+        except Exception as e:
+            print(f"[ERROR] Failed to create Supabase client with service role: {e}")
+    
     if SUPABASE_URL and SUPABASE_ANON_KEY:
-        return create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
+        try:
+            client = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
+            print("[SUCCESS] Supabase client initialized with anon key")
+            return client
+        except Exception as e:
+            print(f"[ERROR] Failed to create Supabase client with anon key: {e}")
+    
+    print("[ERROR] No valid Supabase credentials found")
     return None
 
 SB: Optional[Client] = get_sb_client()
@@ -174,6 +231,11 @@ def merge_profile_text(user_id: str, snippet: str) -> str:
     Model-assisted merge of snippet into existing profile_text, then persist.
     """
     base = fetch_profile_text(user_id)
+    
+    if not client:
+        print(f"[PROFILE MERGE ERROR] OpenAI client not available")
+        return base
+        
     try:
         resp = client.chat.completions.create(
             model="gpt-4o-mini",
@@ -344,8 +406,16 @@ index = faiss.IndexFlatL2(embedding_dim)
 vector_store = []  # (text, embedding)
 
 def embed_text(text: str):
-    emb = client.embeddings.create(model="text-embedding-3-small", input=text).data[0].embedding
-    return np.array(emb, dtype="float32")
+    if not client:
+        print(f"[EMBEDDING ERROR] OpenAI client not available")
+        return np.zeros(embedding_dim, dtype="float32")
+    
+    try:
+        emb = client.embeddings.create(model="text-embedding-3-small", input=text).data[0].embedding
+        return np.array(emb, dtype="float32")
+    except Exception as e:
+        print(f"[EMBEDDING ERROR] {e}")
+        return np.zeros(embedding_dim, dtype="float32")
 
 def add_to_vectorstore(text: str):
     emb = embed_text(text)
@@ -636,6 +706,8 @@ async def entrypoint(ctx: agents.JobContext):
                     print(f"[USER DATA] Email: {user_data.user.email}")
                     print(f"[USER DATA] Created: {user_data.user.created_at}")
                     print(f"[USER DATA] Metadata: {user_data.user.user_metadata}")
+                except AttributeError:
+                    print(f"[USER DATA ERROR] Admin API not available - using service role key")
                 except Exception as auth_error:
                     print(f"[USER DATA ERROR] Could not fetch user from Supabase Auth: {auth_error}")
                     print(f"[USER DATA ERROR] This might be normal if using service role key")
