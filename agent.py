@@ -77,7 +77,7 @@ class MemoryManager:
                 'value': value
             }).execute()
             
-        return f"Stored: [{category}] {key} = {value}"
+            return f"Stored: [{category}] {key} = {value}"
         except Exception as e:
             return f"Error storing: {e}"
 
@@ -127,7 +127,7 @@ class MemoryManager:
             user_id = get_user_id()
             
             response = self.supabase.table('memory').delete().eq('user_id', user_id).eq('category', category).eq('key', key).execute()
-        return f"Forgot: [{category}] {key}"
+            return f"Forgot: [{category}] {key}"
         except Exception as e:
             return f"Error forgetting: {e}"
 
@@ -452,37 +452,30 @@ class ConversationTracker:
         return self.interactions.copy()
     
     async def generate_summary(self):
-        """Generate a summary of recent interactions using OpenAI."""
+        """Generate a simple summary of the last 3-4 interactions."""
         if not self.interactions:
             return "No recent conversation history."
         
         try:
-            # Prepare conversation text
+            # Take only the last 3-4 interactions
+            recent_interactions = self.interactions[-4:] if len(self.interactions) >= 4 else self.interactions
+            
+            # Prepare simple conversation text
             conversation_text = ""
-            for i, interaction in enumerate(self.interactions, 1):
-                conversation_text += f"Interaction {i}:\n"
+            for interaction in recent_interactions:
                 conversation_text += f"User: {interaction['user_input']}\n"
                 conversation_text += f"Assistant: {interaction['assistant_response']}\n\n"
             
-            # Generate summary
+            # Generate simple summary
             response = await asyncio.to_thread(
                 lambda: client.chat.completions.create(
                     model="gpt-4o-mini",
                     messages=[
                         {
                             "role": "system",
-                            "content": """Create a concise summary of the recent conversation between the user and assistant. 
-                            
-                            Focus on:
-                            - Key topics discussed
-                            - User's main concerns or interests
-                            - Important information shared by the user
-                            - Any ongoing themes or patterns
-                            
-                            Keep it brief (2-3 sentences) and useful for providing context in future conversations.
-                            Write in a natural, conversational tone."""
+                            "content": """Summarize the last few lines of conversation in 1-2 sentences. Keep it simple and brief."""
                         },
-                        {"role": "user", "content": f"Recent conversation:\n{conversation_text}"}
+                        {"role": "user", "content": f"Last conversation:\n{conversation_text}"}
                     ]
                 )
             )
@@ -504,7 +497,7 @@ class ConversationTracker:
             print(f"[CONVERSATION ERROR] Failed to save summary: {e}")
     
     async def load_summary(self):
-        """Load the last conversation summary from memory."""
+        """Load the last conversation summary from memory using the specific key."""
         try:
             summary = await memory_manager.retrieve("FACT", "last_conversation_summary")
             if summary:
@@ -867,7 +860,9 @@ The chat history is perfect for rendering in chat interfaces and provides both o
         val = await memory_manager.retrieve(category, key)
         return {"value": val or ""}
 
-    # Memory deletion removed for data protection
+    @function_tool()
+    async def forgetMemory(self, context: RunContext, category: str, key: str):
+        return {"result": await memory_manager.forget(category, key)}
 
     @function_tool()
     async def listAllMemories(self, context: RunContext):
@@ -1011,6 +1006,7 @@ async def entrypoint(ctx: agents.JobContext):
 
     # Load previous conversation summary
     previous_summary = await conversation_tracker.load_summary()
+    print("[PREVIOUS SUMMARY]", previous_summary)
     
     # Wrap session.generate_reply to track conversations
     async def generate_with_memory(user_text: str = None, greet: bool = False):
@@ -1035,8 +1031,13 @@ async def entrypoint(ctx: agents.JobContext):
             extra_context += f"\nPrevious conversation context: {previous_summary}"
 
         if greet:
-            # Generate greeting response
-            greeting_instructions = f"Greet the user warmly in Urdu. Reference the previous conversation context if available.\n\n{base_instructions}\n\n{extra_context}"
+            # Print RAG context for QA
+            print(f"[RAG CONTEXT FOR FIRST MESSAGE] {rag_context}")
+            print(f"[USER PROFILE FOR FIRST MESSAGE] {user_profile_text}")
+            print(f"[MEMORIES FOR FIRST MESSAGE] {past_memories}")
+            
+            # Generate greeting response using RAG context and last_conversation_summary
+            greeting_instructions = f"Greet the user warmly in Urdu. Use the RAG context and previous conversation context to personalize the greeting.\n\n{base_instructions}\n\n{extra_context}"
             await session.generate_reply(instructions=greeting_instructions)
         else:
             # Generate response to user input
