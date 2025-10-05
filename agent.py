@@ -215,6 +215,7 @@ class MemoryManager:
             )
             
             logger.info(f"Stored memory: [{category}] {key}")
+            print(f"🧠 [MEMORY SAVED] [{category}] {key} = {value[:100]}{'...' if len(value) > 100 else ''}")
             return f"Stored: [{category}] {key} = {value}"
 
         except asyncio.TimeoutError:
@@ -243,7 +244,10 @@ class MemoryManager:
             
             response = self.supabase.table('memory').select('value').eq('user_id', user_id).eq('category', category).eq('key', key).execute()
             if response.data:
-                return response.data[0]['value']
+                value = response.data[0]['value']
+                print(f"🔍 [MEMORY RETRIEVED] [{category}] {key} = {value[:100]}{'...' if len(value) > 100 else ''}")
+                return value
+            print(f"🔍 [MEMORY NOT FOUND] [{category}] {key}")
             return None
         except ValueError:
             return None  # Authentication error - return None silently
@@ -266,6 +270,10 @@ class MemoryManager:
             response = self.supabase.table('memory').select('category, key, value').eq('user_id', user_id).execute()
             result = {f"{row['category']}:{row['key']}": row['value'] for row in response.data}
             
+            print(f"📚 [ALL MEMORIES LOADED] Found {len(result)} memory entries")
+            for key, value in result.items():
+                print(f"   📝 {key}: {value[:50]}{'...' if len(value) > 50 else ''}")
+            
             # Cache the result
             perf_cache.set_cached_memory("all", result)
             return result
@@ -283,6 +291,7 @@ class MemoryManager:
             user_id = get_user_id()
             
             response = self.supabase.table('memory').delete().eq('user_id', user_id).eq('category', category).eq('key', key).execute()
+            print(f"🗑️ [MEMORY DELETED] [{category}] {key}")
             return f"Forgot: [{category}] {key}"
         except ValueError as e:
             return f"Authentication error: {e}"
@@ -311,9 +320,10 @@ class MemoryManager:
             
             if response.data:
                 logger.info(f"[PROFILE] Successfully saved profile for user: {user_id}")
-                print(f"[User Profile Updated]: {profile_text[:100]}...")
+                print(f"👤 [PROFILE UPDATED] {profile_text[:100]}{'...' if len(profile_text) > 100 else ''}")
             else:
                 logger.error(f"[PROFILE ERROR] Failed to save profile for user: {user_id}")
+                print(f"❌ [PROFILE ERROR] Failed to save profile for user: {user_id}")
                 
         except ValueError as e:
             logger.error(f"[PROFILE ERROR] Authentication error: {e}")
@@ -340,9 +350,11 @@ class MemoryManager:
             if response.data and len(response.data) > 0:
                 profile_text = response.data[0]['profile_text']
                 logger.info(f"[PROFILE] Loaded profile for user: {user_id}")
+                print(f"📖 [PROFILE LOADED] {profile_text[:100]}{'...' if len(profile_text) > 100 else ''}")
                 return profile_text or ""
             else:
                 logger.info(f"[PROFILE] No profile found for user: {user_id}")
+                print(f"📭 [PROFILE EMPTY] No profile found for user: {user_id}")
                 return ""
         except ValueError as e:
             logger.error(f"[PROFILE ERROR] Authentication error: {e}")
@@ -593,6 +605,7 @@ def get_current_user():
                 self.id = user_id
         
         logger.info(f"[AUTH] Using default user: {default_user_id}")
+        print(f"🔐 [AUTH] Using default user: {default_user_id}")
         return MockUser(default_user_id)
         
     except Exception as e:
@@ -1477,7 +1490,7 @@ When saving, keep entries **short and concrete**.
     async def on_user_turn_completed(self, turn_ctx, new_message):
         """Handle user input when their turn is completed."""
         user_text = new_message.text_content
-        print(f"[USER INPUT] {user_text}")
+        print(f"👤 [USER INPUT] {user_text}")
         
         # Store user input for conversation tracking (immediate)
         conversation_tracker.current_user_input = user_text
@@ -1485,14 +1498,14 @@ When saving, keep entries **short and concrete**.
         # Defer ALL operations to background tasks (non-blocking)
         asyncio.create_task(self._background_user_processing(user_text))
         
-        print(f"[USER TURN COMPLETED] Handler called successfully!")
+        print(f"✅ [USER TURN COMPLETED] Handler called successfully!")
 
     async def capture_ai_response(self, ai_text: str):
         """Capture AI response and add to chat history (non-blocking)."""
+        print(f"🤖 [AI RESPONSE] {ai_text}")
+        
         # Defer Roman Urdu conversion to background
         asyncio.create_task(self._background_ai_response_processing(ai_text))
-        
-        print(f"[AI RESPONSE] {ai_text}")
     
     async def _background_ai_response_processing(self, ai_text: str):
         """Background processing for AI response."""
@@ -1515,7 +1528,7 @@ When saving, keep entries **short and concrete**.
     async def _background_user_processing(self, user_text: str):
         """Background task for all user input processing - runs after response."""
         try:
-            print(f"[BACKGROUND PROCESSING] Starting for: {user_text[:50]}...")
+            print(f"⚙️ [BACKGROUND PROCESSING] Starting for: {user_text[:50]}...")
             
             # Collect tasks based on configuration
             tasks = []
@@ -1536,18 +1549,18 @@ When saving, keep entries **short and concrete**.
             if tasks:
                 await asyncio.gather(*tasks)
             
-            print(f"[BACKGROUND PROCESSING] Completed for: {user_text[:50]}...")
+            print(f"✅ [BACKGROUND PROCESSING] Completed for: {user_text[:50]}...")
         except Exception as e:
-            print(f"[BACKGROUND PROCESSING ERROR] Failed: {e}")
+            print(f"❌ [BACKGROUND PROCESSING ERROR] Failed: {e}")
     
     async def _process_roman_urdu(self, user_text: str):
         """Process Roman Urdu conversion in background."""
         try:
             roman_urdu_text = await convert_to_roman_urdu(user_text)
-            print(f"[USER INPUT ROMAN URDU] {roman_urdu_text}")
+            print(f"🔄 [ROMAN URDU CONVERSION] {roman_urdu_text}")
             chat_history.add_user_message(user_text, roman_urdu_text)
         except Exception as e:
-            print(f"[ROMAN URDU ERROR] Failed: {e}")
+            print(f"❌ [ROMAN URDU ERROR] Failed: {e}")
 
     async def _background_profile_update(self, user_text: str):
         """Background task for heavy profile updates - runs after response."""
@@ -1562,11 +1575,14 @@ When saving, keep entries **short and concrete**.
 # Entrypoint
 # ---------------------------
 async def entrypoint(ctx: agents.JobContext):
+    print(f"🚀 [AGENT STARTING] LiveKit AI Agent initializing...")
     tts = TTS(voice_id="17", output_format="MP3_22050_32")
     assistant = Assistant()
+    print(f"🎤 [TTS INITIALIZED] Voice ID: 17, Format: MP3_22050_32")
 
     # Configure VAD with noise reduction settings
     vad = silero.VAD.load()
+    print(f"🎧 [VAD INITIALIZED] Voice Activity Detection enabled")
     
     # Configure audio processing options for noise reduction
     # LiveKit's BVC (Background Voice Cancellation) uses AI to filter out:
@@ -1578,6 +1594,7 @@ async def entrypoint(ctx: agents.JobContext):
         # Enable LiveKit's Background Voice Cancellation (BVC) for noise reduction
         noise_cancellation=noise_cancellation.BVC() if AudioConfig.NOISE_SUPPRESSION else None,
     )
+    print(f"🔇 [NOISE CANCELLATION] {'Enabled' if AudioConfig.NOISE_SUPPRESSION else 'Disabled'}")
 
     session = AgentSession(
         stt=lk_openai.STT(model="gpt-4o-transcribe", language="ur"),
@@ -1585,12 +1602,14 @@ async def entrypoint(ctx: agents.JobContext):
         tts=tts,
         vad=vad,
     )
+    print(f"🎯 [SESSION CONFIGURED] STT: gpt-4o-transcribe (Urdu), LLM: gpt-4o-mini")
 
     await session.start(
         room=ctx.room,
         agent=assistant,
         room_input_options=room_input_options,
     )
+    print(f"🎉 [AGENT READY] LiveKit AI Agent is now active and ready for conversations!")
 
     # Load previous conversation summary
     previous_summary = await conversation_tracker.load_summary()
