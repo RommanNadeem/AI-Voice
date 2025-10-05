@@ -627,8 +627,14 @@ We close with kind, genuine statements that feel natural and conversational, avo
         
         print(f"[USER TURN COMPLETED] Handler called successfully!")
         
-        # Store user input in memory (will use current session user ID)
-        memory_manager.store("FACT", "user_input", user_text)
+        # Create unique memory key with timestamp to avoid overwriting
+        import time
+        timestamp = int(time.time() * 1000)  # milliseconds for uniqueness
+        memory_key = f"user_input_{timestamp}"
+        
+        # Store user input in memory with unique key (will use current session user ID)
+        memory_result = memory_manager.store("FACT", memory_key, user_text)
+        print(f"[MEMORY STORED] {memory_result}")
         add_to_vectorstore(user_text)
         
         # Update user profile (will use current session user ID)
