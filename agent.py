@@ -17,12 +17,21 @@ from uplift_tts import TTS
 load_dotenv()
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-# Suppress verbose HTTP/2 debug logs
-import logging
-logging.getLogger("hpack.hpack").setLevel(logging.WARNING)
-logging.getLogger("httpx").setLevel(logging.WARNING)
-logging.getLogger("httpcore").setLevel(logging.WARNING)
-logging.getLogger("urllib3").setLevel(logging.WARNING)
+# ---------------------------
+# Session Context Management
+# ---------------------------
+# Global variable to store current session user ID
+current_session_user_id = None
+
+def set_session_user_id(user_id: str):
+    """Set the current session user ID from LiveKit."""
+    global current_session_user_id
+    current_session_user_id = user_id
+    print(f"[SESSION] User ID set to: {user_id}")
+
+def get_session_user_id():
+    """Get the current session user ID."""
+    return current_session_user_id
 
 # ---------------------------
 # Memory Manager
@@ -68,18 +77,16 @@ class MemoryManager:
             if not ensure_profile_exists(user_id):
                 return f"Error storing: Profile not found for user {user_id}"
             
-            # Use upsert to insert or update, handling unique constraint
+            # Use upsert to insert or update
             response = self.supabase.table('memory').upsert({
                 'user_id': user_id,
                 'category': category,
                 'key': key,
                 'value': value
-            }, on_conflict='user_id,category,key').execute()
+            }).execute()
             
-            print(f"🧠 [MEMORY SAVED] [{category}] {key} = {value[:100]}{'...' if len(value) > 100 else ''}")
             return f"Stored: [{category}] {key} = {value}"
         except Exception as e:
-            print(f"❌ [MEMORY ERROR] Failed to store: {e}")
             return f"Error storing: {e}"
 
     def retrieve(self, category: str, key: str):
@@ -119,10 +126,8 @@ class MemoryManager:
             user_id = get_user_id()
             
             response = self.supabase.table('memory').delete().eq('user_id', user_id).eq('category', category).eq('key', key).execute()
-            print(f"🗑️ [MEMORY DELETED] [{category}] {key}")
             return f"Forgot: [{category}] {key}"
         except Exception as e:
-            print(f"❌ [MEMORY ERROR] Failed to delete: {e}")
             return f"Error forgetting: {e}"
 
     def save_profile(self, profile_text: str):
@@ -168,65 +173,30 @@ memory_manager = MemoryManager()
 # ---------------------------
 # Authentication Helpers
 # ---------------------------
-# Global variable to store current session user ID
-current_session_user_id = None
-
 def get_current_user():
-    """Get current user ID from LiveKit session or Supabase Auth."""
-    global current_session_user_id
-    
+    """Get the current user ID, prioritizing LiveKit session over Supabase Auth."""
     try:
-        # First priority: Use user ID from LiveKit session
-        if current_session_user_id:
-            print(f"[AUTH] Using LiveKit session user: {current_session_user_id}")
-            return current_session_user_id
+        # First, try to get user ID from LiveKit session
+        session_user_id = get_session_user_id()
+        if session_user_id:
+            print(f"[AUTH] Using LiveKit session user: {session_user_id}")
+            return session_user_id
         
-        # Second priority: Try Supabase Auth (for web clients)
-        if memory_manager.supabase is not None:
-            try:
-                user_response = memory_manager.supabase.auth.get_user()
-                if user_response and user_response.user:
-                    user_id = user_response.user.id
-                    print(f"[AUTH] Using Supabase Auth user: {user_id}")
-                    return user_id
-            except Exception as auth_error:
-                print(f"[AUTH] Supabase Auth not available: {auth_error}")
+        # Fallback to Supabase Auth if available
+        if memory_manager.supabase is None:
+            print("[AUTH] Supabase not available, using default user")
+            return "60ce7881-3dc8-486d-b2c6-2ad6f6fe3dd8"
         
-        # Fallback: Use default user ID
-        print("[AUTH] Using fallback user ID")
-        return "60ce7881-3dc8-486d-b2c6-2ad6f6fe3dd8"
-            
+        user = memory_manager.supabase.auth.get_user()
+        if user and user.user:
+            print(f"[AUTH] Using Supabase Auth user: {user.user.id}")
+            return user.user.id
+        else:
+            print("[AUTH] No authenticated user found, using default")
+            return "60ce7881-3dc8-486d-b2c6-2ad6f6fe3dd8"
     except Exception as e:
         print(f"[AUTH ERROR] Failed to get current user: {e}")
         return "60ce7881-3dc8-486d-b2c6-2ad6f6fe3dd8"
-
-def set_session_user_id(user_id: str):
-    """Set the current session user ID from LiveKit."""
-    global current_session_user_id
-    current_session_user_id = user_id
-    print(f"[SESSION] User ID set to: {user_id}")
-
-def extract_uuid_from_user_id(user_id: str):
-    """Extract UUID from user ID format like 'user-d830b5e3-7b9f-49b4-8254-9e9cb86a4c23'."""
-    if not user_id:
-        return None
-    
-    # If it's already a valid UUID, return as is
-    import re
-    uuid_pattern = r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
-    if re.match(uuid_pattern, user_id.lower()):
-        return user_id
-    
-    # Extract UUID from format "user-uuid" or similar
-    uuid_match = re.search(r'([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})', user_id.lower())
-    if uuid_match:
-        extracted_uuid = uuid_match.group(1)
-        print(f"🔄 [UUID EXTRACTION] '{user_id}' → '{extracted_uuid}'")
-        return extracted_uuid
-    
-    # If no UUID found, return None
-    print(f"⚠️ [UUID WARNING] No valid UUID found in: {user_id}")
-    return None
 
 def ensure_profile_exists(user_id: str):
     """
@@ -252,27 +222,8 @@ def ensure_profile_exists(user_id: str):
         return False
 
 def get_user_id():
-    """Get the current user's ID from Supabase Auth."""
-    user_id = get_current_user()
-    if user_id:
-        # Check if it's already a valid UUID (from Supabase Auth)
-        import re
-        uuid_pattern = r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
-        if re.match(uuid_pattern, user_id.lower()):
-            print(f"[AUTH] Using Supabase Auth UUID: {user_id}")
-            return user_id
-        else:
-            # If it's not a UUID, try to extract it (for compatibility)
-            extracted_uuid = extract_uuid_from_user_id(user_id)
-            if extracted_uuid:
-                print(f"[AUTH] Extracted UUID from: {user_id} → {extracted_uuid}")
-                return extracted_uuid
-            else:
-                print(f"[AUTH] No valid UUID found in {user_id}, using fallback")
-                return "60ce7881-3dc8-486d-b2c6-2ad6f6fe3dd8"
-    else:
-        print("[AUTH] Using fallback user ID")
-        return "60ce7881-3dc8-486d-b2c6-2ad6f6fe3dd8"
+    """Get the current user's ID from LiveKit session or Supabase Auth."""
+    return get_current_user()
 
 # ---------------------------
 # Helper Functions
@@ -663,7 +614,6 @@ We close with kind, genuine statements that feel natural and conversational, avo
 # Entrypoint
 # ---------------------------
 async def entrypoint(ctx: agents.JobContext):
-    # Optimize TTS initialization
     tts = TTS(voice_id="17", output_format="MP3_22050_32")
     assistant = Assistant()
 
@@ -682,7 +632,6 @@ async def entrypoint(ctx: agents.JobContext):
     except Exception as e:
         print(f"[SESSION ERROR] {e}")
 
-    # Optimize session configuration for faster connection
     session = AgentSession(
         stt=lk_openai.STT(model="gpt-4o-transcribe", language="ur"),
         llm=lk_openai.LLM(model="gpt-4o-mini"),
@@ -690,21 +639,10 @@ async def entrypoint(ctx: agents.JobContext):
         vad=silero.VAD.load(),
     )
 
-    # Pre-warm components for faster startup
-    print("[OPTIMIZATION] Pre-warming audio components...")
-    try:
-        # VAD is already loaded, no need to initialize separately
-        print("[OPTIMIZATION] VAD ready")
-    except Exception as e:
-        print(f"[OPTIMIZATION] VAD pre-warm failed: {e}")
-
-    # Optimize room input options for faster audio processing
-    room_input_options = RoomInputOptions()
-
     await session.start(
         room=ctx.room,
         agent=assistant,
-        room_input_options=room_input_options,
+        room_input_options=RoomInputOptions(),
     )
 
     # Wrap session.generate_reply so every reply includes memory + rag + profile
@@ -737,4 +675,3 @@ if __name__ == "__main__":
         entrypoint_fnc=entrypoint,
         initialize_process_timeout=60,
     ))
-    
