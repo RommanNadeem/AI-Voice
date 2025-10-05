@@ -585,7 +585,7 @@ def get_current_user():
         # In LiveKit agent context, we don't have Supabase Auth sessions
         # Instead, we'll use a session-based user ID from the LiveKit room
         # For now, we'll use a default user ID that can be configured
-        default_user_id = os.getenv('DEFAULT_USER_ID', '550e8400-e29b-41d4-a716-446655440000')
+        default_user_id = os.getenv('DEFAULT_USER_ID', '8f086b67-b0e9-4a2a-b772-3c56b0a3b4b7')
         
         # Create a mock user object with the default ID
         class MockUser:
