@@ -77,7 +77,7 @@ class MemoryManager:
                 'value': value
             }).execute()
             
-            return f"Stored: [{category}] {key} = {value}"
+        return f"Stored: [{category}] {key} = {value}"
         except Exception as e:
             return f"Error storing: {e}"
 
@@ -127,7 +127,7 @@ class MemoryManager:
             user_id = get_user_id()
             
             response = self.supabase.table('memory').delete().eq('user_id', user_id).eq('category', category).eq('key', key).execute()
-            return f"Forgot: [{category}] {key}"
+        return f"Forgot: [{category}] {key}"
         except Exception as e:
             return f"Error forgetting: {e}"
 
@@ -325,10 +325,10 @@ class UserProfile:
         try:
             resp = await asyncio.to_thread(
                 lambda: client.chat.completions.create(
-                    model="gpt-4o-mini",
-                    messages=[
-                        {
-                            "role": "system",
+                model="gpt-4o-mini",
+                messages=[
+                    {
+                        "role": "system",
                             "content": """You are a system that builds and maintains a comprehensive user profile.
 Create a well-structured profile that includes:
 - Personal information (age, location, occupation, family)
@@ -350,10 +350,10 @@ Guidelines:
 - Use clear, organized format
 - Capture as much useful information as possible to understand the user better
 - Do not hallucinate information and do not make up information which user has not shared"""
-                        },
-                        {"role": "system", "content": f"Current profile:\n{self.profile_text}"},
+                    },
+                    {"role": "system", "content": f"Current profile:\n{self.profile_text}"},
                         {"role": "user", "content": f"New information to incorporate:\n{snippet}"}
-                    ]
+                ]
                 )
             )
             new_profile = resp.choices[0].message.content.strip()
@@ -418,9 +418,9 @@ Guidelines:
         try:
             # Use user_profiles table
             response = memory_manager.supabase.table('user_profiles').delete().eq('user_id', self.user_id).execute()
-            self.profile_text = ""
-            print(f"[PROFILE FORGOT] for {self.user_id}")
-            return f"Profile deleted for {self.user_id}"
+        self.profile_text = ""
+        print(f"[PROFILE FORGOT] for {self.user_id}")
+        return f"Profile deleted for {self.user_id}"
         except Exception as e:
             print(f"[SUPABASE ERROR] Forget profile failed: {e}")
             return f"Error deleting profile: {e}"
@@ -577,6 +577,102 @@ class PerformanceCache:
 perf_cache = PerformanceCache()
 
 # ---------------------------
+# Chat History System
+# ---------------------------
+class ChatHistory:
+    def __init__(self):
+        self.messages = []  # List of chat messages in sequence
+        self.max_messages = 50  # Keep last 50 messages
+    
+    def add_user_message(self, user_text: str, roman_urdu_text: str = None):
+        """Add a user message to chat history."""
+        message = {
+            "type": "user",
+            "original": user_text,
+            "roman_urdu": roman_urdu_text or user_text,
+            "timestamp": __import__("datetime").datetime.now().isoformat(),
+            "sequence": len(self.messages) + 1
+        }
+        self.messages.append(message)
+        self._trim_messages()
+        print(f"[CHAT HISTORY] Added user message #{message['sequence']}")
+    
+    def add_ai_message(self, ai_text: str, roman_urdu_text: str = None):
+        """Add an AI message to chat history."""
+        message = {
+            "type": "ai",
+            "original": ai_text,
+            "roman_urdu": roman_urdu_text or ai_text,
+            "timestamp": __import__("datetime").datetime.now().isoformat(),
+            "sequence": len(self.messages) + 1
+        }
+        self.messages.append(message)
+        self._trim_messages()
+        print(f"[CHAT HISTORY] Added AI message #{message['sequence']}")
+    
+    def _trim_messages(self):
+        """Keep only the last max_messages."""
+        if len(self.messages) > self.max_messages:
+            self.messages = self.messages[-self.max_messages:]
+    
+    def get_chat_history(self, format_type: str = "roman_urdu"):
+        """Get chat history in specified format."""
+        if format_type == "roman_urdu":
+            return [{"type": msg["type"], "text": msg["roman_urdu"], "sequence": msg["sequence"]} for msg in self.messages]
+        elif format_type == "original":
+            return [{"type": msg["type"], "text": msg["original"], "sequence": msg["sequence"]} for msg in self.messages]
+        else:
+            return self.messages
+    
+    def get_recent_messages(self, count: int = 10, format_type: str = "roman_urdu"):
+        """Get recent messages for context."""
+        recent = self.messages[-count:] if count <= len(self.messages) else self.messages
+        if format_type == "roman_urdu":
+            return [{"type": msg["type"], "text": msg["roman_urdu"], "sequence": msg["sequence"]} for msg in recent]
+        elif format_type == "original":
+            return [{"type": msg["type"], "text": msg["original"], "sequence": msg["sequence"]} for msg in recent]
+        else:
+            return recent
+    
+    def clear_history(self):
+        """Clear chat history."""
+        self.messages = []
+        print("[CHAT HISTORY] History cleared")
+    
+    async def save_to_memory(self):
+        """Save chat history to persistent memory."""
+        try:
+            chat_data = {
+                "messages": self.messages,
+                "total_count": len(self.messages),
+                "last_updated": __import__("datetime").datetime.now().isoformat()
+            }
+            # Store as JSON string in memory
+            import json
+            await memory_manager.store("CHAT", "history", json.dumps(chat_data, ensure_ascii=False))
+            print(f"[CHAT HISTORY] Saved {len(self.messages)} messages to memory")
+        except Exception as e:
+            print(f"[CHAT HISTORY ERROR] Failed to save: {e}")
+    
+    def load_from_memory(self):
+        """Load chat history from persistent memory."""
+        try:
+            chat_data_str = memory_manager.retrieve("CHAT", "history")
+            if chat_data_str:
+                import json
+                chat_data = json.loads(chat_data_str)
+                self.messages = chat_data.get("messages", [])
+                print(f"[CHAT HISTORY] Loaded {len(self.messages)} messages from memory")
+                return True
+            return False
+        except Exception as e:
+            print(f"[CHAT HISTORY ERROR] Failed to load: {e}")
+            return False
+
+# Global chat history
+chat_history = ChatHistory()
+
+# ---------------------------
 # Roman Urdu Conversion
 # ---------------------------
 async def convert_to_roman_urdu(text: str) -> str:
@@ -635,9 +731,9 @@ vector_store = []  # (text, embedding)
 async def embed_text(text: str):
     emb = await asyncio.to_thread(
         lambda: client.embeddings.create(
-            model="text-embedding-3-small",
-            input=text
-        ).data[0].embedding
+        model="text-embedding-3-small",
+        input=text
+    ).data[0].embedding
     )
     return np.array(emb, dtype="float32")
 
@@ -763,6 +859,19 @@ We close with kind, genuine statements that feel natural and conversational, avo
 ### Conversation Tracking
 
 After each meaningful exchange with the user, use `addConversationInteraction` to store the user's input and your response. This helps create conversation summaries for future sessions.
+
+### Chat History Management
+
+The system automatically stores user messages and AI responses in a sequential chat history with Roman Urdu conversion. Use these tools to manage chat history:
+
+- `getChatHistory` - Get complete chat history in Roman Urdu format
+- `getRecentChatMessages` - Get recent messages for context
+- `captureAIResponse` - Manually capture your response to add to chat history
+- `saveChatHistory` - Save chat history to persistent memory
+- `loadChatHistory` - Load chat history from memory
+- `clearChatHistory` - Clear current chat history
+
+The chat history is perfect for rendering in chat interfaces and provides both original and Roman Urdu versions of all messages.
         """)
 
     @function_tool()
@@ -815,6 +924,43 @@ After each meaningful exchange with the user, use `addConversationInteraction` t
         """Get recent conversation history."""
         interactions = conversation_tracker.get_recent_interactions()
         return {"interactions": interactions}
+    
+    # ---- Chat History Tools ----
+    @function_tool()
+    async def getChatHistory(self, context: RunContext, format_type: str = "roman_urdu"):
+        """Get complete chat history in specified format."""
+        history = chat_history.get_chat_history(format_type)
+        return {"chat_history": history, "total_messages": len(history)}
+    
+    @function_tool()
+    async def getRecentChatMessages(self, context: RunContext, count: int = 10, format_type: str = "roman_urdu"):
+        """Get recent chat messages for context."""
+        recent = chat_history.get_recent_messages(count, format_type)
+        return {"recent_messages": recent, "count": len(recent)}
+    
+    @function_tool()
+    async def clearChatHistory(self, context: RunContext):
+        """Clear chat history."""
+        chat_history.clear_history()
+        return {"status": "chat_history_cleared"}
+    
+    @function_tool()
+    async def saveChatHistory(self, context: RunContext):
+        """Save chat history to persistent memory."""
+        await chat_history.save_to_memory()
+        return {"status": "chat_history_saved"}
+    
+    @function_tool()
+    async def loadChatHistory(self, context: RunContext):
+        """Load chat history from persistent memory."""
+        loaded = chat_history.load_from_memory()
+        return {"status": "chat_history_loaded", "success": loaded}
+    
+    @function_tool()
+    async def captureAIResponse(self, context: RunContext, ai_response: str):
+        """Capture AI response and add to chat history."""
+        await self.capture_ai_response(ai_response)
+        return {"status": "ai_response_captured"}
 
     # Override the user turn completed hook to capture user input
     async def on_user_turn_completed(self, turn_ctx, new_message):
@@ -825,6 +971,9 @@ After each meaningful exchange with the user, use `addConversationInteraction` t
         # Print user input in Roman Urdu
         roman_urdu_text = await convert_to_roman_urdu(user_text)
         print(f"[USER INPUT ROMAN URDU] {roman_urdu_text}")
+        
+        # Add user message to chat history
+        chat_history.add_user_message(user_text, roman_urdu_text)
         
         print(f"[USER TURN COMPLETED] Handler called successfully!")
         
@@ -839,6 +988,21 @@ After each meaningful exchange with the user, use `addConversationInteraction` t
         
         # Defer heavy operations to background task (non-blocking)
         asyncio.create_task(self._background_profile_update(user_text))
+
+    async def capture_ai_response(self, ai_text: str):
+        """Capture AI response and add to chat history."""
+        try:
+            # Convert AI response to Roman Urdu
+            roman_urdu_text = await convert_to_roman_urdu(ai_text)
+            
+            # Add AI message to chat history
+            chat_history.add_ai_message(ai_text, roman_urdu_text)
+            
+            print(f"[AI RESPONSE] {ai_text}")
+            print(f"[AI RESPONSE ROMAN URDU] {roman_urdu_text}")
+            
+        except Exception as e:
+            print(f"[AI RESPONSE ERROR] Failed to capture AI response: {e}")
 
     async def _background_profile_update(self, user_text: str):
         """Background task for heavy profile updates - runs after response."""
