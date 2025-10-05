@@ -409,21 +409,7 @@ Guidelines:
             return cached
         return self.profile_text
 
-    def forget(self):
-        if memory_manager.supabase is None:
-            print(f"[PROFILE FORGOT] for {self.user_id} (Supabase not available)")
-            self.profile_text = ""
-            return f"Profile deleted for {self.user_id} (offline mode)"
-        
-        try:
-            # Use user_profiles table
-            response = memory_manager.supabase.table('user_profiles').delete().eq('user_id', self.user_id).execute()
-        self.profile_text = ""
-        print(f"[PROFILE FORGOT] for {self.user_id}")
-        return f"Profile deleted for {self.user_id}"
-        except Exception as e:
-            print(f"[SUPABASE ERROR] Forget profile failed: {e}")
-            return f"Error deleting profile: {e}"
+    # Profile deletion method removed for data protection
 
 
 user_profile = UserProfile()
@@ -634,10 +620,7 @@ class ChatHistory:
         else:
             return recent
     
-    def clear_history(self):
-        """Clear chat history."""
-        self.messages = []
-        print("[CHAT HISTORY] History cleared")
+    # Chat history clearing method removed for data protection
     
     async def save_to_memory(self):
         """Save chat history to persistent memory."""
@@ -869,7 +852,8 @@ The system automatically stores user messages and AI responses in a sequential c
 - `captureAIResponse` - Manually capture your response to add to chat history
 - `saveChatHistory` - Save chat history to persistent memory
 - `loadChatHistory` - Load chat history from memory
-- `clearChatHistory` - Clear current chat history
+
+Note: Chat history deletion has been disabled for data protection.
 
 The chat history is perfect for rendering in chat interfaces and provides both original and Roman Urdu versions of all messages.
         """)
@@ -883,9 +867,7 @@ The chat history is perfect for rendering in chat interfaces and provides both o
         val = await memory_manager.retrieve(category, key)
         return {"value": val or ""}
 
-    @function_tool()
-    async def forgetMemory(self, context: RunContext, category: str, key: str):
-        return {"result": await memory_manager.forget(category, key)}
+    # Memory deletion removed for data protection
 
     @function_tool()
     async def listAllMemories(self, context: RunContext):
@@ -901,9 +883,7 @@ The chat history is perfect for rendering in chat interfaces and provides both o
     async def getUserProfile(self, context: RunContext):
         return {"profile": user_profile.get()}
 
-    @function_tool()
-    async def forgetUserProfile(self, context: RunContext):
-        return {"result": user_profile.forget()}
+    # Profile deletion removed for data protection
 
     # ---- Conversation Tracking Tools ----
     @function_tool()
@@ -938,11 +918,7 @@ The chat history is perfect for rendering in chat interfaces and provides both o
         recent = chat_history.get_recent_messages(count, format_type)
         return {"recent_messages": recent, "count": len(recent)}
     
-    @function_tool()
-    async def clearChatHistory(self, context: RunContext):
-        """Clear chat history."""
-        chat_history.clear_history()
-        return {"status": "chat_history_cleared"}
+    # Chat history deletion removed for data protection
     
     @function_tool()
     async def saveChatHistory(self, context: RunContext):
@@ -955,7 +931,7 @@ The chat history is perfect for rendering in chat interfaces and provides both o
         """Load chat history from persistent memory."""
         loaded = chat_history.load_from_memory()
         return {"status": "chat_history_loaded", "success": loaded}
-    
+
     @function_tool()
     async def captureAIResponse(self, context: RunContext, ai_response: str):
         """Capture AI response and add to chat history."""
