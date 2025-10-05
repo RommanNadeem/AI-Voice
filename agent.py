@@ -17,6 +17,13 @@ from uplift_tts import TTS
 load_dotenv()
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
+# Suppress verbose HTTP/2 debug logs
+import logging
+logging.getLogger("hpack.hpack").setLevel(logging.WARNING)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("urllib3").setLevel(logging.WARNING)
+
 # ---------------------------
 # Memory Manager
 # ---------------------------
@@ -61,13 +68,13 @@ class MemoryManager:
             if not ensure_profile_exists(user_id):
                 return f"Error storing: Profile not found for user {user_id}"
             
-            # Use upsert to insert or update
+            # Use upsert to insert or update, handling unique constraint
             response = self.supabase.table('memory').upsert({
                 'user_id': user_id,
                 'category': category,
                 'key': key,
                 'value': value
-            }).execute()
+            }, on_conflict='user_id,category,key').execute()
             
             print(f"🧠 [MEMORY SAVED] [{category}] {key} = {value[:100]}{'...' if len(value) > 100 else ''}")
             return f"Stored: [{category}] {key} = {value}"
@@ -161,27 +168,43 @@ memory_manager = MemoryManager()
 # ---------------------------
 # Authentication Helpers
 # ---------------------------
+# Global variable to store current session user ID
+current_session_user_id = None
+
 def get_current_user():
-    """Get current authenticated user from Supabase Auth."""
+    """Get current user ID from LiveKit session or Supabase Auth."""
+    global current_session_user_id
+    
     try:
-        if memory_manager.supabase is None:
-            print("[AUTH] Supabase not available, using fallback user")
-            return "60ce7881-3dc8-486d-b2c6-2ad6f6fe3dd8"
+        # First priority: Use user ID from LiveKit session
+        if current_session_user_id:
+            print(f"[AUTH] Using LiveKit session user: {current_session_user_id}")
+            return current_session_user_id
         
-        # Get the current authenticated user from Supabase Auth
-        user_response = memory_manager.supabase.auth.get_user()
+        # Second priority: Try Supabase Auth (for web clients)
+        if memory_manager.supabase is not None:
+            try:
+                user_response = memory_manager.supabase.auth.get_user()
+                if user_response and user_response.user:
+                    user_id = user_response.user.id
+                    print(f"[AUTH] Using Supabase Auth user: {user_id}")
+                    return user_id
+            except Exception as auth_error:
+                print(f"[AUTH] Supabase Auth not available: {auth_error}")
         
-        if user_response and user_response.user:
-            user_id = user_response.user.id
-            print(f"[AUTH] Authenticated user found: {user_id}")
-            return user_id
-        else:
-            print("[AUTH] No authenticated user found, using fallback")
-            return "60ce7881-3dc8-486d-b2c6-2ad6f6fe3dd8"
+        # Fallback: Use default user ID
+        print("[AUTH] Using fallback user ID")
+        return "60ce7881-3dc8-486d-b2c6-2ad6f6fe3dd8"
             
     except Exception as e:
         print(f"[AUTH ERROR] Failed to get current user: {e}")
         return "60ce7881-3dc8-486d-b2c6-2ad6f6fe3dd8"
+
+def set_session_user_id(user_id: str):
+    """Set the current session user ID from LiveKit."""
+    global current_session_user_id
+    current_session_user_id = user_id
+    print(f"[SESSION] User ID set to: {user_id}")
 
 def extract_uuid_from_user_id(user_id: str):
     """Extract UUID from user ID format like 'user-d830b5e3-7b9f-49b4-8254-9e9cb86a4c23'."""
@@ -609,6 +632,16 @@ We close with kind, genuine statements that feel natural and conversational, avo
         """Handle user input when their turn is completed."""
         user_text = new_message.text_content
         print(f"[USER INPUT] {user_text}")
+        
+        # Extract user ID from turn context if not already set
+        try:
+            if hasattr(turn_ctx, 'participant') and turn_ctx.participant:
+                user_id = turn_ctx.participant.identity
+                set_session_user_id(user_id)
+                print(f"[SESSION] Updated user ID from turn context: {user_id}")
+        except Exception as e:
+            print(f"[SESSION ERROR] Failed to extract user ID from turn context: {e}")
+        
         print(f"[USER TURN COMPLETED] Handler called successfully!")
         
         # Store user input in memory
@@ -625,6 +658,19 @@ We close with kind, genuine statements that feel natural and conversational, avo
 async def entrypoint(ctx: agents.JobContext):
     tts = TTS(voice_id="17", output_format="MP3_22050_32")
     assistant = Assistant()
+
+    # Extract user ID from LiveKit room context
+    try:
+        participants = ctx.room.remote_participants
+        if participants:
+            participant = list(participants.values())[0]
+            user_id = participant.identity
+            set_session_user_id(user_id)
+            print(f"[SESSION] Extracted user ID from LiveKit room: {user_id}")
+        else:
+            print("[SESSION] No participants found in room")
+    except Exception as e:
+        print(f"[SESSION ERROR] Failed to extract user ID: {e}")
 
     session = AgentSession(
         stt=lk_openai.STT(model="gpt-4o-transcribe", language="ur"),
