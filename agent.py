@@ -525,6 +525,20 @@ async def entrypoint(ctx: agents.JobContext):
             print(f"[SESSION INIT] LiveKit Identity: {livekit_identity}")
             print(f"[SESSION INIT] Extracted User UUID: {user_uuid}")
             print(f"[SESSION INIT] Supabase Connected: {'Yes' if SB else 'No'}")
+            
+            # Try to fetch user data from Supabase Auth to verify
+            if SB and user_uuid:
+                try:
+                    # This will show you the user data format in console
+                    user_data = SB.auth.admin.get_user_by_id(user_uuid)
+                    print(f"[USER DATA] Found user in Supabase Auth:")
+                    print(f"[USER DATA] ID: {user_data.user.id}")
+                    print(f"[USER DATA] Email: {user_data.user.email}")
+                    print(f"[USER DATA] Created: {user_data.user.created_at}")
+                    print(f"[USER DATA] Metadata: {user_data.user.user_metadata}")
+                except Exception as auth_error:
+                    print(f"[USER DATA ERROR] Could not fetch user from Supabase Auth: {auth_error}")
+                    print(f"[USER DATA ERROR] This might be normal if using service role key")
         else:
             print("[SESSION] No remote participants. Running without DB-bound user.")
     except Exception as e:
