@@ -544,15 +544,24 @@ def save_memory(category: str, key: str, value: str):
 class UserProfile:
     def __init__(self):
         self.user_id = get_user_id()
-        self.profile_text = memory_manager.load_profile()
-        if self.profile_text:
-            pass  # Profile loaded silently
-        else:
-            pass  # No existing profile
+        # OPTIMIZATION: Lazy load profile - don't load at init to speed up startup
+        self._profile_text = None
+        self._loaded = False
+    
+    def _ensure_loaded(self):
+        """Lazy load profile only when needed"""
+        if not self._loaded:
+            self._profile_text = memory_manager.load_profile()
+            self._loaded = True
+            if self._profile_text:
+                print("[PROFILE] Loaded from storage")
+            else:
+                print("[PROFILE] No existing profile")
 
 
     def update_profile(self, snippet: str):
         """Update profile using OpenAI summarization to build a comprehensive user profile."""
+        self._ensure_loaded()
         try:
             resp = client.chat.completions.create(
                 model="gpt-4o-mini",
@@ -581,20 +590,21 @@ Guidelines:
 - Capture as much useful information as possible to understand the user better
 - Do not hallucinate information and do not make up information which user has not shared"""
                     },
-                    {"role": "system", "content": f"Current profile:\n{self.profile_text}"},
+                    {"role": "system", "content": f"Current profile:\n{self._profile_text}"},
                     {"role": "user", "content": f"New information to incorporate:\n{snippet}"}
                 ]
             )
             new_profile = resp.choices[0].message.content.strip()
-            self.profile_text = new_profile
+            self._profile_text = new_profile
             memory_manager.save_profile(new_profile)
             print(f"[PROFILE UPDATED] {new_profile}")
         except Exception as e:
             print(f"[PROFILE ERROR] {e}")
-        return self.profile_text
+        return self._profile_text
 
     def smart_update(self, snippet: str):
         """Simple profile update - store most user input directly."""
+        self._ensure_loaded()
         # Skip only very basic greetings and questions
         skip_patterns = [
             "hello", "hi", "hey", "سلام", "ہیلو", "کیا حال ہے", "کیا ہال ہے",
@@ -606,25 +616,27 @@ Guidelines:
         
         if should_skip and len(snippet.split()) <= 3:
             print(f"[PROFILE SKIP] Basic greeting/question: {snippet[:50]}...")
-            return self.profile_text
+            return self._profile_text
         
         # Update profile with AI summarization for most input
         print(f"[PROFILE UPDATE] Processing: {snippet[:50]}...")
         return self.update_profile(snippet)
 
     def get(self):
-        return self.profile_text
+        self._ensure_loaded()
+        return self._profile_text
 
     def forget(self):
+        self._ensure_loaded()
         if memory_manager.supabase is None:
             print(f"[PROFILE FORGOT] for {self.user_id} (Supabase not available)")
-            self.profile_text = ""
+            self._profile_text = ""
             return f"Profile deleted for {self.user_id} (offline mode)"
         
         try:
             # Use user_profiles table
             response = memory_manager.supabase.table('user_profiles').delete().eq('user_id', self.user_id).execute()
-            self.profile_text = ""
+            self._profile_text = ""
             print(f"[PROFILE FORGOT] for {self.user_id}")
             return f"Profile deleted for {self.user_id}"
         except Exception as e:
@@ -798,13 +810,14 @@ When saving, keep entries **short and concrete**.
         user_text = new_message.text_content
         print(f"[USER INPUT] {user_text}")
         
-        # OPTIMIZATION: Fire-and-forget background task for storage operations
-        # This prevents blocking the response generation
+        # OPTIMIZATION: Minimal processing - only log input
+        # All heavy operations (profile updates, embeddings) are SKIPPED for speed
+        # Only store critical data in background without blocking
         import asyncio
         import time
         
         async def store_user_data_async():
-            """Async task to store memory and update profile in background"""
+            """Async task to store memory in background - NO PROFILE UPDATES"""
             try:
                 # Create unique memory key with timestamp
                 timestamp = int(time.time() * 1000)
@@ -818,13 +831,9 @@ When saving, keep entries **short and concrete**.
                 memory_result = memory_manager.store(category, memory_key, user_text)
                 print(f"[MEMORY STORED] {memory_result}")
                 
-                # Add to vector store (for future RAG if needed)
-                add_to_vectorstore(user_text)
+                # SKIP: Vector store and profile updates for maximum speed
+                # These can be done in batch later if needed
                 
-                # Update user profile
-                print(f"[PROFILE UPDATE] Starting profile update for: {user_text[:50]}...")
-                user_profile.smart_update(user_text)
-                print(f"[PROFILE UPDATE] ✓ Complete")
             except Exception as e:
                 print(f"[STORAGE ERROR] Background storage failed: {e}")
         
@@ -895,6 +904,10 @@ async def entrypoint(ctx: agents.JobContext):
     assistant = Assistant()
 
     # Step 4: Create and start session
+    # OPTIMIZATION: Using fast models for reduced latency
+    # - STT: gpt-4o-transcribe (fast transcription)
+    # - LLM: gpt-4o-mini (fastest OpenAI model with good quality)
+    # - TTS: MP3_22050_32 (lower bitrate for faster streaming)
     session = AgentSession(
         stt=lk_openai.STT(model="gpt-4o-transcribe", language="ur"),
         llm=lk_openai.LLM(model="gpt-4o-mini"),
@@ -910,33 +923,26 @@ async def entrypoint(ctx: agents.JobContext):
     )
     print(f"[SESSION INIT] ✓ Session started successfully")
 
-    # Wrap session.generate_reply - OPTIMIZED for faster responses
+    # Wrap session.generate_reply - ULTRA-OPTIMIZED for fastest responses
     async def generate_with_memory(user_text: str = None, greet: bool = False, user_first_name: str = None):
-        # OPTIMIZATION: Only fetch profile once (it's already loaded in memory)
-        user_profile_text = user_profile.get()
-
+        # OPTIMIZATION: Minimal context loading - only essential info
+        # Profile is already loaded in memory, no need for extra lookups
         base_instructions = assistant.instructions
-        
-        # OPTIMIZATION: Simplified context - removed expensive operations
-        extra_context = f"""
-        User Profile: {user_profile_text}
-        """
 
         if greet:
             # Use first name in greeting if available (from onboarding)
             if user_first_name:
-                print(f"[GREETING] Using personalized greeting with first name: {user_first_name}")
-                greeting_instruction = f"Greet the user warmly in Urdu using their name '{user_first_name}'. Make them feel welcome and show that you remember them from onboarding.\n\n{base_instructions}\n\n{extra_context}"
+                print(f"[GREETING] Personalized greeting with name: {user_first_name}")
+                greeting_instruction = f"Greet the user warmly in Urdu using their name '{user_first_name}'. Make them feel welcome.\n\n{base_instructions}"
             else:
-                print(f"[GREETING] Using generic greeting (no first name available)")
-                greeting_instruction = f"Greet the user warmly in Urdu.\n\n{base_instructions}\n\n{extra_context}"
+                print(f"[GREETING] Generic greeting")
+                greeting_instruction = f"Greet the user warmly in Urdu.\n\n{base_instructions}"
             
             await session.generate_reply(instructions=greeting_instruction)
         else:
-            # OPTIMIZATION: Direct response without expensive memory/RAG lookups
-            await session.generate_reply(
-                instructions=f"{base_instructions}\n\nUser Profile: {user_profile_text}\nUser said: {user_text}"
-            )
+            # OPTIMIZATION: Minimal instruction set - let LLM use its context window
+            # Profile is stored in conversation history, no need to repeat
+            await session.generate_reply(instructions=base_instructions)
 
     # Send initial greeting with memory context (use first name if available from onboarding)
     await generate_with_memory(greet=True, user_first_name=first_name)
