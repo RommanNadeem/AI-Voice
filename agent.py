@@ -3,6 +3,7 @@ import faiss
 import numpy as np
 import uuid
 import hashlib
+from contextvars import ContextVar
 from dotenv import load_dotenv
 from openai import OpenAI
 from supabase import create_client, Client
@@ -20,16 +21,19 @@ load_dotenv()
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # ---------------------------
-# Session Context Management
+# Session Context Management (Thread-safe with ContextVar)
 # ---------------------------
-# Global variable to store current session user ID
-current_session_user_id = None
+# ContextVar for storing current session user UUID (thread-safe for async)
+_session_user_uuid: ContextVar[str] = ContextVar('session_user_uuid', default=None)
+_session_livekit_identity: ContextVar[str] = ContextVar('session_livekit_identity', default=None)
 
 def livekit_identity_to_uuid(identity: str) -> str:
     """
     Convert a LiveKit identity string to a deterministic UUID.
     This allows non-UUID identities to work with the database schema.
     Uses UUID v5 with a namespace to ensure consistency.
+    
+    Same identity always produces the same UUID.
     """
     # Use UUID namespace for DNS (could use any consistent namespace)
     namespace = uuid.UUID('6ba7b810-9dad-11d1-80b4-00c04fd430c8')
@@ -39,15 +43,25 @@ def livekit_identity_to_uuid(identity: str) -> str:
     
     return str(identity_uuid)
 
-def set_session_user_id(user_id: str):
-    """Set the current session user ID from LiveKit."""
-    global current_session_user_id
-    current_session_user_id = user_id
-    print(f"[SESSION] User ID set to: {user_id}")
+def set_session_user(livekit_identity: str):
+    """
+    Set the current session user from LiveKit identity.
+    Converts identity to UUID and stores both in context.
+    Thread-safe for concurrent async sessions.
+    """
+    user_uuid = livekit_identity_to_uuid(livekit_identity)
+    _session_livekit_identity.set(livekit_identity)
+    _session_user_uuid.set(user_uuid)
+    print(f"[SESSION] LiveKit identity: {livekit_identity} → UUID: {user_uuid}")
+    return user_uuid
 
-def get_session_user_id():
-    """Get the current session user ID."""
-    return current_session_user_id
+def get_session_user_uuid() -> str:
+    """Get the current session user UUID (thread-safe)."""
+    return _session_user_uuid.get()
+
+def get_session_livekit_identity() -> str:
+    """Get the current session LiveKit identity (thread-safe)."""
+    return _session_livekit_identity.get()
 
 # ---------------------------
 # Memory Manager
@@ -60,9 +74,10 @@ class MemoryManager:
     }
 
     def __init__(self):
-        # Supabase configuration
+        # Supabase configuration - use service role key for server-side operations
         self.supabase_url = os.getenv('SUPABASE_URL', 'https://your-project.supabase.co')
-        self.supabase_key = os.getenv('SUPABASE_ANON_KEY', 'your-anon-key')
+        # Prefer service role key for server-side operations, fall back to anon key
+        self.supabase_key = os.getenv('SUPABASE_SERVICE_ROLE_KEY') or os.getenv('SUPABASE_ANON_KEY', 'your-anon-key')
         
         # Check if Supabase credentials are properly configured
         if self.supabase_url == 'https://your-project.supabase.co' or self.supabase_key == 'your-anon-key':
@@ -71,7 +86,8 @@ class MemoryManager:
         else:
             try:
                 self.supabase: Client = create_client(self.supabase_url, self.supabase_key)
-                print(f"[SUPABASE] Connected")
+                key_type = "SERVICE_ROLE" if os.getenv('SUPABASE_SERVICE_ROLE_KEY') else "ANON"
+                print(f"[SUPABASE] Connected using {key_type} key")
                 self.connection_error = None
             except Exception as e:
                 self.supabase = None
@@ -190,34 +206,21 @@ memory_manager = MemoryManager()
 # Authentication Helpers
 # ---------------------------
 def get_current_user():
-    """Get the current user ID, prioritizing LiveKit session over Supabase Auth."""
+    """
+    Get the current user UUID from session context.
+    Uses ContextVar for thread-safe async access.
+    """
     try:
-        # First, try to get user ID from LiveKit session
-        session_user_id = get_session_user_id()
-        if session_user_id:
-            # Convert LiveKit identity to UUID for database compatibility
-            user_uuid = livekit_identity_to_uuid(session_user_id)
-            print(f"[AUTH] Using LiveKit session user: {session_user_id} (UUID: {user_uuid})")
-            
-            # Ensure this user exists in profiles table, create if not
-            if not ensure_profile_exists(user_uuid, original_identity=session_user_id):
-                print(f"[AUTH ERROR] Could not create profile for LiveKit user: {session_user_id}")
-                return get_or_create_default_user()
-            
+        # Get user UUID from session context (set during entrypoint)
+        user_uuid = get_session_user_uuid()
+        
+        if user_uuid:
             return user_uuid
         
-        # Fallback to Supabase Auth if available
-        if memory_manager.supabase is None:
-            print("[AUTH] Supabase not available, using existing user")
-            return get_or_create_default_user()
+        # Fallback for non-LiveKit contexts (e.g., testing)
+        print("[AUTH] No session user, using fallback")
+        return get_or_create_default_user()
         
-        user = memory_manager.supabase.auth.get_user()
-        if user and user.user:
-            print(f"[AUTH] Using Supabase Auth user: {user.user.id}")
-            return user.user.id
-        else:
-            print("[AUTH] No authenticated user found, using existing user")
-            return get_or_create_default_user()
     except Exception as e:
         print(f"[AUTH ERROR] Failed to get current user: {e}")
         return get_or_create_default_user()
@@ -719,23 +722,13 @@ When saving, keep entries **short and concrete**.
         user_text = new_message.text_content
         print(f"[USER INPUT] {user_text}")
         
-        # Extract user ID from turn context and update session
-        try:
-            if hasattr(turn_ctx, 'participant') and turn_ctx.participant:
-                user_id = turn_ctx.participant.identity
-                set_session_user_id(user_id)
-                print(f"[SESSION] Updated from turn context: {user_id}")
-            elif hasattr(turn_ctx, 'room') and turn_ctx.room:
-                participants = turn_ctx.room.remote_participants
-                if participants:
-                    participant = list(participants.values())[0]
-                    user_id = participant.identity
-                    set_session_user_id(user_id)
-                    print(f"[SESSION] Updated from room context: {user_id}")
-        except Exception as e:
-            print(f"[SESSION ERROR] Failed to extract user ID: {e}")
-        
-        print(f"[USER TURN COMPLETED] Handler called successfully!")
+        # Session user is already set at init - no need to extract again
+        # Just verify we have a session user
+        current_user = get_session_user_uuid()
+        if current_user:
+            print(f"[SESSION] Using session user: {current_user}")
+        else:
+            print(f"[SESSION WARNING] No session user set - using fallback")
         
         # Create unique memory key with timestamp to avoid overwriting
         import time
@@ -746,12 +739,12 @@ When saving, keep entries **short and concrete**.
         category = categorize_user_input(user_text)
         print(f"[MEMORY CATEGORIZATION] '{user_text[:50]}...' -> {category}")
         
-        # Store user input in memory with dynamic category and unique key (will use current session user ID)
+        # Store user input in memory with dynamic category and unique key
         memory_result = memory_manager.store(category, memory_key, user_text)
         print(f"[MEMORY STORED] {memory_result}")
         add_to_vectorstore(user_text)
         
-        # Update user profile (will use current session user ID)
+        # Update user profile
         print(f"[PROFILE UPDATE] Starting profile update for: {user_text[:50]}...")
         user_profile.smart_update(user_text)
 
@@ -759,24 +752,52 @@ When saving, keep entries **short and concrete**.
 # Entrypoint
 # ---------------------------
 async def entrypoint(ctx: agents.JobContext):
-    tts = TTS(voice_id="17", output_format="MP3_22050_32")
-    assistant = Assistant()
-
-    # Extract user ID from LiveKit room context
+    """
+    LiveKit agent entrypoint.
+    Sets up session user BEFORE starting the session to ensure all DB operations
+    use the correct user UUID.
+    """
+    print(f"[ENTRYPOINT] Starting session for room: {ctx.room.name}")
+    
+    # Step 1: Extract LiveKit participant identity and set session user
+    livekit_identity = None
+    user_uuid = None
+    
     try:
         participants = ctx.room.remote_participants
         if participants:
             participant = list(participants.values())[0]
-            user_id = participant.identity
-            set_session_user_id(user_id)
-            print(f"[SESSION] LiveKit User ID: {user_id}")
-            print(f"[SESSION] Room: {ctx.room.name}")
-            print(f"[SESSION] Participant ID: {participant.sid}")
+            livekit_identity = participant.identity
+            
+            # Set session user (converts identity to UUID and stores in ContextVar)
+            user_uuid = set_session_user(livekit_identity)
+            
+            print(f"[SESSION INIT] Room: {ctx.room.name}")
+            print(f"[SESSION INIT] Participant SID: {participant.sid}")
+            print(f"[SESSION INIT] Identity: {livekit_identity} → UUID: {user_uuid}")
         else:
-            print("[SESSION] No participants found")
+            print("[SESSION WARNING] No remote participants found - using fallback user")
+            user_uuid = get_or_create_default_user()
+            set_session_user(user_uuid)
     except Exception as e:
-        print(f"[SESSION ERROR] {e}")
+        print(f"[SESSION ERROR] Failed to extract participant: {e}")
+        user_uuid = get_or_create_default_user()
+        set_session_user(user_uuid)
+    
+    # Step 2: Ensure profile exists for this user BEFORE starting session
+    if user_uuid:
+        print(f"[SESSION INIT] Ensuring profile exists for UUID: {user_uuid}")
+        profile_exists = ensure_profile_exists(user_uuid, original_identity=livekit_identity)
+        if profile_exists:
+            print(f"[SESSION INIT] ✓ Profile ready for user: {user_uuid}")
+        else:
+            print(f"[SESSION WARNING] Could not ensure profile exists - some features may not work")
+    
+    # Step 3: Initialize TTS and Assistant
+    tts = TTS(voice_id="17", output_format="MP3_22050_32")
+    assistant = Assistant()
 
+    # Step 4: Create and start session
     session = AgentSession(
         stt=lk_openai.STT(model="gpt-4o-transcribe", language="ur"),
         llm=lk_openai.LLM(model="gpt-4o-mini"),
@@ -784,11 +805,13 @@ async def entrypoint(ctx: agents.JobContext):
         vad=silero.VAD.load(),
     )
 
+    print(f"[SESSION INIT] Starting LiveKit session...")
     await session.start(
         room=ctx.room,
         agent=assistant,
         room_input_options=RoomInputOptions(),
     )
+    print(f"[SESSION INIT] ✓ Session started successfully")
 
     # Wrap session.generate_reply so every reply includes memory + rag + profile
     async def generate_with_memory(user_text: str = None, greet: bool = False):
