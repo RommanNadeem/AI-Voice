@@ -197,7 +197,7 @@ class MemoryManager:
                 return f"Error storing: User authentication required"
             
             # Ensure profile exists first
-            if not await self._ensure_profile_exists_safe(user_id):
+            if not ensure_profile_exists(user_id):
                 logger.error(f"Profile not found for user {user_id}")
                 return f"Error storing: Profile not found for user {user_id}"
             
@@ -594,9 +594,17 @@ def get_current_user():
             print("[AUTH ERROR] Supabase not available - using default user")
             return None
         
-        # In LiveKit agent context, we don't have Supabase Auth sessions
-        # Instead, we'll use a session-based user ID from the LiveKit room
-        # For now, we'll use a default user ID that can be configured
+        # Try to get the current user from Supabase Auth
+        try:
+            user_response = memory_manager.supabase.auth.get_user()
+            if user_response and user_response.user:
+                logger.info(f"[AUTH] Using authenticated user: {user_response.user.id}")
+                print(f"🔐 [AUTH] Using authenticated user: {user_response.user.id}")
+                return user_response.user
+        except Exception as auth_error:
+            logger.warning(f"[AUTH] No authenticated user found: {auth_error}")
+        
+        # Fallback to default user ID if no authenticated user
         default_user_id = os.getenv('DEFAULT_USER_ID', '8f086b67-b0e9-4a2a-b772-3c56b0a3b4b7')
         
         # Create a mock user object with the default ID
@@ -604,8 +612,8 @@ def get_current_user():
             def __init__(self, user_id):
                 self.id = user_id
         
-        logger.info(f"[AUTH] Using default user: {default_user_id}")
-        print(f"🔐 [AUTH] Using default user: {default_user_id}")
+        logger.info(f"[AUTH] Using fallback user: {default_user_id}")
+        print(f"🔐 [AUTH] Using fallback user: {default_user_id}")
         return MockUser(default_user_id)
         
     except Exception as e:
@@ -615,7 +623,7 @@ def get_current_user():
 def ensure_profile_exists(user_id: str):
     """
     Ensure a profile exists in the profiles table for the given user_id.
-    This is a production-ready solution that handles foreign key constraints properly.
+    Creates profile if it doesn't exist.
     """
     try:
         if memory_manager.supabase is None:
@@ -627,21 +635,39 @@ def ensure_profile_exists(user_id: str):
         
         if response.data and len(response.data) > 0:
             logger.info(f"[PROFILE] Profile exists in profiles table for user: {user_id}")
+            print(f"✅ [PROFILE EXISTS] User: {user_id}")
             return True
         
-        # Step 2: For existing users, we don't need to create profiles
-        # The profile should already exist if we're using a valid user ID
-        logger.warning(f"[PROFILE] Profile not found for user: {user_id}")
-        logger.warning(f"[PROFILE] This user ID should exist in auth.users table")
-        logger.warning(f"[PROFILE] Using fallback approach - continuing with memory operations")
+        # Step 2: Try to create profile for the user
+        logger.info(f"[PROFILE] Creating profile for user: {user_id}")
+        print(f"🆕 [CREATING PROFILE] User: {user_id}")
         
-        # Return True to allow memory operations to continue
-        # The memory table might still work if the user exists in auth.users
-        return True
+        try:
+            # Create profile entry
+            profile_response = memory_manager.supabase.table('profiles').insert({
+                'id': user_id,
+                'email': f'user_{user_id}@example.com',  # Placeholder email
+                'is_first_login': True
+            }).execute()
+            
+            if profile_response.data:
+                logger.info(f"[PROFILE] Successfully created profile for user: {user_id}")
+                print(f"✅ [PROFILE CREATED] User: {user_id}")
+                return True
+            else:
+                logger.error(f"[PROFILE] Failed to create profile for user: {user_id}")
+                print(f"❌ [PROFILE CREATION FAILED] User: {user_id}")
+                return False
+                
+        except Exception as create_error:
+            logger.error(f"[PROFILE] Error creating profile for {user_id}: {create_error}")
+            print(f"❌ [PROFILE CREATION ERROR] User: {user_id} - {create_error}")
+            return False
             
     except Exception as e:
         logger.error(f"[PROFILE ERROR] Failed to ensure profile exists for {user_id}: {e}")
-        return True  # Return True to allow memory operations to continue
+        print(f"❌ [PROFILE ERROR] User: {user_id} - {e}")
+        return False
 
 def get_user_id():
     """Get the current user's ID from Supabase Auth."""
@@ -1495,8 +1521,8 @@ When saving, keep entries **short and concrete**.
         # Store user input for conversation tracking (immediate)
         conversation_tracker.current_user_input = user_text
         
-        # Defer ALL operations to background tasks (non-blocking)
-        asyncio.create_task(self._background_user_processing(user_text))
+        # Process everything synchronously to ensure data is saved
+        await self._process_user_input_sync(user_text)
         
         print(f"✅ [USER TURN COMPLETED] Handler called successfully!")
 
@@ -1525,33 +1551,31 @@ When saving, keep entries **short and concrete**.
         except Exception as e:
             print(f"[AI RESPONSE ERROR] Failed to capture AI response: {e}")
 
-    async def _background_user_processing(self, user_text: str):
-        """Background task for all user input processing - runs after response."""
+    async def _process_user_input_sync(self, user_text: str):
+        """Process user input synchronously to ensure data is saved."""
         try:
-            print(f"⚙️ [BACKGROUND PROCESSING] Starting for: {user_text[:50]}...")
+            print(f"⚙️ [SYNC PROCESSING] Starting for: {user_text[:50]}...")
             
-            # Collect tasks based on configuration
-            tasks = []
-            
+            # Process Roman Urdu conversion
             if Config.ENABLE_ROMAN_URDU:
-                tasks.append(self._process_roman_urdu(user_text))
+                await self._process_roman_urdu(user_text)
             
-            # Always store user input
-            tasks.append(memory_manager.store("FACT", "user_input", user_text))
+            # Store user input in memory
+            memory_result = await memory_manager.store("FACT", "user_input", user_text)
+            print(f"💾 [MEMORY STORED] {memory_result}")
             
+            # Update RAG vector store
             if Config.ENABLE_RAG:
-                tasks.append(add_to_vectorstore(user_text))
+                await add_to_vectorstore(user_text)
+                print(f"🔍 [RAG UPDATED] Added to vector store")
             
-            # Always update profile
-            tasks.append(user_profile.smart_update(user_text))
+            # Update user profile
+            profile_result = await user_profile.smart_update(user_text)
+            print(f"👤 [PROFILE UPDATED] {profile_result}")
             
-            # Run tasks in parallel
-            if tasks:
-                await asyncio.gather(*tasks)
-            
-            print(f"✅ [BACKGROUND PROCESSING] Completed for: {user_text[:50]}...")
+            print(f"✅ [SYNC PROCESSING] Completed for: {user_text[:50]}...")
         except Exception as e:
-            print(f"❌ [BACKGROUND PROCESSING ERROR] Failed: {e}")
+            print(f"❌ [SYNC PROCESSING ERROR] Failed: {e}")
     
     async def _process_roman_urdu(self, user_text: str):
         """Process Roman Urdu conversion in background."""
