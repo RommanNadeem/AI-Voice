@@ -134,6 +134,12 @@ class MemoryManager:
             logger.error(f"Failed to get user ID: {e}")
             return None
     
+    def _is_valid_uuid(self, user_id: str) -> bool:
+        """Check if user_id is a valid UUID format"""
+        import re
+        uuid_pattern = r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+        return bool(re.match(uuid_pattern, user_id.lower()))
+    
     async def _ensure_profile_exists_safe(self, user_id: str) -> bool:
         """Ensure profile exists with graceful error handling"""
         try:
@@ -195,6 +201,13 @@ class MemoryManager:
             user_id = await self._get_user_id_safe()
             if not user_id:
                 return f"Error storing: User authentication required"
+            
+            # Map non-UUID user IDs to valid UUIDs for Supabase
+            if not self._is_valid_uuid(user_id):
+                mapped_user_id = map_user_id_to_uuid(user_id)
+                logger.info(f"[MEMORY] Mapped user ID '{user_id}' to UUID '{mapped_user_id}'")
+                print(f"🔄 [MEMORY MAPPING] '{user_id}' → '{mapped_user_id}'")
+                user_id = mapped_user_id
             
             # Ensure profile exists first
             if not ensure_profile_exists(user_id):
@@ -656,6 +669,22 @@ def ensure_profile_exists(user_id: str):
             logger.warning("Supabase not available - skipping profile check")
             return True
         
+        # Check if user_id is a valid UUID format
+        import re
+        uuid_pattern = r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+        if not re.match(uuid_pattern, user_id.lower()):
+            logger.warning(f"[PROFILE] User ID '{user_id}' is not a valid UUID format")
+            print(f"⚠️ [PROFILE WARNING] User ID '{user_id}' is not a valid UUID - using fallback approach")
+            
+            # For non-UUID user IDs, we'll use a mapping approach
+            # Map the user ID to a valid UUID for Supabase
+            mapped_user_id = map_user_id_to_uuid(user_id)
+            logger.info(f"[PROFILE] Mapped user ID '{user_id}' to UUID '{mapped_user_id}'")
+            print(f"🔄 [PROFILE MAPPING] '{user_id}' → '{mapped_user_id}'")
+            
+            # Use the mapped UUID for profile operations
+            return ensure_profile_exists(mapped_user_id)
+        
         # Step 1: Check if profile exists in profiles table
         response = memory_manager.supabase.table('profiles').select('id').eq('id', user_id).execute()
         
@@ -694,6 +723,23 @@ def ensure_profile_exists(user_id: str):
         logger.error(f"[PROFILE ERROR] Failed to ensure profile exists for {user_id}: {e}")
         print(f"❌ [PROFILE ERROR] User: {user_id} - {e}")
         return False
+
+def map_user_id_to_uuid(user_id: str):
+    """
+    Map a non-UUID user ID to a consistent UUID for Supabase storage.
+    This ensures that the same user ID always maps to the same UUID.
+    """
+    import hashlib
+    import uuid
+    
+    # Create a hash of the user ID
+    hash_object = hashlib.md5(user_id.encode())
+    hash_hex = hash_object.hexdigest()
+    
+    # Convert to UUID format
+    uuid_string = f"{hash_hex[:8]}-{hash_hex[8:12]}-{hash_hex[12:16]}-{hash_hex[16:20]}-{hash_hex[20:32]}"
+    
+    return uuid_string
 
 def get_user_id():
     """Get the current user's ID from Supabase Auth."""
