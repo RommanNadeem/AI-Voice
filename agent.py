@@ -393,13 +393,16 @@ def get_onboarding_details(user_id: str):
             print("[ONBOARDING] Supabase not available")
             return None
         
+        print(f"[ONBOARDING] Querying onboarding_details table for user_id: {user_id}")
         response = memory_manager.supabase.table('onboarding_details').select(
             'first_name, occupation, interests'
         ).eq('user_id', user_id).execute()
         
+        print(f"[ONBOARDING] Query response: {response.data}")
+        
         if response.data and len(response.data) > 0:
             details = response.data[0]
-            print(f"[ONBOARDING] Found details for user {user_id}: {details.get('first_name')}")
+            print(f"[ONBOARDING] ✓ Found details - first_name: '{details.get('first_name')}', occupation: '{details.get('occupation')}', interests: '{details.get('interests')}'")
             return details
         else:
             print(f"[ONBOARDING] No onboarding details found for user {user_id}")
@@ -869,11 +872,16 @@ async def entrypoint(ctx: agents.JobContext):
         
         # Step 2b: Fetch onboarding details and populate profile
         print(f"[SESSION INIT] Checking for onboarding data...")
-        first_name = populate_profile_from_onboarding(user_uuid)
-        if first_name:
-            print(f"[SESSION INIT] ✓ Onboarding data loaded - user: {first_name}")
-        else:
-            print(f"[SESSION INIT] No onboarding data found (user may not have completed onboarding)")
+        try:
+            first_name = populate_profile_from_onboarding(user_uuid)
+            if first_name:
+                print(f"[SESSION INIT] ✓ Onboarding data loaded - user: {first_name}")
+                print(f"[SESSION INIT] First name will be used in greeting: {first_name}")
+            else:
+                print(f"[SESSION INIT] No onboarding data found (user may not have completed onboarding)")
+        except Exception as e:
+            print(f"[SESSION INIT ERROR] Failed to fetch onboarding data: {e}")
+            first_name = None
     
     # Step 3: Initialize TTS and Assistant
     tts = TTS(voice_id="17", output_format="MP3_22050_32")
@@ -911,8 +919,10 @@ async def entrypoint(ctx: agents.JobContext):
         if greet:
             # Use first name in greeting if available (from onboarding)
             if user_first_name:
+                print(f"[GREETING] Using personalized greeting with first name: {user_first_name}")
                 greeting_instruction = f"Greet the user warmly in Urdu using their name '{user_first_name}'. Make them feel welcome and show that you remember them from onboarding.\n\n{base_instructions}\n\n{extra_context}"
             else:
+                print(f"[GREETING] Using generic greeting (no first name available)")
                 greeting_instruction = f"Greet the user warmly in Urdu.\n\n{base_instructions}\n\n{extra_context}"
             
             await session.generate_reply(instructions=greeting_instruction)
