@@ -365,6 +365,7 @@ class MemoryManager:
 
 
 memory_manager = MemoryManager()
+assistant = None  # Will be set in entrypoint
 
 # ---------------------------
 # SPT Directive Layer
@@ -594,7 +595,32 @@ def get_current_user():
             print("[AUTH ERROR] Supabase not available - using default user")
             return None
         
-        # Try to get the current user from Supabase Auth
+        # First, try to get user ID from the assistant instance (set by session)
+        if hasattr(assistant, 'current_user_id') and assistant.current_user_id:
+            logger.info(f"[AUTH] Using assistant session user: {assistant.current_user_id}")
+            print(f"🔐 [AUTH] Using assistant session user: {assistant.current_user_id}")
+            
+            # Create a mock user object with the session ID
+            class MockUser:
+                def __init__(self, user_id):
+                    self.id = user_id
+            
+            return MockUser(assistant.current_user_id)
+        
+        # Try to get user ID from environment or session context
+        session_user_id = os.getenv('LIVEKIT_USER_ID')
+        if session_user_id:
+            logger.info(f"[AUTH] Using LiveKit session user: {session_user_id}")
+            print(f"🔐 [AUTH] Using LiveKit session user: {session_user_id}")
+            
+            # Create a mock user object with the session ID
+            class MockUser:
+                def __init__(self, user_id):
+                    self.id = user_id
+            
+            return MockUser(session_user_id)
+        
+        # Try to get the current user from Supabase Auth (for web clients)
         try:
             user_response = memory_manager.supabase.auth.get_user()
             if user_response and user_response.user:
@@ -1274,6 +1300,7 @@ async def retrieve_from_vectorstore(query: str, k: int = 3):
 # ---------------------------
 class Assistant(Agent):
     def __init__(self):
+        self.current_user_id = None  # Store current user ID from session
         super().__init__(instructions="""
 ## Overall Role
 
@@ -1512,6 +1539,20 @@ When saving, keep entries **short and concrete**.
 
 
 
+    def set_user_id(self, user_id: str):
+        """Set the current user ID from session context."""
+        self.current_user_id = user_id
+        print(f"🔐 [SESSION USER ID] Set to: {user_id}")
+    
+    async def on_participant_connected(self, participant):
+        """Handle when a participant connects to the room."""
+        try:
+            user_id = participant.identity
+            self.set_user_id(user_id)
+            print(f"👤 [PARTICIPANT CONNECTED] User ID: {user_id}")
+        except Exception as e:
+            print(f"❌ [PARTICIPANT ERROR] Failed to handle participant connection: {e}")
+
     # Override the user turn completed hook to capture user input
     async def on_user_turn_completed(self, turn_ctx, new_message):
         """Handle user input when their turn is completed."""
@@ -1599,10 +1640,11 @@ When saving, keep entries **short and concrete**.
 # Entrypoint
 # ---------------------------
 async def entrypoint(ctx: agents.JobContext):
+    global assistant
     print(f"🚀 [AGENT STARTING] LiveKit AI Agent initializing...")
-    tts = TTS(voice_id="17", output_format="MP3_22050_32")
+    tts = TTS(voice_id="v_8eelc901", output_format="MP3_22050_32")
     assistant = Assistant()
-    print(f"🎤 [TTS INITIALIZED] Voice ID: 17, Format: MP3_22050_32")
+    print(f"🎤 [TTS INITIALIZED] Voice ID: v_8eelc901, Format: MP3_22050_32")
 
     # Configure VAD with noise reduction settings
     vad = silero.VAD.load()
@@ -1634,6 +1676,23 @@ async def entrypoint(ctx: agents.JobContext):
         room_input_options=room_input_options,
     )
     print(f"🎉 [AGENT READY] LiveKit AI Agent is now active and ready for conversations!")
+    
+    # Extract user ID from LiveKit room context
+    try:
+        # Get participants from the room
+        participants = ctx.room.remote_participants
+        if participants:
+            # Get the first participant (assuming single user)
+            participant = list(participants.values())[0]
+            user_id = participant.identity
+            
+            # Set the user ID on the assistant
+            assistant.set_user_id(user_id)
+            print(f"👤 [USER IDENTIFIED] From LiveKit session: {user_id}")
+        else:
+            print(f"⚠️ [NO PARTICIPANTS] No participants found in room")
+    except Exception as e:
+        print(f"❌ [USER ID ERROR] Failed to extract user ID: {e}")
 
     # Load previous conversation summary
     previous_summary = await conversation_tracker.load_summary()
