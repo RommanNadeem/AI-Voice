@@ -798,31 +798,38 @@ When saving, keep entries **short and concrete**.
         user_text = new_message.text_content
         print(f"[USER INPUT] {user_text}")
         
-        # Session user is already set at init - no need to extract again
-        # Just verify we have a session user
-        current_user = get_session_user_uuid()
-        if current_user:
-            print(f"[SESSION] Using session user: {current_user}")
-        else:
-            print(f"[SESSION WARNING] No session user set - using fallback")
-        
-        # Create unique memory key with timestamp to avoid overwriting
+        # OPTIMIZATION: Fire-and-forget background task for storage operations
+        # This prevents blocking the response generation
+        import asyncio
         import time
-        timestamp = int(time.time() * 1000)  # milliseconds for uniqueness
-        memory_key = f"user_input_{timestamp}"
         
-        # Dynamically categorize user input
-        category = categorize_user_input(user_text)
-        print(f"[MEMORY CATEGORIZATION] '{user_text[:50]}...' -> {category}")
+        async def store_user_data_async():
+            """Async task to store memory and update profile in background"""
+            try:
+                # Create unique memory key with timestamp
+                timestamp = int(time.time() * 1000)
+                memory_key = f"user_input_{timestamp}"
+                
+                # Dynamically categorize user input
+                category = categorize_user_input(user_text)
+                print(f"[MEMORY CATEGORIZATION] '{user_text[:50]}...' -> {category}")
+                
+                # Store user input in memory with dynamic category and unique key
+                memory_result = memory_manager.store(category, memory_key, user_text)
+                print(f"[MEMORY STORED] {memory_result}")
+                
+                # Add to vector store (for future RAG if needed)
+                add_to_vectorstore(user_text)
+                
+                # Update user profile
+                print(f"[PROFILE UPDATE] Starting profile update for: {user_text[:50]}...")
+                user_profile.smart_update(user_text)
+                print(f"[PROFILE UPDATE] ✓ Complete")
+            except Exception as e:
+                print(f"[STORAGE ERROR] Background storage failed: {e}")
         
-        # Store user input in memory with dynamic category and unique key
-        memory_result = memory_manager.store(category, memory_key, user_text)
-        print(f"[MEMORY STORED] {memory_result}")
-        add_to_vectorstore(user_text)
-        
-        # Update user profile
-        print(f"[PROFILE UPDATE] Starting profile update for: {user_text[:50]}...")
-        user_profile.smart_update(user_text)
+        # Fire and forget - don't await, let it run in background
+        asyncio.create_task(store_user_data_async())
 
 # ---------------------------
 # Entrypoint
@@ -903,17 +910,16 @@ async def entrypoint(ctx: agents.JobContext):
     )
     print(f"[SESSION INIT] ✓ Session started successfully")
 
-    # Wrap session.generate_reply so every reply includes memory + rag + profile
+    # Wrap session.generate_reply - OPTIMIZED for faster responses
     async def generate_with_memory(user_text: str = None, greet: bool = False, user_first_name: str = None):
-        past_memories = memory_manager.retrieve_all()
-        rag_context = retrieve_from_vectorstore(user_text or "recent", k=2)
+        # OPTIMIZATION: Only fetch profile once (it's already loaded in memory)
         user_profile_text = user_profile.get()
 
         base_instructions = assistant.instructions
+        
+        # OPTIMIZATION: Simplified context - removed expensive operations
         extra_context = f"""
         User Profile: {user_profile_text}
-        Known memories: {past_memories}
-        Related knowledge: {rag_context}
         """
 
         if greet:
@@ -927,8 +933,9 @@ async def entrypoint(ctx: agents.JobContext):
             
             await session.generate_reply(instructions=greeting_instruction)
         else:
+            # OPTIMIZATION: Direct response without expensive memory/RAG lookups
             await session.generate_reply(
-                instructions=f"{base_instructions}\n\nUse this context:\n{extra_context}\nUser said: {user_text}"
+                instructions=f"{base_instructions}\n\nUser Profile: {user_profile_text}\nUser said: {user_text}"
             )
 
     # Send initial greeting with memory context (use first name if available from onboarding)
