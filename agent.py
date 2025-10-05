@@ -180,23 +180,48 @@ def get_current_user():
         session_user_id = get_session_user_id()
         if session_user_id:
             print(f"[AUTH] Using LiveKit session user: {session_user_id}")
+            # Ensure this user exists in profiles table, if not use existing user
+            if not ensure_profile_exists(session_user_id):
+                return get_or_create_default_user()
             return session_user_id
         
         # Fallback to Supabase Auth if available
         if memory_manager.supabase is None:
-            print("[AUTH] Supabase not available, using default user")
-            return "60ce7881-3dc8-486d-b2c6-2ad6f6fe3dd8"
+            print("[AUTH] Supabase not available, using existing user")
+            return get_or_create_default_user()
         
         user = memory_manager.supabase.auth.get_user()
         if user and user.user:
             print(f"[AUTH] Using Supabase Auth user: {user.user.id}")
             return user.user.id
         else:
-            print("[AUTH] No authenticated user found, using default")
-            return "60ce7881-3dc8-486d-b2c6-2ad6f6fe3dd8"
+            print("[AUTH] No authenticated user found, using existing user")
+            return get_or_create_default_user()
     except Exception as e:
         print(f"[AUTH ERROR] Failed to get current user: {e}")
-        return "60ce7881-3dc8-486d-b2c6-2ad6f6fe3dd8"
+        return get_or_create_default_user()
+
+def get_or_create_default_user():
+    """Get an existing user ID from the profiles table, or return a known working user ID."""
+    try:
+        if memory_manager.supabase is None:
+            # Return the known working user ID for offline mode
+            return "de8f4740-0d33-475c-8fa5-c7538bdddcfa"
+        
+        # Try to get any existing user from profiles table
+        response = memory_manager.supabase.table('profiles').select('id').limit(1).execute()
+        
+        if response.data and len(response.data) > 0:
+            existing_user_id = response.data[0]['id']
+            print(f"[AUTH] Using existing user from profiles: {existing_user_id}")
+            return existing_user_id
+        else:
+            # If no profiles exist, return the known working user ID
+            print("[AUTH] No profiles found, using known working user ID")
+            return "de8f4740-0d33-475c-8fa5-c7538bdddcfa"
+    except Exception as e:
+        print(f"[AUTH ERROR] Failed to get default user: {e}")
+        return "de8f4740-0d33-475c-8fa5-c7538bdddcfa"
 
 def ensure_profile_exists(user_id: str):
     """
