@@ -1,6 +1,8 @@
 import os
 import faiss
 import numpy as np
+import uuid
+import hashlib
 from dotenv import load_dotenv
 from openai import OpenAI
 from supabase import create_client, Client
@@ -22,6 +24,20 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 # ---------------------------
 # Global variable to store current session user ID
 current_session_user_id = None
+
+def livekit_identity_to_uuid(identity: str) -> str:
+    """
+    Convert a LiveKit identity string to a deterministic UUID.
+    This allows non-UUID identities to work with the database schema.
+    Uses UUID v5 with a namespace to ensure consistency.
+    """
+    # Use UUID namespace for DNS (could use any consistent namespace)
+    namespace = uuid.UUID('6ba7b810-9dad-11d1-80b4-00c04fd430c8')
+    
+    # Generate a deterministic UUID from the identity string
+    identity_uuid = uuid.uuid5(namespace, identity)
+    
+    return str(identity_uuid)
 
 def set_session_user_id(user_id: str):
     """Set the current session user ID from LiveKit."""
@@ -179,11 +195,16 @@ def get_current_user():
         # First, try to get user ID from LiveKit session
         session_user_id = get_session_user_id()
         if session_user_id:
-            print(f"[AUTH] Using LiveKit session user: {session_user_id}")
-            # Ensure this user exists in profiles table, if not use existing user
-            if not ensure_profile_exists(session_user_id):
+            # Convert LiveKit identity to UUID for database compatibility
+            user_uuid = livekit_identity_to_uuid(session_user_id)
+            print(f"[AUTH] Using LiveKit session user: {session_user_id} (UUID: {user_uuid})")
+            
+            # Ensure this user exists in profiles table, create if not
+            if not ensure_profile_exists(user_uuid, original_identity=session_user_id):
+                print(f"[AUTH ERROR] Could not create profile for LiveKit user: {session_user_id}")
                 return get_or_create_default_user()
-            return session_user_id
+            
+            return user_uuid
         
         # Fallback to Supabase Auth if available
         if memory_manager.supabase is None:
@@ -223,10 +244,15 @@ def get_or_create_default_user():
         print(f"[AUTH ERROR] Failed to get default user: {e}")
         return "de8f4740-0d33-475c-8fa5-c7538bdddcfa"
 
-def ensure_profile_exists(user_id: str):
+def ensure_profile_exists(user_id: str, original_identity: str = None):
     """
     Ensure a profile exists in the profiles table for the given user_id.
     This is required due to foreign key constraints.
+    For LiveKit users, creates a profile if it doesn't exist.
+    
+    Args:
+        user_id: The UUID to use for the profile
+        original_identity: The original LiveKit identity string (for email generation)
     """
     try:
         if memory_manager.supabase is None:
@@ -236,10 +262,29 @@ def ensure_profile_exists(user_id: str):
         response = memory_manager.supabase.table('profiles').select('id').eq('id', user_id).execute()
         
         if not response.data:
-            # For development/testing, we'll skip profile creation since it requires auth.users
-            # In production, this should be handled by the authentication system
-            print(f"[PROFILE SKIP] Profile creation skipped for user {user_id} (requires auth.users)")
-            return False  # Return False to indicate profile doesn't exist
+            # Try to create a profile for this LiveKit user
+            try:
+                identity_label = original_identity if original_identity else user_id
+                print(f"[PROFILE CREATE] Creating profile for LiveKit user: {identity_label}")
+                
+                # Generate email using original identity or UUID
+                email_base = original_identity.replace(' ', '_') if original_identity else user_id[:8]
+                
+                create_response = memory_manager.supabase.table('profiles').insert({
+                    'id': user_id,
+                    'email': f'livekit_{email_base}@companion.local',  # Placeholder email
+                    'is_first_login': True
+                }).execute()
+                
+                if create_response.data:
+                    print(f"[PROFILE CREATE] Successfully created profile for user {identity_label}")
+                    return True
+                else:
+                    print(f"[PROFILE ERROR] Failed to create profile for user {identity_label}")
+                    return False
+            except Exception as create_error:
+                print(f"[PROFILE ERROR] Could not create profile for user {identity_label}: {create_error}")
+                return False
         
         return True
     except Exception as e:
