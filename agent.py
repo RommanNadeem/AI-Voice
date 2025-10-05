@@ -69,8 +69,10 @@ class MemoryManager:
                 'value': value
             }).execute()
             
+            print(f"🧠 [MEMORY SAVED] [{category}] {key} = {value[:100]}{'...' if len(value) > 100 else ''}")
             return f"Stored: [{category}] {key} = {value}"
         except Exception as e:
+            print(f"❌ [MEMORY ERROR] Failed to store: {e}")
             return f"Error storing: {e}"
 
     def retrieve(self, category: str, key: str):
@@ -110,8 +112,10 @@ class MemoryManager:
             user_id = get_user_id()
             
             response = self.supabase.table('memory').delete().eq('user_id', user_id).eq('category', category).eq('key', key).execute()
+            print(f"🗑️ [MEMORY DELETED] [{category}] {key}")
             return f"Forgot: [{category}] {key}"
         except Exception as e:
+            print(f"❌ [MEMORY ERROR] Failed to delete: {e}")
             return f"Error forgetting: {e}"
 
     def save_profile(self, profile_text: str):
@@ -158,22 +162,48 @@ memory_manager = MemoryManager()
 # Authentication Helpers
 # ---------------------------
 def get_current_user():
-    """Get the current authenticated user from Supabase Auth."""
+    """Get current authenticated user from Supabase Auth."""
     try:
         if memory_manager.supabase is None:
-            print("[AUTH] Supabase not available, using default user")
-            return None
+            print("[AUTH] Supabase not available, using fallback user")
+            return "60ce7881-3dc8-486d-b2c6-2ad6f6fe3dd8"
         
-        user = memory_manager.supabase.auth.get_user()
-        if user and user.user:
-            print(f"[AUTH] Authenticated user: {user.user.id}")
-            return user.user
+        # Get the current authenticated user from Supabase Auth
+        user_response = memory_manager.supabase.auth.get_user()
+        
+        if user_response and user_response.user:
+            user_id = user_response.user.id
+            print(f"[AUTH] Authenticated user found: {user_id}")
+            return user_id
         else:
-            print("[AUTH] No authenticated user found")
-            return None
+            print("[AUTH] No authenticated user found, using fallback")
+            return "60ce7881-3dc8-486d-b2c6-2ad6f6fe3dd8"
+            
     except Exception as e:
         print(f"[AUTH ERROR] Failed to get current user: {e}")
+        return "60ce7881-3dc8-486d-b2c6-2ad6f6fe3dd8"
+
+def extract_uuid_from_user_id(user_id: str):
+    """Extract UUID from user ID format like 'user-d830b5e3-7b9f-49b4-8254-9e9cb86a4c23'."""
+    if not user_id:
         return None
+    
+    # If it's already a valid UUID, return as is
+    import re
+    uuid_pattern = r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+    if re.match(uuid_pattern, user_id.lower()):
+        return user_id
+    
+    # Extract UUID from format "user-uuid" or similar
+    uuid_match = re.search(r'([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})', user_id.lower())
+    if uuid_match:
+        extracted_uuid = uuid_match.group(1)
+        print(f"🔄 [UUID EXTRACTION] '{user_id}' → '{extracted_uuid}'")
+        return extracted_uuid
+    
+    # If no UUID found, return None
+    print(f"⚠️ [UUID WARNING] No valid UUID found in: {user_id}")
+    return None
 
 def ensure_profile_exists(user_id: str):
     """
@@ -199,14 +229,27 @@ def ensure_profile_exists(user_id: str):
         return False
 
 def get_user_id():
-    """Get the current user's ID, fallback to existing profile if not authenticated."""
-    user = get_current_user()
-    if user:
-        return user.id
+    """Get the current user's ID from Supabase Auth."""
+    user_id = get_current_user()
+    if user_id:
+        # Check if it's already a valid UUID (from Supabase Auth)
+        import re
+        uuid_pattern = r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+        if re.match(uuid_pattern, user_id.lower()):
+            print(f"[AUTH] Using Supabase Auth UUID: {user_id}")
+            return user_id
+        else:
+            # If it's not a UUID, try to extract it (for compatibility)
+            extracted_uuid = extract_uuid_from_user_id(user_id)
+            if extracted_uuid:
+                print(f"[AUTH] Extracted UUID from: {user_id} → {extracted_uuid}")
+                return extracted_uuid
+            else:
+                print(f"[AUTH] No valid UUID found in {user_id}, using fallback")
+                return "60ce7881-3dc8-486d-b2c6-2ad6f6fe3dd8"
     else:
-        print("[AUTH] Using existing profile for testing")
-        # Use the existing profile ID for testing
-        return "8f086b67-b0e9-4a2a-b772-3c56b0a3b4b7"
+        print("[AUTH] Using fallback user ID")
+        return "60ce7881-3dc8-486d-b2c6-2ad6f6fe3dd8"
 
 # ---------------------------
 # Helper Functions
@@ -616,7 +659,7 @@ async def entrypoint(ctx: agents.JobContext):
         else:
             await session.generate_reply(
                 instructions=f"{base_instructions}\n\nUse this context:\n{extra_context}\nUser said: {user_text}"
-    )
+            )
 
     # Send initial greeting with memory context
     await generate_with_memory(greet=True)
