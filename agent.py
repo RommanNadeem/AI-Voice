@@ -381,6 +381,79 @@ def categorize_user_input(user_text: str) -> str:
     return "FACT"
 
 # ---------------------------
+# Onboarding Integration
+# ---------------------------
+def get_onboarding_details(user_id: str):
+    """
+    Fetch onboarding details for a user from onboarding_details table.
+    Returns dict with first_name, occupation, interests, or None if not found.
+    """
+    try:
+        if memory_manager.supabase is None:
+            print("[ONBOARDING] Supabase not available")
+            return None
+        
+        response = memory_manager.supabase.table('onboarding_details').select(
+            'first_name, occupation, interests'
+        ).eq('user_id', user_id).execute()
+        
+        if response.data and len(response.data) > 0:
+            details = response.data[0]
+            print(f"[ONBOARDING] Found details for user {user_id}: {details.get('first_name')}")
+            return details
+        else:
+            print(f"[ONBOARDING] No onboarding details found for user {user_id}")
+            return None
+    except Exception as e:
+        print(f"[ONBOARDING ERROR] Failed to fetch onboarding details: {e}")
+        return None
+
+def populate_profile_from_onboarding(user_id: str):
+    """
+    Fetch onboarding details and populate user profile with occupation and interests.
+    Returns first_name if found, None otherwise.
+    """
+    try:
+        onboarding = get_onboarding_details(user_id)
+        
+        if not onboarding:
+            return None
+        
+        first_name = onboarding.get('first_name')
+        occupation = onboarding.get('occupation')
+        interests = onboarding.get('interests')
+        
+        # Build profile text from onboarding data
+        profile_parts = []
+        
+        if first_name:
+            profile_parts.append(f"Name: {first_name}")
+        
+        if occupation:
+            profile_parts.append(f"Occupation: {occupation}")
+        
+        if interests:
+            # interests might be a list or string
+            if isinstance(interests, list):
+                interests_str = ", ".join(interests)
+            else:
+                interests_str = interests
+            profile_parts.append(f"Interests: {interests_str}")
+        
+        if profile_parts:
+            profile_text = " | ".join(profile_parts)
+            
+            # Save to user profile
+            memory_manager.save_profile(profile_text)
+            print(f"[ONBOARDING] Populated profile from onboarding: {profile_text}")
+        
+        return first_name
+        
+    except Exception as e:
+        print(f"[ONBOARDING ERROR] Failed to populate profile: {e}")
+        return None
+
+# ---------------------------
 # Helper Functions
 # ---------------------------
 # RLS Policy for user_profiles table:
@@ -785,6 +858,7 @@ async def entrypoint(ctx: agents.JobContext):
         set_session_user(user_uuid)
     
     # Step 2: Ensure profile exists for this user BEFORE starting session
+    first_name = None
     if user_uuid:
         print(f"[SESSION INIT] Ensuring profile exists for UUID: {user_uuid}")
         profile_exists = ensure_profile_exists(user_uuid, original_identity=livekit_identity)
@@ -792,6 +866,14 @@ async def entrypoint(ctx: agents.JobContext):
             print(f"[SESSION INIT] ✓ Profile ready for user: {user_uuid}")
         else:
             print(f"[SESSION WARNING] Could not ensure profile exists - some features may not work")
+        
+        # Step 2b: Fetch onboarding details and populate profile
+        print(f"[SESSION INIT] Checking for onboarding data...")
+        first_name = populate_profile_from_onboarding(user_uuid)
+        if first_name:
+            print(f"[SESSION INIT] ✓ Onboarding data loaded - user: {first_name}")
+        else:
+            print(f"[SESSION INIT] No onboarding data found (user may not have completed onboarding)")
     
     # Step 3: Initialize TTS and Assistant
     tts = TTS(voice_id="17", output_format="MP3_22050_32")
@@ -814,7 +896,7 @@ async def entrypoint(ctx: agents.JobContext):
     print(f"[SESSION INIT] ✓ Session started successfully")
 
     # Wrap session.generate_reply so every reply includes memory + rag + profile
-    async def generate_with_memory(user_text: str = None, greet: bool = False):
+    async def generate_with_memory(user_text: str = None, greet: bool = False, user_first_name: str = None):
         past_memories = memory_manager.retrieve_all()
         rag_context = retrieve_from_vectorstore(user_text or "recent", k=2)
         user_profile_text = user_profile.get()
@@ -827,16 +909,20 @@ async def entrypoint(ctx: agents.JobContext):
         """
 
         if greet:
-            await session.generate_reply(
-                instructions=f"Greet the user warmly in Urdu.\n\n{base_instructions}\n\n{extra_context}"
-            )
+            # Use first name in greeting if available (from onboarding)
+            if user_first_name:
+                greeting_instruction = f"Greet the user warmly in Urdu using their name '{user_first_name}'. Make them feel welcome and show that you remember them from onboarding.\n\n{base_instructions}\n\n{extra_context}"
+            else:
+                greeting_instruction = f"Greet the user warmly in Urdu.\n\n{base_instructions}\n\n{extra_context}"
+            
+            await session.generate_reply(instructions=greeting_instruction)
         else:
             await session.generate_reply(
                 instructions=f"{base_instructions}\n\nUse this context:\n{extra_context}\nUser said: {user_text}"
             )
 
-    # Send initial greeting with memory context
-    await generate_with_memory(greet=True)
+    # Send initial greeting with memory context (use first name if available from onboarding)
+    await generate_with_memory(greet=True, user_first_name=first_name)
 
 if __name__ == "__main__":
     agents.cli.run_app(agents.WorkerOptions(
