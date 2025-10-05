@@ -644,7 +644,7 @@ def get_current_user():
             logger.warning(f"[AUTH] No authenticated user found: {auth_error}")
         
         # Fallback to default user ID if no authenticated user
-        default_user_id = os.getenv('DEFAULT_USER_ID', '8f086b67-b0e9-4a2a-b772-3c56b0a3b4b7')
+        default_user_id = os.getenv('DEFAULT_USER_ID', '60ce7881-3dc8-486d-b2c6-2ad6f6fe3dd8')
         
         # Create a mock user object with the default ID
         class MockUser:
@@ -749,7 +749,7 @@ def get_user_id():
     else:
         # Fallback to existing user ID if no user found
         # This ensures we always have a valid user ID for storage
-        fallback_user_id = os.getenv('FALLBACK_USER_ID', '8f086b67-b0e9-4a2a-b772-3c56b0a3b4b7')
+        fallback_user_id = os.getenv('FALLBACK_USER_ID', '60ce7881-3dc8-486d-b2c6-2ad6f6fe3dd8')
         logger.warning(f"[AUTH] No user found, using fallback: {fallback_user_id}")
         return fallback_user_id
 
