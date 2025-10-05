@@ -14,6 +14,7 @@ python-dotenv>=1.0.0
 livekit-agents>=0.4.0
 livekit-plugins-openai>=0.4.0
 livekit-plugins-silero>=0.4.0
+livekit-plugins-noise-cancellation>=0.2.0
 
 livekit-agents>=1.2.0
 python-socketio>=5.0.0
