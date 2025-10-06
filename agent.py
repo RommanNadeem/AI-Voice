@@ -625,12 +625,11 @@ async def entrypoint(ctx: agents.JobContext):
             print(f"[DB] Error fetching name: {e}")
             full_name = ""
         
-        # First response with Urdu instructions
-        print(f"[CONNECTION #{connection_count}] Greeting user...")
-        await session.generate_reply(
-            instructions=f"Greet the user warmly in urdu, use {full_name} if available"
-        )
+        # First response - use full AI personality (no instruction override)
+        print(f"[CONNECTION #{connection_count}] Greeting user{f" ({full_name})" if full_name else ""}...")
         
+        # Let AI use its complete personality instructions naturally
+        await session.generate_reply()        
         print(f"[CONNECTION #{connection_count}] ✓ Active")
         print(f"[READY] Agent ready for conversation or reconnection\n")
         
