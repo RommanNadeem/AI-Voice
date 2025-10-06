@@ -120,6 +120,11 @@ def save_user_profile(profile_text: str) -> bool:
         print("[PROFILE ERROR] Supabase not connected")
         return False
     
+    # Ensure profile exists before saving user profile
+    if not ensure_profile_exists(user_id):
+        print(f"[PROFILE ERROR] Could not ensure profile exists for user {user_id}")
+        return False
+    
     try:
         resp = supabase.table("user_profiles").upsert({
             "user_id": user_id,
@@ -166,6 +171,41 @@ def get_user_profile() -> str:
         print(f"[PROFILE ERROR] Failed to get profile: {e}")
         return ""
 
+def ensure_profile_exists(user_id: str) -> bool:
+    """Ensure a profile exists for the user_id in the profiles table"""
+    if not supabase:
+        print("[PROFILE ERROR] Supabase not connected")
+        return False
+    
+    try:
+        # Check if profile already exists
+        resp = supabase.table("profiles").select("id").eq("id", user_id).execute()
+        
+        if resp.data:
+            print(f"[PROFILE] Profile already exists for user {user_id}")
+            return True
+        
+        # Create new profile
+        print(f"[PROFILE] Creating new profile for user {user_id}")
+        create_resp = supabase.table("profiles").insert({
+            "id": user_id,
+            "email": f"user_{user_id[:8]}@companion.local",
+            "is_first_login": True,
+        }).execute()
+        
+        if getattr(create_resp, "error", None):
+            print(f"[PROFILE ERROR] Failed to create profile: {create_resp.error}")
+            return False
+        
+        print(f"[PROFILE] ✓ Profile created for user {user_id}")
+        return True
+        
+    except Exception as e:
+        print(f"[PROFILE ERROR] ensure_profile_exists failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
 def save_memory(category: str, key: str, value: str) -> bool:
     """Save memory to Supabase"""
     user_id = get_current_user_id()
@@ -182,6 +222,11 @@ def save_memory(category: str, key: str, value: str) -> bool:
     
     if not supabase:
         print("[MEMORY ERROR] Supabase not connected")
+        return False
+    
+    # Ensure profile exists before saving memory (foreign key constraint)
+    if not ensure_profile_exists(user_id):
+        print(f"[MEMORY ERROR] Could not ensure profile exists for user {user_id}")
         return False
     
     print(f"[DEBUG] Supabase client available: {supabase is not None}")
