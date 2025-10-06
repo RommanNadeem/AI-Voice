@@ -542,9 +542,17 @@ async def entrypoint(ctx: agents.JobContext):
     
     # First response with Urdu instructions
     first_response_instructions = assistant.instructions + f"""
-   For your first reply, greet warmly in Urdu (use the user’s {first_name} 
-   if available), introduce yourself as their Urdu-speaking companion, say you’ll communicate in Urdu, and ask how they’re doing today. Keep it to 2–3 short sentences. 
-   From now on, always respond in Urdu unless the user asks otherwise.
+    
+    IMPORTANT: This is your first response to the user. You must:
+    1. Greet the user warmly in Urdu{" using their first name" if first_name else ""}
+    2. Introduce yourself as their Urdu-speaking companion
+    3. Explain that you will communicate in Urdu
+    4. Ask them how they're doing today
+    5. Keep it brief and friendly (2-3 sentences max)
+    
+    {"User's first name: " + first_name if first_name else "No first name available"}
+    
+    Remember: Always respond in Urdu from now on unless specifically asked otherwise.
     """
     
     await session.generate_reply(instructions=first_response_instructions)
