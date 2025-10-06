@@ -5,6 +5,7 @@ import uuid
 import asyncio
 from typing import Optional
 from dotenv import load_dotenv
+import openai
 from supabase import create_client, Client
 
 from livekit import agents
@@ -208,7 +209,7 @@ def save_memory(category: str, key: str, value: str) -> bool:
     if not ensure_profile_exists(user_id):
         print(f"[MEMORY ERROR] Could not ensure profile exists for user {user_id}")
         return False
-
+    
     try:
         memory_data = {
             "user_id": user_id,
@@ -252,48 +253,51 @@ def get_memory(category: str, key: str) -> Optional[str]:
 # Memory Categorization
 # ---------------------------
 def categorize_user_input(user_text: str) -> str:
-    """Categorize user input for memory storage"""
-    text = (user_text or "").lower()
+    """Categorize user input for memory storage using OpenAI"""
+    if not user_text or not user_text.strip():
+        return "FACT"
+    
+    try:
+        # Use OpenAI to categorize the user input
+        response = openai.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": """You are a memory categorization assistant. Analyze the user's input and categorize it into one of these categories:
 
-    goal_keywords = ["want to", "want to be", "aspire to", "goal is", "hoping to", "planning to",
-                     "dream of", "aim to", "strive for", "working towards", "trying to achieve",
-                     "would like to", "my goal", "my dream", "my aspiration"]
-    if any(keyword in text for keyword in goal_keywords):
-        return "GOAL"
+- GOAL: Aspirations, dreams, objectives, things they want to achieve
+- INTEREST: Hobbies, likes, passions, things they enjoy
+- OPINION: Beliefs, thoughts, views, judgments about topics
+- EXPERIENCE: Past events, personal stories, things that happened to them
+- PREFERENCE: Choices, preferences, things they prefer over others
+- PLAN: Future intentions, upcoming events, things they plan to do
+- RELATIONSHIP: People in their life, social connections, family, friends
+- FACT: General information, facts, or anything that doesn't fit other categories
 
-    interest_keywords = ["i like", "i love", "i enjoy", "i'm interested in", "my hobby", "hobbies",
-                         "i'm passionate about", "favorite", "i prefer", "i'm into", "i'm a fan of"]
-    if any(keyword in text for keyword in interest_keywords):
-        return "INTEREST"
-
-    opinion_keywords = ["i think", "i believe", "in my opinion", "i feel", "i consider",
-                        "i'm of the view", "my view is", "i'm convinced", "i disagree", "i agree"]
-    if any(keyword in text for keyword in opinion_keywords):
-        return "OPINION"
-
-    experience_keywords = ["i experienced", "i went through", "happened to me", "i had", "i did",
-                           "i've been", "i was", "i used to", "i remember", "i recall",
-                           "my experience", "when i", "once i"]
-    if any(keyword in text for keyword in experience_keywords):
-        return "EXPERIENCE"
-
-    preference_keywords = ["i prefer", "i'd rather", "i like better", "my choice is", "i choose",
-                           "instead of", "rather than", "better than", "more than", "rather have"]
-    if any(keyword in text for keyword in preference_keywords):
-        return "PREFERENCE"
-
-    plan_keywords = ["i'm planning", "i plan to", "i will", "i'm going to", "i intend to",
-                     "my plan is", "i'm thinking of", "i'm considering", "next week", "tomorrow",
-                     "this weekend", "i'll do"]
-    if any(keyword in text for keyword in plan_keywords):
-        return "PLAN"
-
-    relationship_keywords = ["my friend", "my family", "my partner", "my spouse", "my parents",
-                             "my children", "my colleague", "my boss", "my teacher", "my mentor",
-                             "my relationship", "we are", "they are", "he is", "she is"]
-    if any(keyword in text for keyword in relationship_keywords):
-        return "RELATIONSHIP"
-
+Respond with ONLY the category name (e.g., "GOAL", "INTEREST", etc.)."""
+                },
+                {
+                    "role": "user",
+                    "content": user_text
+                }
+            ],
+            max_tokens=10,
+            temperature=0.1
+        )
+        
+        category = response.choices[0].message.content.strip().upper()
+        
+        # Validate the response is one of our expected categories
+        valid_categories = ["GOAL", "INTEREST", "OPINION", "EXPERIENCE", "PREFERENCE", "PLAN", "RELATIONSHIP", "FACT"]
+        if category in valid_categories:
+            return category
+        else:
+            print(f"[CATEGORIZATION WARNING] Invalid category '{category}' from OpenAI, defaulting to FACT")
+            return "FACT"
+            
+    except Exception as e:
+        print(f"[CATEGORIZATION ERROR] OpenAI categorization failed: {e}, defaulting to FACT")
     return "FACT"
 
 # ---------------------------
@@ -434,7 +438,7 @@ When saving, keep entries **short and concrete**.
 
         category = categorize_user_input(user_text)
         print(f"[AUTO MEMORY] Saving: [{category}] {memory_key}")
-
+        
         success = save_memory(category, memory_key, user_text)
         if success:
             print(f"[AUTO MEMORY] ✓ Saved")
@@ -454,7 +458,7 @@ async def entrypoint(ctx: agents.JobContext):
     - Initialize profile & proceed with conversation
     """
     print(f"[ENTRYPOINT] Starting session for room: {ctx.room.name}")
-
+    
     # Initialize media + agent FIRST so room state/events begin flowing
     tts = TTS(voice_id="17", output_format="MP3_22050_32")
     assistant = Assistant()
