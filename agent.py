@@ -531,289 +531,80 @@ When saving, keep entries **short and concrete**.
             print(f"[AUTO PROFILE] No new profile information to update")
 
 # ---------------------------
-# Cleanup & Reconnection Management
-# ---------------------------
-# Track active sessions and cleanup state
-active_sessions = {}  # {participant_sid: {"user_id": str, "tracks": set(), "cleanup_done": bool}}
-cleanup_locks = {}  # {participant_sid: asyncio.Lock()} - debounce guard
-
-async def cleanup_participant_tracks(room, participant_sid: str, participant_identity: str = None):
-    """
-    Safely cleanup participant tracks with debounce guard.
-    Prevents multiple cleanup runs for the same participant.
-    """
-    # Initialize lock for this participant if not exists
-    if participant_sid not in cleanup_locks:
-        cleanup_locks[participant_sid] = asyncio.Lock()
-    
-    async with cleanup_locks[participant_sid]:
-        # Check if cleanup already done
-        if participant_sid in active_sessions and active_sessions[participant_sid].get("cleanup_done"):
-            logging.info(f"[CLEANUP] Already cleaned up participant {participant_sid}, skipping")
-            return
-        
-        logging.info(f"[CLEANUP] Starting cleanup for participant {participant_sid} (identity: {participant_identity})")
-        
-        try:
-            # Get session data if exists
-            session_data = active_sessions.get(participant_sid, {})
-            tracks_to_cleanup = session_data.get("tracks", set())
-            
-            # Method 1: Cleanup tracks from session data
-            if tracks_to_cleanup:
-                logging.info(f"[CLEANUP] Found {len(tracks_to_cleanup)} tracks in session")
-                for track_sid in list(tracks_to_cleanup):
-                    try:
-                        # Note: Track cleanup is handled by LiveKit SDK automatically
-                        # We just remove references
-                        logging.debug(f"[CLEANUP] Removed reference to track {track_sid}")
-                    except Exception as e:
-                        logging.warning(f"[CLEANUP] Error removing track {track_sid}: {e}")
-                
-                # Clear track references
-                tracks_to_cleanup.clear()
-            
-            # Method 2: Cleanup from room's remote participants (if still accessible)
-            try:
-                participant = room.remote_participants.get(participant_sid)
-                if participant:
-                    # Stop and unpublish tracks
-                    for track_pub in participant.track_publications.values():
-                        try:
-                            if track_pub.track:
-                                # Let LiveKit handle the unpublishing
-                                logging.debug(f"[CLEANUP] Track {track_pub.sid} will be auto-cleaned by LiveKit")
-                        except Exception as e:
-                            logging.warning(f"[CLEANUP] Error accessing track {track_pub.sid}: {e}")
-            except Exception as e:
-                logging.debug(f"[CLEANUP] Participant no longer in room: {e}")
-            
-            # Mark cleanup as done
-            if participant_sid in active_sessions:
-                active_sessions[participant_sid]["cleanup_done"] = True
-            
-            logging.info(f"[CLEANUP] ✓ Completed cleanup for participant {participant_sid}")
-            
-        except Exception as e:
-            logging.error(f"[CLEANUP] Error during cleanup for {participant_sid}: {e}")
-        
-        finally:
-            # Schedule session removal after delay (allow for reconnection)
-            asyncio.create_task(remove_session_after_delay(participant_sid, delay=30))
-
-async def remove_session_after_delay(participant_sid: str, delay: int = 30):
-    """Remove session data after delay, allowing for reconnection window."""
-    await asyncio.sleep(delay)
-    if participant_sid in active_sessions and active_sessions[participant_sid].get("cleanup_done"):
-        logging.info(f"[SESSION] Removing session data for {participant_sid} after {delay}s")
-        active_sessions.pop(participant_sid, None)
-        cleanup_locks.pop(participant_sid, None)
-
-async def handle_participant_disconnected(room, participant):
-    """
-    Handle participant disconnect event.
-    Called when a participant leaves the room.
-    """
-    participant_sid = participant.sid
-    participant_identity = participant.identity
-    
-    logging.info(f"[DISCONNECT] Participant disconnected: sid={participant_sid}, identity={participant_identity}, room={room.name}")
-    
-    # Clear current user if this was the active user
-    session_data = active_sessions.get(participant_sid, {})
-    if session_data.get("user_id"):
-        current_uid = get_current_user_id()
-        if current_uid == session_data["user_id"]:
-            set_current_user_id(None)
-            logging.info(f"[DISCONNECT] Cleared active user_id: {session_data['user_id']}")
-    
-    # Run cleanup with debounce protection
-    await cleanup_participant_tracks(room, participant_sid, participant_identity)
-
-async def handle_participant_connected(room, participant):
-    """
-    Handle participant connect/reconnect event.
-    Creates fresh session or clears stale data.
-    """
-    participant_sid = participant.sid
-    participant_identity = participant.identity
-    
-    logging.info(f"[CONNECT] Participant connected: sid={participant_sid}, identity={participant_identity}, room={room.name}")
-    
-    # Clear any stale session data for this participant
-    if participant_sid in active_sessions:
-        old_cleanup_done = active_sessions[participant_sid].get("cleanup_done", False)
-        if old_cleanup_done:
-            logging.info(f"[CONNECT] Clearing stale session for reconnecting participant {participant_sid}")
-    
-    # Create fresh session
-    active_sessions[participant_sid] = {
-        "user_id": None,  # Will be set after UUID extraction
-        "tracks": set(),
-        "cleanup_done": False,
-        "connected_at": time.time()
-    }
-    
-    logging.info(f"[CONNECT] ✓ Fresh session created for participant {participant_sid}")
-
-async def handle_track_published(room, track, participant):
-    """Track when participant publishes a track."""
-    participant_sid = participant.sid
-    track_sid = track.sid
-    
-    logging.debug(f"[TRACK] Published: {track_sid} by participant {participant_sid}")
-    
-    # Add track to session
-    if participant_sid in active_sessions:
-        active_sessions[participant_sid]["tracks"].add(track_sid)
-
-async def graceful_shutdown(room, tts=None):
-    """
-    Graceful shutdown handler.
-    Cleans up all active participants and resources.
-    """
-    logging.info(f"[SHUTDOWN] Starting graceful shutdown for room {room.name}")
-    
-    try:
-        # Cleanup all active participants
-        participant_sids = list(active_sessions.keys())
-        logging.info(f"[SHUTDOWN] Cleaning up {len(participant_sids)} active sessions")
-        
-        for participant_sid in participant_sids:
-            session_data = active_sessions.get(participant_sid, {})
-            participant_identity = session_data.get("user_id", "unknown")
-            await cleanup_participant_tracks(room, participant_sid, participant_identity)
-        
-        # Clear current user
-        set_current_user_id(None)
-        
-        # Close TTS if provided
-        if tts:
-            try:
-                await tts.aclose()
-                logging.info("[SHUTDOWN] ✓ TTS resources closed")
-            except Exception as e:
-                logging.error(f"[SHUTDOWN] TTS cleanup error: {e}")
-        
-        # Clear all session data
-        active_sessions.clear()
-        cleanup_locks.clear()
-        
-        logging.info("[SHUTDOWN] ✓ Graceful shutdown complete")
-        
-    except Exception as e:
-        logging.error(f"[SHUTDOWN] Error during shutdown: {e}")
-
-# ---------------------------
 # Entrypoint
 # ---------------------------
 async def entrypoint(ctx: agents.JobContext):
     """
-    LiveKit agent entrypoint with cleanup and reconnection handling:
-    - Register event handlers for participant lifecycle
-    - Track sessions and cleanup safely on disconnect
-    - Handle reconnections with fresh state
-    - Graceful shutdown on exit
+    LiveKit agent entrypoint:
+    - Start session to receive state updates
+    - Wait for the intended participant deterministically
+    - Extract & validate UUID from participant identity
+    - Defer Supabase writes until we have a valid user_id
+    - Initialize profile & proceed with conversation
     """
-    logging.info(f"[ENTRYPOINT] Starting session for room: {ctx.room.name}")
+    print(f"[ENTRYPOINT] Starting session for room: {ctx.room.name}")
+
+    # Initialize media + agent FIRST so room state/events begin flowing
+    tts = TTS(voice_id="17", output_format="MP3_22050_32")
+    assistant = Assistant()
+    session = AgentSession(
+        stt=lk_openai.STT(model="gpt-4o-transcribe", language="ur"),
+        llm=lk_openai.LLM(model="gpt-4o-mini"),
+        tts=tts,
+        vad=silero.VAD.load(),
+    )
+
+    print("[SESSION INIT] Starting LiveKit session…")
+    await session.start(room=ctx.room, agent=assistant, room_input_options=RoomInputOptions())
+    print("[SESSION INIT] ✓ Session started")
+
+    # If you know the expected identity (from your token minting), set it here
+    expected_identity = None
+
+    # Wait for the participant deterministically
+    participant = await wait_for_participant(ctx.room, target_identity=expected_identity, timeout_s=20)
+    if not participant:
+        print("[ENTRYPOINT] No participant joined within timeout; running without DB writes")
+        await session.generate_reply(instructions=assistant.instructions)
+        return
+
+    print(f"[ENTRYPOINT] Participant: sid={participant.sid}, identity={participant.identity}, kind={getattr(participant, 'kind', None)}")
+
+    # Resolve to UUID
+    user_id = extract_uuid_from_identity(participant.identity)
+    if not user_id:
+        print("[ENTRYPOINT] Participant identity could not be parsed as UUID; skipping DB writes")
+        await session.generate_reply(instructions=assistant.instructions)
+        return
+
+    # Set current user
+    set_current_user_id(user_id)
+
+    # Now that we have a valid user_id, it's safe to touch Supabase
+    if supabase:
+        print("[SUPABASE] ✓ Connected")
+
+        # Optional: smoke test memory table for this user
+        if save_memory("TEST", "connection_test", "Supabase connection OK"):
+            try:
+                supabase.table("memory").delete() \
+                        .eq("user_id", user_id) \
+                        .eq("category", "TEST") \
+                        .eq("key", "connection_test") \
+                        .execute()
+            except Exception as e:
+                print(f"[TEST] Cleanup warning: {e}")
+    else:
+        print("[SUPABASE] ✗ Not connected; running without persistence")
+
+    # Get user's first name for personalized greeting
+    result = supabase.table("onboarding_details").select("full_name").eq("user_id", user_id).execute()
+    full_name = result.data[0]["full_name"] if result.data else ""
     
-    tts = None
-    
-    try:
-        # Initialize media + agent FIRST so room state/events begin flowing
-        tts = TTS(voice_id="17", output_format="MP3_22050_32")
-        assistant = Assistant()
-        session = AgentSession(
-            stt=lk_openai.STT(model="gpt-4o-transcribe", language="ur"),
-            llm=lk_openai.LLM(model="gpt-4o-mini"),
-            tts=tts,
-            vad=silero.VAD.load(),
-        )
-
-        # Register event handlers for participant lifecycle
-        @ctx.room.on("participant_connected")
-        def on_participant_connected(participant):
-            asyncio.create_task(handle_participant_connected(ctx.room, participant))
-        
-        @ctx.room.on("participant_disconnected")
-        def on_participant_disconnected(participant):
-            asyncio.create_task(handle_participant_disconnected(ctx.room, participant))
-        
-        @ctx.room.on("track_published")
-        def on_track_published(publication, participant):
-            if publication.track:
-                asyncio.create_task(handle_track_published(ctx.room, publication.track, participant))
-        
-        logging.info("[EVENT HANDLERS] ✓ Registered participant lifecycle handlers")
-
-        logging.info("[SESSION INIT] Starting LiveKit session…")
-        await session.start(room=ctx.room, agent=assistant, room_input_options=RoomInputOptions())
-        logging.info("[SESSION INIT] ✓ Session started")
-
-        # If you know the expected identity (from your token minting), set it here
-        expected_identity = None
-
-        # Wait for the participant deterministically
-        participant = await wait_for_participant(ctx.room, target_identity=expected_identity, timeout_s=20)
-        if not participant:
-            logging.warning("[ENTRYPOINT] No participant joined within timeout; running without DB writes")
-            await session.generate_reply(instructions=assistant.instructions)
-            return
-
-        logging.info(f"[ENTRYPOINT] Participant: sid={participant.sid}, identity={participant.identity}, kind={getattr(participant, 'kind', None)}")
-
-        # Resolve to UUID
-        user_id = extract_uuid_from_identity(participant.identity)
-        if not user_id:
-            logging.warning("[ENTRYPOINT] Participant identity could not be parsed as UUID; skipping DB writes")
-            await session.generate_reply(instructions=assistant.instructions)
-            return
-
-        # Set current user and update session tracking
-        set_current_user_id(user_id)
-        
-        # Update session data with user_id
-        if participant.sid in active_sessions:
-            active_sessions[participant.sid]["user_id"] = user_id
-            logging.info(f"[SESSION] Updated session for participant {participant.sid} with user_id {user_id}")
-
-        # Now that we have a valid user_id, it's safe to touch Supabase
-        if supabase:
-            logging.info("[SUPABASE] ✓ Connected")
-
-            # Optional: smoke test memory table for this user
-            if save_memory("TEST", "connection_test", "Supabase connection OK"):
-                try:
-                    supabase.table("memory").delete() \
-                            .eq("user_id", user_id) \
-                            .eq("category", "TEST") \
-                            .eq("key", "connection_test") \
-                            .execute()
-                except Exception as e:
-                    logging.warning(f"[TEST] Cleanup warning: {e}")
-        else:
-            logging.warning("[SUPABASE] ✗ Not connected; running without persistence")
-
-        # Get user's first name for personalized greeting
-        result = supabase.table("onboarding_details").select("full_name").eq("user_id", user_id).execute()
-        full_name = result.data[0]["full_name"] if result.data else ""
-        
-        # First response with Urdu instructions
-        await session.generate_reply(
-            instructions=f"Greet the user warmly in urdu, use {full_name} if available"
-        )
-        
-        # Keep agent alive to handle events
-        logging.info("[ENTRYPOINT] Agent active, monitoring for events...")
-        
-    except Exception as e:
-        logging.error(f"[ENTRYPOINT] Error: {e}")
-        raise
-    
-    finally:
-        # Graceful shutdown on exit
-        logging.info("[ENTRYPOINT] Initiating graceful shutdown...")
-        await graceful_shutdown(ctx.room, tts)
+    # First response with Urdu instructions
+    await session.generate_reply(
+        instructions=f"Greet the user warmly in urdu, use {full_name} if available"
+    )
 
 if __name__ == "__main__":
     agents.cli.run_app(agents.WorkerOptions(
