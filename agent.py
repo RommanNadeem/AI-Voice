@@ -107,6 +107,11 @@ def save_user_profile(profile_text: str) -> bool:
         print("[PROFILE ERROR] No user ID set")
         return False
     
+    # Validate UUID format before saving
+    if not is_valid_uuid(user_id):
+        print(f"[PROFILE ERROR] Invalid UUID format: {user_id}")
+        return False
+    
     if not supabase:
         print("[PROFILE ERROR] Supabase not connected")
         return False
@@ -134,6 +139,11 @@ def get_user_profile() -> str:
         print("[PROFILE ERROR] No user ID set")
         return ""
     
+    # Validate UUID format before querying
+    if not is_valid_uuid(user_id):
+        print(f"[PROFILE ERROR] Invalid UUID format: {user_id}")
+        return ""
+    
     if not supabase:
         print("[PROFILE ERROR] Supabase not connected")
         return ""
@@ -157,6 +167,11 @@ def save_memory(category: str, key: str, value: str) -> bool:
     user_id = get_current_user_id()
     if not user_id:
         print("[MEMORY ERROR] No user ID set")
+        return False
+    
+    # Validate UUID format before saving
+    if not is_valid_uuid(user_id):
+        print(f"[MEMORY ERROR] Invalid UUID format: {user_id}")
         return False
     
     print(f"[DEBUG] save_memory called: category={category}, key={key}, value={value[:50]}...")
@@ -197,6 +212,11 @@ def get_memory(category: str, key: str) -> Optional[str]:
     user_id = get_current_user_id()
     if not user_id:
         print("[MEMORY ERROR] No user ID set")
+        return None
+    
+    # Validate UUID format before querying
+    if not is_valid_uuid(user_id):
+        print(f"[MEMORY ERROR] Invalid UUID format: {user_id}")
         return None
     
     if not supabase:
@@ -384,12 +404,13 @@ async def entrypoint(ctx: agents.JobContext):
                 
         else:
             print("[ENTRYPOINT] No remote participants found")
-            # Use a fallback user ID for testing
-            user_id = "fallback_user_" + str(int(time.time()))
+            # Generate a proper UUID for fallback
+            user_id = str(uuid.uuid4())
             print(f"[ENTRYPOINT] Using fallback user ID: {user_id}")
     except Exception as e:
         print(f"[ENTRYPOINT] Error extracting user ID: {e}")
-        user_id = "error_user_" + str(int(time.time()))
+        # Generate a proper UUID for error fallback
+        user_id = str(uuid.uuid4())
         print(f"[ENTRYPOINT] Using error fallback user ID: {user_id}")
     
     # Set the current user ID for this session
