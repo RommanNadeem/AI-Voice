@@ -196,6 +196,15 @@ class WebSocketClient:
             return True
         
         try:
+            # Clean up old socket if it exists
+            if self.sio is not None:
+                try:
+                    if self.sio.connected:
+                        await self.sio.disconnect()
+                except Exception as e:
+                    logger.debug(f"Old socket cleanup: {e}")
+                self.sio = None
+            
             self.sio = socketio.AsyncClient(
                 reconnection=True,
                 reconnection_attempts=3,
@@ -319,11 +328,24 @@ class WebSocketClient:
     
     async def _on_disconnect(self):
         """Handle disconnection"""
+        logger.debug("WebSocket disconnected, cleaning up...")
         self.connected = False
+        
+        # Clear all pending audio callbacks
         for queue in self.audio_callbacks.values():
-            await queue.put(None)
+            try:
+                await queue.put(None)
+            except Exception as e:
+                logger.debug(f"Queue cleanup error: {e}")
+        
         self.audio_callbacks.clear()
         self.active_requests.clear()
+        
+        # Clean up socket reference (will be recreated on reconnect)
+        if self.sio:
+            self.sio = None
+        
+        logger.debug("✓ Disconnect cleanup complete, ready for reconnection")
 
 
 class ChunkedStream(tts.ChunkedStream):
