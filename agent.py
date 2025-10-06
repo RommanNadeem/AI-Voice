@@ -199,110 +199,6 @@ def get_user_profile() -> str:
         print(f"[PROFILE ERROR] Failed to get profile: {e}")
         return ""
 
-def extract_profile_insights(user_input: str, existing_profile: str = "") -> str:
-    """Extract important personality traits, interests, and essential details using OpenAI"""
-    if not user_input or not user_input.strip():
-        return ""
-    
-    try:
-        client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-        
-        # Create a comprehensive prompt for profile extraction
-        prompt = f"""
-        Analyze the following user input and extract ONLY the most important personality traits, core interests, values, goals, and essential characteristics that define who this person is. Ignore trivial details, temporary states, or unimportant information.
-
-        Focus on:
-        - Core personality traits (e.g., "introverted", "creative", "analytical")
-        - Fundamental interests and passions (e.g., "loves music", "passionate about technology")
-        - Important values and beliefs (e.g., "values family", "environmentally conscious")
-        - Significant goals and aspirations (e.g., "wants to learn Urdu", "dreams of traveling")
-        - Key relationships and roles (e.g., "father of two", "software engineer")
-        - Important experiences that shaped them (e.g., "grew up in Pakistan", "studied abroad")
-
-        Ignore:
-        - Temporary moods or feelings
-        - Minor preferences
-        - Routine activities
-        - Casual observations
-        - Weather, current events, etc.
-
-        User input: "{user_input}"
-        
-        Existing profile context: "{existing_profile}"
-        
-        Return a concise summary (2-3 sentences max) of ONLY the most essential personality-defining information. If nothing important is found, return "NO_IMPORTANT_INFO".
-        """
-        
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": "You are an expert at identifying core personality traits and essential characteristics. Extract only the most important, personality-defining information. Be concise and focused."},
-                {"role": "user", "content": prompt}
-            ],
-            max_tokens=150,
-            temperature=0.2
-        )
-        
-        insights = response.choices[0].message.content.strip()
-        
-        if insights == "NO_IMPORTANT_INFO" or len(insights) < 10:
-            print(f"[PROFILE EXTRACTION] No important insights found in: {user_input[:50]}...")
-            return ""
-        
-        print(f"[PROFILE EXTRACTION] Extracted insights: {insights}")
-        return insights
-        
-    except Exception as e:
-        print(f"[PROFILE EXTRACTION ERROR] Failed to extract insights: {e}")
-        return ""
-
-def merge_profile_insights(new_insights: str, existing_profile: str = "") -> str:
-    """Merge new insights with existing profile using OpenAI"""
-    if not new_insights:
-        return existing_profile
-    
-    if not existing_profile:
-        return new_insights
-    
-    try:
-        client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-        
-        prompt = f"""
-        Merge the following new insights with the existing user profile. Create a comprehensive, well-organized profile that captures the person's complete personality and essential characteristics.
-
-        Rules:
-        - Keep only the most important, personality-defining information
-        - Remove redundancy and contradictions (prefer newer information)
-        - Organize information logically (personality, interests, goals, relationships, etc.)
-        - Keep it concise but comprehensive (max 200 words)
-        - Maintain a natural, flowing description
-
-        Existing profile: "{existing_profile}"
-        
-        New insights: "{new_insights}"
-        
-        Return the merged, organized profile.
-        """
-        
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": "You are an expert at creating comprehensive user profiles. Merge information intelligently, removing redundancy while preserving all important personality traits."},
-                {"role": "user", "content": prompt}
-            ],
-            max_tokens=300,
-            temperature=0.3
-        )
-        
-        merged_profile = response.choices[0].message.content.strip()
-        print(f"[PROFILE MERGE] Updated profile: {merged_profile[:100]}...")
-        return merged_profile
-        
-    except Exception as e:
-        print(f"[PROFILE MERGE ERROR] Failed to merge profiles: {e}")
-        # Fallback: simple concatenation
-        return f"{existing_profile}\n\n{new_insights}" if existing_profile else new_insights
-
 def save_memory(category: str, key: str, value: str) -> bool:
     """Save memory to Supabase"""
     if not can_write_for_current_user():
@@ -503,22 +399,9 @@ When saving, keep entries **short and concrete**.
 
     @function_tool()
     async def saveUserProfile(self, context: RunContext, profile_text: str):
-        """Save user profile information using AI-powered extraction"""
-        # Get existing profile for context
-        existing_profile = get_user_profile()
-        
-        # Extract important insights from the new input
-        new_insights = extract_profile_insights(profile_text, existing_profile)
-        
-        if not new_insights:
-            return {"success": False, "message": "No important profile information found in the input"}
-        
-        # Merge with existing profile
-        updated_profile = merge_profile_insights(new_insights, existing_profile)
-        
-        # Save the updated profile
-        success = save_user_profile(updated_profile)
-        return {"success": success, "message": "Profile updated with AI insights" if success else "Failed to save profile"}
+        """Save user profile information"""
+        success = save_user_profile(profile_text)
+        return {"success": success, "message": "Profile saved" if success else "Failed to save profile"}
 
     @function_tool()
     async def getUserProfile(self, context: RunContext):
@@ -539,7 +422,7 @@ When saving, keep entries **short and concrete**.
         return {"value": memory or "", "found": memory is not None}
 
     async def on_user_turn_completed(self, turn_ctx, new_message):
-        """Automatically save user input as memory and update profile with AI insights"""
+        """Automatically save user input as memory (only if DB writes are permitted)"""
         user_text = new_message.text_content or ""
         print(f"[USER INPUT] {user_text}")
 
@@ -550,7 +433,6 @@ When saving, keep entries **short and concrete**.
         ts_ms = int(time.time() * 1000)
         memory_key = f"user_input_{ts_ms}"
 
-        # Save as categorized memory
         category = categorize_user_input(user_text)
         print(f"[AUTO MEMORY] Saving: [{category}] {memory_key}")
 
@@ -559,24 +441,6 @@ When saving, keep entries **short and concrete**.
             print(f"[AUTO MEMORY] ✓ Saved")
         else:
             print(f"[AUTO MEMORY] ✗ Failed")
-
-        # Automatically update user profile with AI insights
-        try:
-            existing_profile = get_user_profile()
-            new_insights = extract_profile_insights(user_text, existing_profile)
-            
-            if new_insights:
-                updated_profile = merge_profile_insights(new_insights, existing_profile)
-                profile_success = save_user_profile(updated_profile)
-                if profile_success:
-                    print(f"[AUTO PROFILE] ✓ Updated with new insights")
-                else:
-                    print(f"[AUTO PROFILE] ✗ Failed to update")
-            else:
-                print(f"[AUTO PROFILE] No important insights found")
-                
-        except Exception as e:
-            print(f"[AUTO PROFILE ERROR] Failed to update profile: {e}")
 
 # ---------------------------
 # Entrypoint
