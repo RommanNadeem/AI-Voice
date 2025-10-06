@@ -394,13 +394,21 @@ async def entrypoint(ctx: agents.JobContext):
     
     # Extract user ID from LiveKit session
     user_id = None
+    participants_found = False
+    
     try:
+        print(f"[ENTRYPOINT DEBUG] Room participants count: {len(ctx.room.remote_participants)}")
+        print(f"[ENTRYPOINT DEBUG] All participants: {list(ctx.room.remote_participants.keys())}")
+        
         participants = ctx.room.remote_participants
         if participants:
+            participants_found = True
+            # Get the first participant (there should typically be only one user)
             participant = list(participants.values())[0]
             raw_identity = participant.identity
             print(f"[ENTRYPOINT] Found participant: {participant.sid}")
             print(f"[ENTRYPOINT] Raw identity: {raw_identity}")
+            print(f"[ENTRYPOINT] Participant metadata: {getattr(participant, 'metadata', 'No metadata')}")
             
             # Extract UUID from identity using helper function
             user_id = extract_uuid_from_identity(raw_identity)
@@ -408,11 +416,19 @@ async def entrypoint(ctx: agents.JobContext):
                 
         else:
             print("[ENTRYPOINT] No remote participants found")
+            print("[ENTRYPOINT DEBUG] This could mean:")
+            print("[ENTRYPOINT DEBUG] 1. User hasn't joined the room yet")
+            print("[ENTRYPOINT DEBUG] 2. User joined but agent started before participant")
+            print("[ENTRYPOINT DEBUG] 3. Room configuration issue")
+            print("[ENTRYPOINT DEBUG] 4. LiveKit token/authentication issue")
+            
             # Generate a proper UUID for fallback
             user_id = str(uuid.uuid4())
             print(f"[ENTRYPOINT] Using fallback user ID: {user_id}")
     except Exception as e:
         print(f"[ENTRYPOINT] Error extracting user ID: {e}")
+        import traceback
+        traceback.print_exc()
         # Generate a proper UUID for error fallback
         user_id = str(uuid.uuid4())
         print(f"[ENTRYPOINT] Using error fallback user ID: {user_id}")
@@ -420,6 +436,33 @@ async def entrypoint(ctx: agents.JobContext):
     # Set the current user ID for this session
     set_current_user_id(user_id)
     print(f"[ENTRYPOINT] User ID set to: {user_id}")
+
+    # If no participants found initially, wait a bit and try again
+    if not participants_found:
+        print("[ENTRYPOINT] Waiting for participants to join...")
+        import asyncio
+        await asyncio.sleep(2)  # Wait 2 seconds
+        
+        # Try again to get participants
+        try:
+            participants = ctx.room.remote_participants
+            if participants:
+                participant = list(participants.values())[0]
+                raw_identity = participant.identity
+                print(f"[ENTRYPOINT RETRY] Found participant: {participant.sid}")
+                print(f"[ENTRYPOINT RETRY] Raw identity: {raw_identity}")
+                
+                # Extract UUID from identity using helper function
+                user_id = extract_uuid_from_identity(raw_identity)
+                print(f"[ENTRYPOINT RETRY] Processed identity: {raw_identity} -> {user_id}")
+                
+                # Update the current user ID
+                set_current_user_id(user_id)
+                print(f"[ENTRYPOINT RETRY] User ID updated to: {user_id}")
+            else:
+                print("[ENTRYPOINT RETRY] Still no participants found after waiting")
+        except Exception as e:
+            print(f"[ENTRYPOINT RETRY] Error in retry: {e}")
 
     # Test Supabase connection
     if supabase:
