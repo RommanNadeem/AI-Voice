@@ -200,14 +200,14 @@ def get_user_profile() -> str:
         return ""
 
 def get_user_first_name() -> str:
-    """Get user's first name from onboarding table"""
+    """Get user's first name from onboarding_details table"""
     if not can_write_for_current_user():
         return ""
     user_id = get_current_user_id()
     try:
-        resp = supabase.table("onboarding").select("first_name").eq("user_id", user_id).execute()
+        resp = supabase.table("onboarding_details").select("first_name").eq("user_id", user_id).execute()
         if getattr(resp, "error", None):
-            print(f"[SUPABASE ERROR] onboarding select: {resp.error}")
+            print(f"[SUPABASE ERROR] onboarding_details select: {resp.error}")
             return ""
         data = getattr(resp, "data", []) or []
         if data:
