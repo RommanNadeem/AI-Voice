@@ -12,6 +12,7 @@ from livekit.agents import AgentSession, Agent, RoomInputOptions, RunContext, fu
 from livekit.plugins import openai as lk_openai
 from livekit.plugins import silero
 from uplift_tts import TTS
+import openai
 
 # ---------------------------
 # Logging: keep things clean (no verbose httpx/hpack/httpcore spam)
@@ -252,49 +253,56 @@ def get_memory(category: str, key: str) -> Optional[str]:
 # Memory Categorization
 # ---------------------------
 def categorize_user_input(user_text: str) -> str:
-    """Categorize user input for memory storage"""
-    text = (user_text or "").lower()
-
-    goal_keywords = ["want to", "want to be", "aspire to", "goal is", "hoping to", "planning to",
-                     "dream of", "aim to", "strive for", "working towards", "trying to achieve",
-                     "would like to", "my goal", "my dream", "my aspiration"]
-    if any(keyword in text for keyword in goal_keywords):
-        return "GOAL"
-
-    interest_keywords = ["i like", "i love", "i enjoy", "i'm interested in", "my hobby", "hobbies",
-                         "i'm passionate about", "favorite", "i prefer", "i'm into", "i'm a fan of"]
-    if any(keyword in text for keyword in interest_keywords):
-        return "INTEREST"
-
-    opinion_keywords = ["i think", "i believe", "in my opinion", "i feel", "i consider",
-                        "i'm of the view", "my view is", "i'm convinced", "i disagree", "i agree"]
-    if any(keyword in text for keyword in opinion_keywords):
-        return "OPINION"
-
-    experience_keywords = ["i experienced", "i went through", "happened to me", "i had", "i did",
-                           "i've been", "i was", "i used to", "i remember", "i recall",
-                           "my experience", "when i", "once i"]
-    if any(keyword in text for keyword in experience_keywords):
-        return "EXPERIENCE"
-
-    preference_keywords = ["i prefer", "i'd rather", "i like better", "my choice is", "i choose",
-                           "instead of", "rather than", "better than", "more than", "rather have"]
-    if any(keyword in text for keyword in preference_keywords):
-        return "PREFERENCE"
-
-    plan_keywords = ["i'm planning", "i plan to", "i will", "i'm going to", "i intend to",
-                     "my plan is", "i'm thinking of", "i'm considering", "next week", "tomorrow",
-                     "this weekend", "i'll do"]
-    if any(keyword in text for keyword in plan_keywords):
-        return "PLAN"
-
-    relationship_keywords = ["my friend", "my family", "my partner", "my spouse", "my parents",
-                             "my children", "my colleague", "my boss", "my teacher", "my mentor",
-                             "my relationship", "we are", "they are", "he is", "she is"]
-    if any(keyword in text for keyword in relationship_keywords):
-        return "RELATIONSHIP"
-
-    return "FACT"
+    """Categorize user input for memory storage using OpenAI"""
+    if not user_text or not user_text.strip():
+        return "FACT"
+    
+    try:
+        # Initialize OpenAI client
+        client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        
+        # Create a prompt for categorization
+        prompt = f"""
+        Analyze the following user input and categorize it into one of these categories:
+        
+        GOAL - Aspirations, dreams, things they want to achieve
+        INTEREST - Things they like, hobbies, passions, preferences
+        OPINION - Thoughts, beliefs, views, judgments
+        EXPERIENCE - Past events, things that happened to them, memories
+        PREFERENCE - Choices, likes vs dislikes, preferences
+        PLAN - Future intentions, upcoming events, scheduled activities
+        RELATIONSHIP - People in their life, family, friends, colleagues
+        FACT - General information, facts, neutral statements
+        
+        User input: "{user_text}"
+        
+        Return only the category name (e.g., GOAL, INTEREST, etc.) - no other text.
+        """
+        
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "You are a helpful assistant that categorizes user input into memory categories. Always respond with just the category name."},
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=10,
+            temperature=0.1
+        )
+        
+        category = response.choices[0].message.content.strip().upper()
+        
+        # Validate the category is one of our expected ones
+        valid_categories = ["GOAL", "INTEREST", "OPINION", "EXPERIENCE", "PREFERENCE", "PLAN", "RELATIONSHIP", "FACT"]
+        if category in valid_categories:
+            print(f"[CATEGORIZATION] '{user_text[:50]}...' -> {category}")
+            return category
+        else:
+            print(f"[CATEGORIZATION WARNING] Invalid category '{category}' for input: {user_text[:50]}...")
+            return "FACT"
+            
+    except Exception as e:
+        print(f"[CATEGORIZATION ERROR] Failed to categorize input: {e}")
+        return "FACT"
 
 # ---------------------------
 # Assistant Agent with OpenAI Prompt
