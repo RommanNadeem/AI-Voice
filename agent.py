@@ -173,13 +173,20 @@ def get_user_profile() -> str:
 
 def ensure_profile_exists(user_id: str) -> bool:
     """Ensure a profile exists for the user_id in the profiles table"""
+    print(f"[PROFILE DEBUG] Starting ensure_profile_exists for user: {user_id}")
+    
     if not supabase:
         print("[PROFILE ERROR] Supabase not connected")
         return False
     
     try:
         # Check if profile already exists using user_id
+        print(f"[PROFILE DEBUG] Checking if profile exists for user_id: {user_id}")
         resp = supabase.table("profiles").select("id, user_id").eq("user_id", user_id).execute()
+        
+        print(f"[PROFILE DEBUG] Query response: {resp}")
+        print(f"[PROFILE DEBUG] Response data: {resp.data}")
+        print(f"[PROFILE DEBUG] Response error: {getattr(resp, 'error', None)}")
         
         if resp.data:
             print(f"[PROFILE] Profile already exists for user {user_id} (profile_id: {resp.data[0]['id']})")
@@ -187,14 +194,22 @@ def ensure_profile_exists(user_id: str) -> bool:
         
         # Create new profile with user_id (let id be auto-generated)
         print(f"[PROFILE] Creating new profile for user {user_id}")
-        create_resp = supabase.table("profiles").insert({
+        profile_data = {
             "user_id": user_id,
             "email": f"user_{user_id[:8]}@companion.local",
             "is_first_login": True,
-        }).execute()
+        }
+        print(f"[PROFILE DEBUG] Profile data to insert: {profile_data}")
+        
+        create_resp = supabase.table("profiles").insert(profile_data).execute()
+        
+        print(f"[PROFILE DEBUG] Create response: {create_resp}")
+        print(f"[PROFILE DEBUG] Create response data: {create_resp.data}")
+        print(f"[PROFILE DEBUG] Create response error: {getattr(create_resp, 'error', None)}")
         
         if getattr(create_resp, "error", None):
             print(f"[PROFILE ERROR] Failed to create profile: {create_resp.error}")
+            print(f"[PROFILE ERROR] Error details: {create_resp.error}")
             return False
         
         # Get the created profile ID for logging
@@ -207,6 +222,7 @@ def ensure_profile_exists(user_id: str) -> bool:
         
     except Exception as e:
         print(f"[PROFILE ERROR] ensure_profile_exists failed: {e}")
+        print(f"[PROFILE ERROR] Exception type: {type(e).__name__}")
         import traceback
         traceback.print_exc()
         return False
@@ -230,7 +246,11 @@ def save_memory(category: str, key: str, value: str) -> bool:
         return False
     
     # Ensure profile exists before saving memory (foreign key constraint)
-    if not ensure_profile_exists(user_id):
+    print(f"[MEMORY DEBUG] Ensuring profile exists for user: {user_id}")
+    profile_exists = ensure_profile_exists(user_id)
+    print(f"[MEMORY DEBUG] Profile exists result: {profile_exists}")
+    
+    if not profile_exists:
         print(f"[MEMORY ERROR] Could not ensure profile exists for user {user_id}")
         return False
     
