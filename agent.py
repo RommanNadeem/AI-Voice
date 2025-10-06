@@ -491,7 +491,7 @@ When saving, keep entries **short and concrete**.
         return {"profile": profile}
 
     async def on_user_turn_completed(self, turn_ctx, new_message):
-        """Automatically save user input as memory (only if DB writes are permitted)"""
+        """Automatically save user input as memory AND update profiles (only if DB writes are permitted)"""
         user_text = new_message.text_content or ""
         print(f"[USER INPUT] {user_text}")
 
@@ -499,17 +499,36 @@ When saving, keep entries **short and concrete**.
             print("[AUTO MEMORY] Skipped (no valid user_id or no DB)")
             return
 
+        # Save user input as memory
         ts_ms = int(time.time() * 1000)
         memory_key = f"user_input_{ts_ms}"
 
         category = categorize_user_input(user_text)
         print(f"[AUTO MEMORY] Saving: [{category}] {memory_key}")
 
-        success = save_memory(category, memory_key, user_text)
-        if success:
+        memory_success = save_memory(category, memory_key, user_text)
+        if memory_success:
             print(f"[AUTO MEMORY] ✓ Saved")
         else:
             print(f"[AUTO MEMORY] ✗ Failed")
+
+        # Automatically update user profile with new information
+        print(f"[AUTO PROFILE] Processing user input for profile update...")
+        
+        # Get existing profile for context
+        existing_profile = get_user_profile()
+        
+        # Generate/update profile using OpenAI
+        generated_profile = generate_user_profile(user_text, existing_profile)
+        
+        if generated_profile and generated_profile != existing_profile:
+            profile_success = save_user_profile(generated_profile)
+            if profile_success:
+                print(f"[AUTO PROFILE] ✓ Updated profile successfully")
+            else:
+                print(f"[AUTO PROFILE] ✗ Failed to save profile")
+        else:
+            print(f"[AUTO PROFILE] No new profile information to update")
 
 # ---------------------------
 # Entrypoint
