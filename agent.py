@@ -3,7 +3,7 @@ import logging
 import time
 import uuid
 import asyncio
-from typing import Optional
+from typing import Optional, Dict, List
 from dotenv import load_dotenv
 from supabase import create_client, Client
 
@@ -561,6 +561,92 @@ Respond in JSON format:
             "confidence": 0.0,
             "reason": f"Analysis error: {str(e)}"
         }
+
+
+async def get_intelligent_first_message_instructions(user_id: str, assistant_instructions: str) -> str:
+    """
+    Generate intelligent first message instructions based on conversation history and user profile.
+    
+    This function:
+    1. Gets last conversation context
+    2. Analyzes conversation continuity 
+    3. Retrieves user profile
+    4. Generates appropriate greeting strategy
+    """
+    try:
+        print(f"[INTELLIGENT GREETING] Analyzing conversation context for user {user_id}...")
+        
+        # Get conversation history
+        context = await get_last_conversation_context(user_id)
+        
+        # Get user profile
+        user_profile = get_user_profile()
+        
+        if not context["has_history"]:
+            print(f"[INTELLIGENT GREETING] No history found - using fresh start approach")
+            return assistant_instructions + """
+
+## First Message Strategy
+Since this appears to be a new conversation or first interaction, start with a warm, welcoming greeting in Urdu. Introduce yourself briefly as their AI companion and ask how they're doing today. Keep it simple and friendly.
+
+Example: "Assalam-o-alaikum! Main aapki AI companion hun. Aaj aap kaise hain?"
+
+"""
+        
+        # Analyze conversation continuity
+        analysis = await analyze_conversation_continuity(
+            context["last_messages"],
+            context["time_since_last_hours"],
+            user_profile
+        )
+        
+        if analysis["decision"] == "FOLLOW_UP":
+            print(f"[INTELLIGENT GREETING] Following up on previous conversation (confidence: {analysis['confidence']:.2f})")
+            suggested_opening = analysis.get("suggested_opening", "")
+            
+            return assistant_instructions + f"""
+
+## First Message Strategy - Follow-up
+Based on conversation analysis, continue the previous discussion naturally. The last conversation was about: {analysis.get('detected_topic', 'unknown topic')}.
+
+Use this suggested opening: "{suggested_opening}"
+
+Guidelines:
+- Reference the previous conversation naturally
+- Show you remember what was discussed
+- Continue the emotional tone appropriately
+- Keep the conversation flowing
+
+"""
+        else:
+            print(f"[INTELLIGENT GREETING] Fresh start approach (confidence: {analysis['confidence']:.2f})")
+            return assistant_instructions + f"""
+
+## First Message Strategy - Fresh Start
+Start with a natural, warm greeting. The previous conversation ended naturally, so begin fresh while being aware of the user's profile.
+
+User Profile Context: {user_profile[:200] if user_profile else "No profile available"}
+
+Guidelines:
+- Use a warm, friendly greeting in Urdu
+- Reference their profile naturally if relevant
+- Ask how they're doing today
+- Keep it conversational and natural
+
+Example: "Assalam-o-alaikum! Kaise hain aap aaj? [Reference profile naturally if appropriate]"
+
+"""
+        
+    except Exception as e:
+        print(f"[INTELLIGENT GREETING ERROR] {e}, using fallback")
+        return assistant_instructions + """
+
+## First Message Strategy - Fallback
+Start with a simple, warm greeting in Urdu. Ask how they're doing today.
+
+Example: "Assalam-o-alaikum! Main aapki AI companion hun. Aaj aap kaise hain?"
+
+"""
 
 # ---------------------------
 # Memory Categorization
