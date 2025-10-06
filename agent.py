@@ -99,6 +99,20 @@ def extract_uuid_from_identity(identity: Optional[str]) -> Optional[str]:
     print(f"[UUID WARNING] Invalid identity format: {identity}")
     return None
 
+async def wait_for_participant_disconnect(room, participant_sid: str):
+    """
+    Waits for a specific participant to disconnect.
+    This prevents the reconnection loop from immediately re-greeting the same user.
+    """
+    print(f"[DISCONNECT WATCH] Monitoring participant {participant_sid}...")
+    while True:
+        # Check if participant is still in the room
+        if participant_sid not in room.remote_participants:
+            print(f"[DISCONNECT] Participant {participant_sid} disconnected")
+            return
+        await asyncio.sleep(1.0)
+
+
 async def wait_for_participant(room, *, target_identity: Optional[str] = None, timeout_s: int = 20):
     """
     Waits up to timeout_s for a remote participant.
@@ -631,7 +645,18 @@ async def entrypoint(ctx: agents.JobContext):
         # Let AI use its complete personality instructions naturally
         await session.generate_reply()        
         print(f"[CONNECTION #{connection_count}] ✓ Active")
-        print(f"[READY] Agent ready for conversation or reconnection\n")
+        print(f"[READY] Agent ready for conversation or reconnection")
+        
+        # Wait for this participant to disconnect before accepting next connection
+        await wait_for_participant_disconnect(ctx.room, participant.sid)
+        
+        # Participant disconnected, clean up and prepare for next connection
+        print(f"[CONNECTION #{connection_count}] Participant disconnected, cleaning up...")
+        set_current_user_id(None)
+        
+        # Small delay before accepting next connection
+        await asyncio.sleep(0.5)
+        print(f"[CONNECTION #{connection_count}] Ready for next connection\n")
         
         # Loop continues - agent stays alive for instant reconnection!
 
