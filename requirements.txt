@@ -6,6 +6,7 @@ numpy>=1.24.0
 
 # Database and API
 supabase>=2.3.0
+aiohttp>=3.9.0
 
 # Environment and configuration
 python-dotenv>=1.0.0
