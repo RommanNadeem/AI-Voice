@@ -407,6 +407,161 @@ def generate_user_profile(user_input: str, existing_profile: str = "") -> str:
         print(f"[PROFILE GENERATION ERROR] Failed to generate profile: {e}")
         return existing_profile  # Return existing on error
 
+
+
+async def get_last_conversation_context(user_id: str) -> Dict:
+    """
+    Retrieve last conversation context for continuity analysis.
+    
+    Returns:
+        {
+            "has_history": bool,
+            "last_messages": List[str],
+            "time_since_last_hours": float,
+            "most_recent": str,
+            "last_timestamp": str
+        }
+    """
+    if not supabase:
+        return {"has_history": False}
+    
+    try:
+        print(f"[CONTEXT] Retrieving last conversation for user {user_id}...")
+        
+        # Get last 5 user messages
+        result = supabase.table("memory")\
+            .select("value, created_at")\
+            .eq("user_id", user_id)\
+            .like("key", "user_input_%")\
+            .order("created_at", desc=True)\
+            .limit(5)\
+            .execute()
+        
+        if not result.data:
+            print(f"[CONTEXT] No previous conversation found")
+            return {"has_history": False}
+        
+        messages = [m["value"] for m in result.data]
+        
+        # Calculate time since last message
+        from datetime import datetime
+        last_timestamp = result.data[0]["created_at"]
+        
+        try:
+            last_time = datetime.fromisoformat(last_timestamp.replace('Z', '+00:00'))
+            hours_since = (datetime.now(last_time.tzinfo) - last_time).total_seconds() / 3600
+        except:
+            # Fallback if timestamp parsing fails
+            hours_since = 999  # Very old
+        
+        print(f"[CONTEXT] Found {len(messages)} messages, last {hours_since:.1f} hours ago")
+        
+        return {
+            "has_history": True,
+            "last_messages": messages,
+            "time_since_last_hours": hours_since,
+            "most_recent": messages[0],
+            "last_timestamp": last_timestamp
+        }
+        
+    except Exception as e:
+        print(f"[CONTEXT] Error retrieving conversation: {e}")
+        return {"has_history": False}
+
+
+
+async def analyze_conversation_continuity(
+    last_messages: List[str],
+    time_hours: float,
+    user_profile: str
+) -> Dict:
+    """
+    Use AI to decide if follow-up is appropriate.
+    Uses GPT-4o-mini with structured JSON output for reliable decisions.
+    
+    Returns:
+        {
+            "decision": "FOLLOW_UP" | "FRESH_START",
+            "confidence": float (0-1),
+            "reason": str,
+            "detected_topic": str,
+            "suggested_opening": str
+        }
+    """
+    try:
+        client = openai.AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        
+        # Format messages for analysis
+        messages_text = "\n".join([f"{i+1}. {msg}" for i, msg in enumerate(reversed(last_messages[:3]))])
+        
+        # Analysis prompt with few-shot examples
+        prompt = f"""
+Analyze if a follow-up greeting is appropriate for this conversation:
+
+USER PROFILE:
+{user_profile[:300] if user_profile else "No profile available"}
+
+LAST CONVERSATION ({time_hours:.1f} hours ago):
+{messages_text}
+
+DECISION CRITERIA:
+- FOLLOW-UP if: Unfinished discussion, important topic, emotional weight, < 12 hours
+- FRESH START if: Natural ending, casual chat concluded, > 24 hours, goodbye signals
+
+EXAMPLES:
+1. "Interview kal hai, nervous" (3hrs ago) → FOLLOW-UP (confidence: 0.9)
+2. "Okay bye, baad mein baat karte hain" (6hrs ago) → FRESH START (confidence: 0.8)
+3. "Project khatam nahi hua" (2hrs ago) → FOLLOW-UP (confidence: 0.85)
+4. "Theek hai thanks" (48hrs ago) → FRESH START (confidence: 0.9)
+
+Respond in JSON format:
+{{
+    "decision": "FOLLOW_UP" or "FRESH_START",
+    "confidence": 0.0-1.0,
+    "reason": "brief explanation in English",
+    "detected_topic": "main topic discussed",
+    "suggested_opening": "what to say in Urdu (only if FOLLOW-UP)"
+}}
+"""
+        
+        response = await asyncio.wait_for(
+            client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": "You are an expert at analyzing conversation continuity for natural dialogue flow. Always respond with valid JSON."},
+                    {"role": "user", "content": prompt}
+                ],
+                response_format={"type": "json_object"},
+                temperature=0.3,
+                max_tokens=250,
+                timeout=3.0
+            ),
+            timeout=3.0
+        )
+        
+        import json
+        analysis = json.loads(response.choices[0].message.content)
+        
+        print(f"[CONTINUITY] Decision: {analysis.get('decision', 'FRESH_START')} (confidence: {analysis.get('confidence', 0.0):.2f})")
+        print(f"[CONTINUITY] Reason: {analysis.get('reason', 'Unknown')}")
+        
+        return analysis
+        
+    except asyncio.TimeoutError:
+        print(f"[CONTINUITY] Analysis timeout, defaulting to fresh start")
+        return {
+            "decision": "FRESH_START",
+            "confidence": 0.0,
+            "reason": "Analysis timeout"
+        }
+    except Exception as e:
+        print(f"[CONTINUITY] Analysis failed: {e}, defaulting to fresh start")
+        return {
+            "decision": "FRESH_START",
+            "confidence": 0.0,
+            "reason": f"Analysis error: {str(e)}"
+        }
+
 # ---------------------------
 # Memory Categorization
 # ---------------------------
@@ -807,23 +962,16 @@ async def entrypoint(ctx: agents.JobContext):
     else:
         print("[SUPABASE] ✗ Not connected; running without persistence")
 
-    # First response - hint AI to use tools for personalization
-    print(f"[GREETING] Prompting AI to use getUserProfile() for personalized greeting")
+    # Intelligent first message: analyze conversation history and decide strategy
+    print(f"[GREETING] Generating intelligent first message based on conversation history...")
     
-    # Minimal hint: Tell AI that user has a profile and should call tool
-    first_message_hint = f"""
-{assistant.instructions}
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-FIRST MESSAGE - IMPORTANT:
-
-This user has a profile with their name, occupation, and interests stored.
-Call getUserProfile() to load their information and personalize your greeting naturally.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-"""
+    first_message_instructions = await get_intelligent_first_message_instructions(
+        user_id=user_id,
+        assistant_instructions=assistant.instructions
+    )
     
-    await session.generate_reply(instructions=first_message_hint)
+    print(f"[GREETING] Strategy ready, generating response...")
+    await session.generate_reply(instructions=first_message_instructions)
 
 if __name__ == "__main__":
     agents.cli.run_app(agents.WorkerOptions(
