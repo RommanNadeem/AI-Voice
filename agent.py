@@ -551,7 +551,11 @@ async def entrypoint(ctx: agents.JobContext):
         stt=lk_openai.STT(model="gpt-4o-transcribe", language="ur"),
         llm=lk_openai.LLM(model="gpt-4o-mini"),
         tts=tts,
-        vad=silero.VAD.load(),
+        vad=silero.VAD.load(
+            min_silence_duration=0.5,  # Reduced from default 1.0s - stops listening faster
+            activation_threshold=0.5,   # Default sensitivity for detecting speech start
+            min_speech_duration=0.1,    # Minimum speech duration to consider valid
+        ),
     )
 
     print("[SESSION INIT] Starting LiveKit session…")
