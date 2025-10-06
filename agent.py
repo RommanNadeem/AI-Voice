@@ -178,17 +178,17 @@ def ensure_profile_exists(user_id: str) -> bool:
         return False
     
     try:
-        # Check if profile already exists
-        resp = supabase.table("profiles").select("id").eq("id", user_id).execute()
+        # Check if profile already exists using user_id
+        resp = supabase.table("profiles").select("id, user_id").eq("user_id", user_id).execute()
         
         if resp.data:
-            print(f"[PROFILE] Profile already exists for user {user_id}")
+            print(f"[PROFILE] Profile already exists for user {user_id} (profile_id: {resp.data[0]['id']})")
             return True
         
-        # Create new profile
+        # Create new profile with user_id (let id be auto-generated)
         print(f"[PROFILE] Creating new profile for user {user_id}")
         create_resp = supabase.table("profiles").insert({
-            "id": user_id,
+            "user_id": user_id,
             "email": f"user_{user_id[:8]}@companion.local",
             "is_first_login": True,
         }).execute()
@@ -197,7 +197,12 @@ def ensure_profile_exists(user_id: str) -> bool:
             print(f"[PROFILE ERROR] Failed to create profile: {create_resp.error}")
             return False
         
-        print(f"[PROFILE] ✓ Profile created for user {user_id}")
+        # Get the created profile ID for logging
+        created_profile_id = create_resp.data[0]['id'] if create_resp.data else 'unknown'
+        print(f"[PROFILE] ✓ Profile created successfully!")
+        print(f"[PROFILE]   - Profile ID: {created_profile_id}")
+        print(f"[PROFILE]   - User ID: {user_id}")
+        print(f"[PROFILE]   - Email: user_{user_id[:8]}@companion.local")
         return True
         
     except Exception as e:
