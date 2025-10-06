@@ -690,76 +690,116 @@ When saving, keep entries **short and concrete**.
 # ---------------------------
 async def entrypoint(ctx: agents.JobContext):
     """
-    LiveKit agent entrypoint:
+    LiveKit agent entrypoint with proper disconnect/reconnect handling:
     - Start session to receive state updates
     - Wait for the intended participant deterministically
     - Extract & validate UUID from participant identity
     - Defer Supabase writes until we have a valid user_id
     - Initialize profile & proceed with conversation
+    - Handle clean disconnect and reconnection
     """
     print(f"[ENTRYPOINT] Starting session for room: {ctx.room.name}")
-
-    # Initialize media + agent FIRST so room state/events begin flowing
-    tts = TTS(voice_id="17", output_format="MP3_22050_32")
-    assistant = Assistant()
-    session = AgentSession(
-        stt=lk_openai.STT(model="gpt-4o-transcribe", language="ur"),
-        llm=lk_openai.LLM(model="gpt-4o-mini"),
-        tts=tts,
-        vad=silero.VAD.load(),
-    )
-
-    print("[SESSION INIT] Starting LiveKit session…")
-    await session.start(room=ctx.room, agent=assistant, room_input_options=RoomInputOptions())
-    print("[SESSION INIT] ✓ Session started")
-
-    # If you know the expected identity (from your token minting), set it here
-    expected_identity = None
-
-    # Wait for the participant deterministically
-    participant = await wait_for_participant(ctx.room, target_identity=expected_identity, timeout_s=20)
-    if not participant:
-        print("[ENTRYPOINT] No participant joined within timeout; running without DB writes")
-        await session.generate_reply(instructions=assistant.instructions)
-        return
-
-    print(f"[ENTRYPOINT] Participant: sid={participant.sid}, identity={participant.identity}, kind={getattr(participant, 'kind', None)}")
-
-    # Resolve to UUID
-    user_id = extract_uuid_from_identity(participant.identity)
-    if not user_id:
-        print("[ENTRYPOINT] Participant identity could not be parsed as UUID; skipping DB writes")
-        await session.generate_reply(instructions=assistant.instructions)
-        return
-
-    # Set current user
-    set_current_user_id(user_id)
-
-    # Now that we have a valid user_id, it's safe to touch Supabase
-    if supabase:
-        print("[SUPABASE] ✓ Connected")
-
-        # Optional: smoke test memory table for this user
-        if save_memory("TEST", "connection_test", "Supabase connection OK"):
-            try:
-                supabase.table("memory").delete() \
-                        .eq("user_id", user_id) \
-                        .eq("category", "TEST") \
-                        .eq("key", "connection_test") \
-                        .execute()
-            except Exception as e:
-                print(f"[TEST] Cleanup warning: {e}")
-    else:
-        print("[SUPABASE] ✗ Not connected; running without persistence")
-
-    # Get user's first name for personalized greeting
-    result = supabase.table("onboarding_details").select("full_name").eq("user_id", user_id).execute()
-    full_name = result.data[0]["full_name"] if result.data else ""
     
-    # First response with Urdu instructions
-    await session.generate_reply(
-        instructions=f"Greet the user warmly in urdu, use {full_name} if available"
-    )
+    tts = None
+    session = None
+    
+    try:
+        # Initialize media + agent FIRST so room state/events begin flowing
+        print("[TTS INIT] Initializing TTS...")
+        tts = TTS(voice_id="17", output_format="MP3_22050_32")
+        print("[TTS INIT] ✓ TTS initialized")
+        
+        assistant = Assistant()
+        session = AgentSession(
+            stt=lk_openai.STT(model="gpt-4o-transcribe", language="ur"),
+            llm=lk_openai.LLM(model="gpt-4o-mini"),
+            tts=tts,
+            vad=silero.VAD.load(),
+        )
+
+        print("[SESSION INIT] Starting LiveKit session…")
+        await session.start(room=ctx.room, agent=assistant, room_input_options=RoomInputOptions())
+        print("[SESSION INIT] ✓ Session started")
+        
+        # Small delay to allow peer connection to establish
+        await asyncio.sleep(0.3)
+
+        # If you know the expected identity (from your token minting), set it here
+        expected_identity = None
+
+        # Wait for the participant deterministically
+        participant = await wait_for_participant(ctx.room, target_identity=expected_identity, timeout_s=20)
+        if not participant:
+            print("[ENTRYPOINT] No participant joined within timeout; running without DB writes")
+            await session.generate_reply(instructions=assistant.instructions)
+            return
+
+        print(f"[ENTRYPOINT] Participant: sid={participant.sid}, identity={participant.identity}, kind={getattr(participant, 'kind', None)}")
+
+        # Resolve to UUID
+        user_id = extract_uuid_from_identity(participant.identity)
+        if not user_id:
+            print("[ENTRYPOINT] Participant identity could not be parsed as UUID; skipping DB writes")
+            await session.generate_reply(instructions=assistant.instructions)
+            return
+
+        # Set current user
+        set_current_user_id(user_id)
+
+        # Now that we have a valid user_id, it's safe to touch Supabase
+        if supabase:
+            print("[SUPABASE] ✓ Connected")
+
+            # Optional: smoke test memory table for this user
+            if save_memory("TEST", "connection_test", "Supabase connection OK"):
+                try:
+                    supabase.table("memory").delete() \
+                            .eq("user_id", user_id) \
+                            .eq("category", "TEST") \
+                            .eq("key", "connection_test") \
+                            .execute()
+                except Exception as e:
+                    print(f"[TEST] Cleanup warning: {e}")
+        else:
+            print("[SUPABASE] ✗ Not connected; running without persistence")
+
+        # Get user's first name for personalized greeting
+        result = supabase.table("onboarding_details").select("full_name").eq("user_id", user_id).execute()
+        full_name = result.data[0]["full_name"] if result.data else ""
+        
+        # Small delay before first response to ensure peer connection is stable
+        await asyncio.sleep(0.3)
+        
+        # First response with Urdu instructions
+        await session.generate_reply(
+            instructions=f"Greet the user warmly in urdu, use {full_name} if available"
+        )
+        
+        # Wait for participant disconnect
+        print("[SESSION] Waiting for participant activity...")
+        
+    except Exception as e:
+        print(f"[ENTRYPOINT ERROR] {e}")
+        raise
+    
+    finally:
+        # Clean up resources on disconnect/exit
+        print("[CLEANUP] Starting cleanup...")
+        
+        # Clear user session
+        global current_user_id
+        current_user_id = None
+        
+        # Clean up TTS resources
+        if tts:
+            try:
+                await tts.aclose()
+                print("[CLEANUP] ✓ TTS resources cleaned")
+            except Exception as e:
+                print(f"[CLEANUP] TTS cleanup error: {e}")
+        
+        # Session cleanup is handled by LiveKit
+        print("[CLEANUP] ✓ Cleanup complete, ready for reconnection")
 
 if __name__ == "__main__":
     agents.cli.run_app(agents.WorkerOptions(
