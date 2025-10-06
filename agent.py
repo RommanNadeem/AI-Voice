@@ -56,11 +56,14 @@ else:
 # ---------------------------
 # Session / Identity Helpers
 # ---------------------------
-def set_current_user_id(user_id: str):
+def set_current_user_id(user_id: Optional[str]):
     """Set the current user ID from LiveKit session"""
     global current_user_id
     current_user_id = user_id
-    print(f"[SESSION] User ID set to: {user_id}")
+    if user_id:
+        print(f"[SESSION] User ID set to: {user_id}")
+    else:
+        print(f"[SESSION] User ID cleared")
 
 def get_current_user_id() -> Optional[str]:
     """Get the current user ID"""
@@ -115,6 +118,18 @@ async def wait_for_participant(room, *, target_identity: Optional[str] = None, t
                 return (standard[0] if standard else parts[0])
         await asyncio.sleep(0.5)
     return None
+
+async def wait_for_participant_disconnect(room, participant_sid: str):
+    """
+    Waits for a specific participant to disconnect.
+    """
+    print(f"[DISCONNECT WATCH] Monitoring participant {participant_sid}...")
+    while True:
+        # Check if participant is still in the room
+        if participant_sid not in room.remote_participants:
+            print(f"[DISCONNECT] Participant {participant_sid} disconnected")
+            return
+        await asyncio.sleep(1.0)
 
 def can_write_for_current_user() -> bool:
     """Centralized guard to ensure DB writes are safe."""
@@ -690,21 +705,19 @@ When saving, keep entries **short and concrete**.
 # ---------------------------
 async def entrypoint(ctx: agents.JobContext):
     """
-    LiveKit agent entrypoint with proper disconnect/reconnect handling:
-    - Start session to receive state updates
-    - Wait for the intended participant deterministically
-    - Extract & validate UUID from participant identity
-    - Defer Supabase writes until we have a valid user_id
-    - Initialize profile & proceed with conversation
-    - Handle clean disconnect and reconnection
+    LiveKit agent entrypoint with reconnection loop:
+    - Keeps agent alive for multiple connect/disconnect cycles
+    - Properly cleans up between connections
+    - Supports same user reconnecting without redeployment
     """
-    print(f"[ENTRYPOINT] Starting session for room: {ctx.room.name}")
+    print(f"[ENTRYPOINT] Starting agent for room: {ctx.room.name}")
     
     tts = None
     session = None
+    assistant = None
     
     try:
-        # Initialize media + agent FIRST so room state/events begin flowing
+        # Initialize media + agent ONCE for all connections
         print("[TTS INIT] Initializing TTS...")
         tts = TTS(voice_id="17", output_format="MP3_22050_32")
         print("[TTS INIT] ✓ TTS initialized")
@@ -721,85 +734,102 @@ async def entrypoint(ctx: agents.JobContext):
         await session.start(room=ctx.room, agent=assistant, room_input_options=RoomInputOptions())
         print("[SESSION INIT] ✓ Session started")
         
-        # Small delay to allow peer connection to establish
-        await asyncio.sleep(0.3)
+        # RECONNECTION LOOP - keeps agent alive for multiple connections
+        connection_count = 0
+        while True:
+            connection_count += 1
+            print(f"\n[CONNECTION #{connection_count}] Waiting for participant...")
+            
+            # Clear previous user state
+            set_current_user_id(None)
+            
+            # Small delay to allow peer connection to establish
+            await asyncio.sleep(0.3)
 
-        # If you know the expected identity (from your token minting), set it here
-        expected_identity = None
+            # Wait for the participant
+            expected_identity = None
+            participant = await wait_for_participant(ctx.room, target_identity=expected_identity, timeout_s=300)
+            
+            if not participant:
+                print("[CONNECTION] No participant joined within timeout")
+                # Continue waiting instead of exiting
+                continue
 
-        # Wait for the participant deterministically
-        participant = await wait_for_participant(ctx.room, target_identity=expected_identity, timeout_s=20)
-        if not participant:
-            print("[ENTRYPOINT] No participant joined within timeout; running without DB writes")
-            await session.generate_reply(instructions=assistant.instructions)
-            return
+            print(f"[CONNECTION #{connection_count}] Participant connected: sid={participant.sid}, identity={participant.identity}")
 
-        print(f"[ENTRYPOINT] Participant: sid={participant.sid}, identity={participant.identity}, kind={getattr(participant, 'kind', None)}")
+            # Resolve to UUID
+            user_id = extract_uuid_from_identity(participant.identity)
+            if not user_id:
+                print("[CONNECTION] Invalid UUID, waiting for valid participant...")
+                await session.generate_reply(instructions=assistant.instructions)
+                # Wait for this participant to disconnect before next loop
+                await wait_for_participant_disconnect(ctx.room, participant.sid)
+                continue
 
-        # Resolve to UUID
-        user_id = extract_uuid_from_identity(participant.identity)
-        if not user_id:
-            print("[ENTRYPOINT] Participant identity could not be parsed as UUID; skipping DB writes")
-            await session.generate_reply(instructions=assistant.instructions)
-            return
+            # Set current user
+            set_current_user_id(user_id)
 
-        # Set current user
-        set_current_user_id(user_id)
+            # Setup Supabase for this user
+            if supabase:
+                print("[SUPABASE] ✓ Connected")
+                # Optional: smoke test
+                if save_memory("TEST", "connection_test", "Supabase connection OK"):
+                    try:
+                        supabase.table("memory").delete() \
+                                .eq("user_id", user_id) \
+                                .eq("category", "TEST") \
+                                .eq("key", "connection_test") \
+                                .execute()
+                    except Exception as e:
+                        print(f"[TEST] Cleanup warning: {e}")
+            else:
+                print("[SUPABASE] ✗ Not connected; running without persistence")
 
-        # Now that we have a valid user_id, it's safe to touch Supabase
-        if supabase:
-            print("[SUPABASE] ✓ Connected")
-
-            # Optional: smoke test memory table for this user
-            if save_memory("TEST", "connection_test", "Supabase connection OK"):
-                try:
-                    supabase.table("memory").delete() \
-                            .eq("user_id", user_id) \
-                            .eq("category", "TEST") \
-                            .eq("key", "connection_test") \
-                            .execute()
-                except Exception as e:
-                    print(f"[TEST] Cleanup warning: {e}")
-        else:
-            print("[SUPABASE] ✗ Not connected; running without persistence")
-
-        # Get user's first name for personalized greeting
-        result = supabase.table("onboarding_details").select("full_name").eq("user_id", user_id).execute()
-        full_name = result.data[0]["full_name"] if result.data else ""
-        
-        # Small delay before first response to ensure peer connection is stable
-        await asyncio.sleep(0.3)
-        
-        # First response with Urdu instructions
-        await session.generate_reply(
-            instructions=f"Greet the user warmly in urdu, use {full_name} if available"
-        )
-        
-        # Wait for participant disconnect
-        print("[SESSION] Waiting for participant activity...")
+            # Get user's first name for personalized greeting
+            result = supabase.table("onboarding_details").select("full_name").eq("user_id", user_id).execute()
+            full_name = result.data[0]["full_name"] if result.data else ""
+            
+            # Small delay before first response
+            await asyncio.sleep(0.3)
+            
+            # First response with Urdu instructions
+            print(f"[CONNECTION #{connection_count}] Greeting user...")
+            await session.generate_reply(
+                instructions=f"Greet the user warmly in urdu, use {full_name} if available"
+            )
+            
+            # Wait for this participant to disconnect
+            print(f"[CONNECTION #{connection_count}] Active, waiting for disconnect...")
+            await wait_for_participant_disconnect(ctx.room, participant.sid)
+            
+            # Participant disconnected, clean up this connection's state
+            print(f"[CONNECTION #{connection_count}] Cleaning up...")
+            set_current_user_id(None)
+            
+            # Small delay before accepting next connection
+            await asyncio.sleep(0.5)
+            print(f"[CONNECTION #{connection_count}] Cleanup complete, ready for next connection")
         
     except Exception as e:
         print(f"[ENTRYPOINT ERROR] {e}")
         raise
     
     finally:
-        # Clean up resources on disconnect/exit
-        print("[CLEANUP] Starting cleanup...")
+        # Final cleanup when room closes
+        print("[FINAL CLEANUP] Starting cleanup...")
         
         # Clear user session
-        global current_user_id
-        current_user_id = None
+        set_current_user_id(None)
         
         # Clean up TTS resources
         if tts:
             try:
                 await tts.aclose()
-                print("[CLEANUP] ✓ TTS resources cleaned")
+                print("[FINAL CLEANUP] ✓ TTS resources cleaned")
             except Exception as e:
-                print(f"[CLEANUP] TTS cleanup error: {e}")
+                print(f"[FINAL CLEANUP] TTS cleanup error: {e}")
         
-        # Session cleanup is handled by LiveKit
-        print("[CLEANUP] ✓ Cleanup complete, ready for reconnection")
+        print("[FINAL CLEANUP] ✓ Agent shutdown complete")
 
 if __name__ == "__main__":
     agents.cli.run_app(agents.WorkerOptions(
