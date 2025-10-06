@@ -72,7 +72,8 @@ def get_current_user_id() -> Optional[str]:
 def extract_uuid_from_identity(identity: str) -> str:
     """Extract UUID from various identity formats"""
     if not identity:
-        return identity
+        # Generate a new UUID for empty identity
+        return str(uuid.uuid4())
     
     # Handle "user-4e3efa3d-d8fe-431e-a78f-4efffb0cf43a" format
     if identity.startswith("user-"):
@@ -80,14 +81,17 @@ def extract_uuid_from_identity(identity: str) -> str:
         if is_valid_uuid(uuid_part):
             return uuid_part
         else:
-            return identity  # Return as-is if not a valid UUID
+            # Generate a new UUID if the extracted part is invalid
+            print(f"[UUID WARNING] Invalid UUID in user- prefix: {uuid_part}, generating new UUID")
+            return str(uuid.uuid4())
     
     # Handle direct UUID format
     if is_valid_uuid(identity):
         return identity
     
-    # Return as-is for other formats
-    return identity
+    # For any other format, generate a new UUID
+    print(f"[UUID WARNING] Invalid identity format: {identity}, generating new UUID")
+    return str(uuid.uuid4())
 
 def is_valid_uuid(uuid_string: str) -> bool:
     """Check if string is a valid UUID format"""
