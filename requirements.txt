@@ -5,8 +5,7 @@ faiss-cpu>=1.7.0
 numpy>=1.24.0
 
 # Database and API
-firebase-admin>=6.4.0
-google-cloud-firestore>=2.13.0
+supabase>=2.3.0
 
 # Environment and configuration
 python-dotenv>=1.0.0
