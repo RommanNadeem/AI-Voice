@@ -199,6 +199,26 @@ def get_user_profile() -> str:
         print(f"[PROFILE ERROR] Failed to get profile: {e}")
         return ""
 
+def get_user_first_name() -> str:
+    """Get user's first name from onboarding table"""
+    if not can_write_for_current_user():
+        return ""
+    user_id = get_current_user_id()
+    try:
+        resp = supabase.table("onboarding").select("first_name").eq("user_id", user_id).execute()
+        if getattr(resp, "error", None):
+            print(f"[SUPABASE ERROR] onboarding select: {resp.error}")
+            return ""
+        data = getattr(resp, "data", []) or []
+        if data:
+            first_name = data[0].get("first_name", "") or ""
+            print(f"[FIRST NAME] Retrieved: {first_name}")
+            return first_name
+        return ""
+    except Exception as e:
+        print(f"[FIRST NAME ERROR] Failed to get first name: {e}")
+        return ""
+
 def save_memory(category: str, key: str, value: str) -> bool:
     """Save memory to Supabase"""
     if not can_write_for_current_user():
@@ -515,16 +535,20 @@ async def entrypoint(ctx: agents.JobContext):
     else:
         print("[SUPABASE] ✗ Not connected; running without persistence")
 
-    # Greet after we've set up identity + (optional) storage
+    # Get user's first name for personalized greeting
+    first_name = get_user_first_name()
+    
     # First response with Urdu instructions
-    first_response_instructions = assistant.instructions + """
+    first_response_instructions = assistant.instructions + f"""
     
     IMPORTANT: This is your first response to the user. You must:
-    1. Greet the user warmly in Urdu
+    1. Greet the user warmly in Urdu{" using their first name" if first_name else ""}
     2. Introduce yourself as their Urdu-speaking companion
     3. Explain that you will communicate in Urdu
     4. Ask them how they're doing today
     5. Keep it brief and friendly (2-3 sentences max)
+    
+    {"User's first name: " + first_name if first_name else "No first name available"}
     
     Remember: Always respond in Urdu from now on unless specifically asked otherwise.
     """
