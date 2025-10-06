@@ -250,6 +250,111 @@ def get_user_profile() -> str:
         print(f"[PROFILE ERROR] Failed to get profile: {e}")
         return ""
 
+async def initialize_user_from_onboarding(user_id: str):
+    """
+    Initialize new user profile and memories from onboarding_details table.
+    Creates initial profile and categorized memories for name, occupation, and interests.
+    Runs in background to avoid latency.
+    """
+    if not supabase or not user_id:
+        return
+    
+    try:
+        print(f"[ONBOARDING] Checking if user {user_id} needs initialization...")
+        
+        # Check if profile already exists
+        profile_resp = supabase.table("user_profiles").select("profile_text").eq("user_id", user_id).execute()
+        has_profile = bool(profile_resp.data)
+        
+        # Check if memories already exist
+        memory_resp = supabase.table("memory").select("id").eq("user_id", user_id).limit(1).execute()
+        has_memories = bool(memory_resp.data)
+        
+        if has_profile and has_memories:
+            print(f"[ONBOARDING] User already initialized, skipping")
+            return
+        
+        # Fetch onboarding details
+        result = supabase.table("onboarding_details").select("full_name, occupation, interests").eq("user_id", user_id).execute()
+        
+        if not result.data:
+            print(f"[ONBOARDING] No onboarding data found for user {user_id}")
+            return
+        
+        onboarding = result.data[0]
+        full_name = onboarding.get("full_name", "")
+        occupation = onboarding.get("occupation", "")
+        interests = onboarding.get("interests", "")
+        
+        print(f"[ONBOARDING] Found data - Name: {full_name}, Occupation: {occupation}, Interests: {interests[:50] if interests else 'none'}...")
+        
+        # Create initial profile from onboarding data
+        if not has_profile and any([full_name, occupation, interests]):
+            profile_parts = []
+            
+            if full_name:
+                profile_parts.append(f"Their name is {full_name}.")
+            
+            if occupation:
+                profile_parts.append(f"They work as {occupation}.")
+            
+            if interests:
+                profile_parts.append(f"Their interests include: {interests}.")
+            
+            initial_profile = " ".join(profile_parts)
+            
+            # Use AI to create a more natural profile
+            enhanced_profile = generate_user_profile(
+                f"Name: {full_name}. Occupation: {occupation}. Interests: {interests}",
+                ""
+            )
+            
+            profile_to_save = enhanced_profile if enhanced_profile else initial_profile
+            
+            if save_user_profile(profile_to_save):
+                print(f"[ONBOARDING] ✓ Created initial profile")
+        
+        # Add memories for each onboarding field
+        if not has_memories:
+            memories_added = 0
+            
+            if full_name:
+                if save_memory("FACT", "full_name", full_name):
+                    memories_added += 1
+                    # Also add to RAG
+                    rag = get_or_create_rag(user_id, os.getenv("OPENAI_API_KEY"))
+                    rag.add_memory_background(f"User's name is {full_name}", "FACT")
+            
+            if occupation:
+                if save_memory("FACT", "occupation", occupation):
+                    memories_added += 1
+                    # Also add to RAG
+                    rag = get_or_create_rag(user_id, os.getenv("OPENAI_API_KEY"))
+                    rag.add_memory_background(f"User works as {occupation}", "FACT")
+            
+            if interests:
+                # Split interests if comma-separated
+                interest_list = [i.strip() for i in interests.split(',') if i.strip()]
+                
+                if interest_list:
+                    # Save all interests as one memory
+                    interests_text = ", ".join(interest_list)
+                    if save_memory("INTEREST", "main_interests", interests_text):
+                        memories_added += 1
+                    
+                    # Add each interest to RAG for better semantic search
+                    rag = get_or_create_rag(user_id, os.getenv("OPENAI_API_KEY"))
+                    for interest in interest_list:
+                        rag.add_memory_background(f"User is interested in {interest}", "INTEREST")
+            
+            print(f"[ONBOARDING] ✓ Created {memories_added} memories from onboarding data")
+        
+        print(f"[ONBOARDING] ✓ User initialization complete")
+        
+    except Exception as e:
+        print(f"[ONBOARDING ERROR] Failed to initialize user: {e}")
+
+
 def generate_user_profile(user_input: str, existing_profile: str = "") -> str:
     """Generate or update comprehensive user profile using OpenAI"""
     if not user_input or not user_input.strip():
@@ -665,6 +770,16 @@ async def entrypoint(ctx: agents.JobContext):
 
     # Set current user
     set_current_user_id(user_id)
+    
+    # Initialize RAG system for this user (background loading for zero latency)
+    print("[RAG] Initializing semantic memory system...")
+    rag = get_or_create_rag(user_id, os.getenv("OPENAI_API_KEY"))
+    asyncio.create_task(rag.load_from_supabase(supabase, limit=500))
+    print("[RAG] ✓ Initialized (loading memories in background)")
+    
+    # Initialize new user from onboarding data (background, zero latency)
+    asyncio.create_task(initialize_user_from_onboarding(user_id))
+    print("[ONBOARDING] ✓ User initialization queued")
 
     # Now that we have a valid user_id, it's safe to touch Supabase
     if supabase:
