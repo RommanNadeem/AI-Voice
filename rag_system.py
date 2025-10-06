@@ -2,15 +2,21 @@
 RAG (Retrieval-Augmented Generation) System for Companion Agent
 ================================================================
 
-High-performance semantic memory retrieval using FAISS vector database.
-Optimized for zero-latency impact with async processing and caching.
+Advanced RAG with Tier 1 features for AI companion applications:
 
-Features:
+Core Features:
 - Async embedding generation (non-blocking)
 - In-memory FAISS index for fast retrieval
 - Background processing for adding memories
 - Cached embeddings to avoid redundant API calls
 - Supabase integration for persistence
+
+Tier 1 Advanced Features:
+- Conversation-aware retrieval with context tracking
+- Temporal filtering with time-decay scoring
+- Memory importance scoring (emotional weight)
+- Query expansion for intent understanding
+- Context-aware re-ranking for personal relevance
 """
 
 import asyncio
@@ -19,7 +25,8 @@ import faiss
 import pickle
 import os
 import time
-from typing import List, Dict, Optional, Tuple
+import json
+from typing import List, Dict, Optional, Tuple, Set
 from openai import AsyncOpenAI
 import logging
 
@@ -29,10 +36,18 @@ EMBEDDING_DIMENSION = 1536
 CACHE_EMBEDDINGS = True
 MAX_CACHE_SIZE = 1000
 
+# Advanced RAG Configuration
+ENABLE_QUERY_EXPANSION = True
+ENABLE_TEMPORAL_FILTERING = True
+ENABLE_IMPORTANCE_SCORING = True
+ENABLE_CONVERSATION_CONTEXT = True
+TIME_DECAY_HOURS = 24  # Memories decay over 24 hours
+RECENCY_WEIGHT = 0.3  # 30% weight for recency, 70% for similarity
+
 class RAGMemorySystem:
     """
-    High-performance RAG system with FAISS vector database.
-    Designed for zero-latency impact on conversation.
+    Advanced RAG system with Tier 1 features for AI companion.
+    Designed for contextual awareness and emotional intelligence.
     """
     
     def __init__(self, user_id: str, openai_api_key: str):
@@ -42,19 +57,41 @@ class RAGMemorySystem:
         # FAISS index for vector search
         self.index = faiss.IndexFlatL2(EMBEDDING_DIMENSION)
         
-        # Memory storage
-        self.memories = []  # List of {"text": str, "category": str, "timestamp": float, "embedding": np.array}
-        self.embedding_cache = {}  # {text_hash: embedding} - avoid duplicate API calls
+        # Memory storage with enhanced metadata
+        self.memories = []  # List of memory dicts with full metadata
+        self.embedding_cache = {}  # {text_hash: embedding}
+        
+        # Tier 1: Conversation context tracking
+        self.conversation_context: List[str] = []  # Recent conversation turns
+        self.current_topic: Optional[str] = None
+        self.referenced_memories: Set[int] = set()  # Track mentioned memories
+        
+        # Tier 1: Importance weights by category
+        self.importance_weights = {
+            "GOAL": 2.0,           # Goals are highly important
+            "RELATIONSHIP": 1.8,   # People matter
+            "PREFERENCE": 1.5,     # User preferences
+            "EXPERIENCE": 1.3,     # Life experiences
+            "FACT": 1.2,           # Basic facts
+            "INTEREST": 1.4,       # Interests and hobbies
+            "OPINION": 1.1,        # Opinions
+            "PLAN": 1.6,           # Future plans
+            "GENERAL": 1.0         # Default
+        }
         
         # Performance tracking
         self.stats = {
             "embeddings_created": 0,
             "cache_hits": 0,
             "cache_misses": 0,
-            "retrievals": 0
+            "retrievals": 0,
+            "query_expansions": 0,
+            "temporal_boosts": 0,
+            "importance_boosts": 0,
+            "context_matches": 0
         }
         
-        logging.info(f"[RAG] Initialized for user {user_id}")
+        logging.info(f"[RAG] Initialized Advanced RAG for user {user_id}")
     
     async def create_embedding(self, text: str, use_cache: bool = True) -> np.ndarray:
         """
@@ -104,14 +141,133 @@ class RAGMemorySystem:
             logging.error(f"[RAG] Embedding creation failed: {e}")
             return np.zeros(EMBEDDING_DIMENSION)
     
+    def update_conversation_context(self, text: str):
+        """
+        Tier 1: Track conversation context for better retrieval.
+        
+        Args:
+            text: Recent conversation turn
+        """
+        if not ENABLE_CONVERSATION_CONTEXT:
+            return
+        
+        self.conversation_context.append(text)
+        # Keep only last 10 turns
+        if len(self.conversation_context) > 10:
+            self.conversation_context.pop(0)
+        
+        logging.debug(f"[RAG] Updated conversation context (size: {len(self.conversation_context)})")
+    
+    def calculate_importance_score(self, memory: Dict) -> float:
+        """
+        Tier 1: Calculate memory importance based on category and metadata.
+        
+        Args:
+            memory: Memory dict with category and metadata
+            
+        Returns:
+            Importance multiplier (1.0 = baseline)
+        """
+        if not ENABLE_IMPORTANCE_SCORING:
+            return 1.0
+        
+        score = 1.0
+        
+        # Category-based importance
+        category = memory.get("category", "GENERAL")
+        score *= self.importance_weights.get(category, 1.0)
+        
+        # Explicit importance flag
+        metadata = memory.get("metadata", {})
+        if metadata.get("important", False):
+            score *= 1.5
+        
+        # Emotional content boost
+        if metadata.get("emotional", False):
+            score *= 1.3
+        
+        # User explicitly said "remember this"
+        if metadata.get("explicit_save", False):
+            score *= 2.0
+        
+        return score
+    
+    def calculate_temporal_score(self, timestamp: float) -> float:
+        """
+        Tier 1: Calculate time-decay score for temporal filtering.
+        
+        Args:
+            timestamp: Unix timestamp of memory
+            
+        Returns:
+            Temporal multiplier (1.0 = most recent, decays over time)
+        """
+        if not ENABLE_TEMPORAL_FILTERING:
+            return 1.0
+        
+        age_hours = (time.time() - timestamp) / 3600
+        
+        # Exponential decay: 1.0 at 0 hours, 0.5 at TIME_DECAY_HOURS
+        decay_factor = 0.5 ** (age_hours / TIME_DECAY_HOURS)
+        
+        return decay_factor
+    
+    async def expand_query(self, query: str) -> List[str]:
+        """
+        Tier 1: Expand query with LLM to capture user intent.
+        
+        Args:
+            query: Original search query
+            
+        Returns:
+            List of query variations including original
+        """
+        if not ENABLE_QUERY_EXPANSION or not query:
+            return [query]
+        
+        try:
+            self.stats["query_expansions"] += 1
+            
+            # Use LLM to generate semantic variations
+            response = await self.client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "Generate 2-3 semantic variations of the search query to capture user intent. Return as JSON array."
+                    },
+                    {
+                        "role": "user",
+                        "content": f"Original query: '{query}'\n\nGenerate variations that capture the same intent with different wording."
+                    }
+                ],
+                response_format={"type": "json_object"},
+                temperature=0.3,
+                max_tokens=100,
+                timeout=3.0
+            )
+            
+            result = json.loads(response.choices[0].message.content)
+            variations = result.get("variations", [])
+            
+            # Always include original query first
+            all_queries = [query] + variations[:2]  # Max 3 total
+            
+            logging.info(f"[RAG] Expanded query '{query}' to {len(all_queries)} variations")
+            return all_queries
+            
+        except Exception as e:
+            logging.warning(f"[RAG] Query expansion failed: {e}, using original")
+            return [query]
+    
     async def add_memory_async(self, text: str, category: str = "GENERAL", metadata: Dict = None):
         """
-        Add memory to RAG system (async, non-blocking).
+        Add memory to RAG system (async, non-blocking) with enhanced metadata.
         
         Args:
             text: Memory text
             category: Memory category
-            metadata: Optional additional metadata
+            metadata: Optional additional metadata (important, emotional, explicit_save, etc.)
         """
         if not text or not text.strip():
             return
@@ -123,13 +279,15 @@ class RAGMemorySystem:
             # Add to FAISS index
             self.index.add(embedding.reshape(1, -1))
             
-            # Store memory with metadata
+            # Store memory with enhanced metadata
             memory = {
                 "text": text,
                 "category": category,
                 "timestamp": time.time(),
                 "embedding": embedding,
-                "metadata": metadata or {}
+                "metadata": metadata or {},
+                "access_count": 0,  # Track how often accessed
+                "last_accessed": time.time()
             }
             self.memories.append(memory)
             
@@ -154,19 +312,21 @@ class RAGMemorySystem:
         query: str, 
         top_k: int = 5,
         category_filter: Optional[str] = None,
-        time_filter: Optional[Tuple[float, float]] = None
+        time_filter: Optional[Tuple[float, float]] = None,
+        use_advanced_features: bool = True
     ) -> List[Dict]:
         """
-        Retrieve semantically relevant memories.
+        Tier 1: Advanced retrieval with context-awareness and intelligent scoring.
         
         Args:
             query: Search query
             top_k: Number of results to return
             category_filter: Optional category to filter by
             time_filter: Optional (start_time, end_time) tuple
+            use_advanced_features: Enable Tier 1 features (default True)
         
         Returns:
-            List of relevant memories with scores
+            List of relevant memories with enhanced scores
         """
         if not self.memories:
             logging.debug("[RAG] No memories to search")
@@ -175,24 +335,43 @@ class RAGMemorySystem:
         try:
             self.stats["retrievals"] += 1
             
-            # Create query embedding
-            query_embedding = await self.create_embedding(query)
+            # Tier 1: Query expansion
+            queries = [query]
+            if use_advanced_features:
+                queries = await self.expand_query(query)
             
-            # Search FAISS index
-            distances, indices = self.index.search(
-                query_embedding.reshape(1, -1), 
-                min(top_k * 2, len(self.memories))  # Get more for filtering
-            )
+            # Collect all candidate results from expanded queries
+            all_candidates = {}  # {memory_idx: best_similarity}
             
-            # Build results
-            results = []
-            for i, idx in enumerate(indices[0]):
-                if idx < 0 or idx >= len(self.memories):
-                    continue
+            for q in queries:
+                # Create query embedding
+                query_embedding = await self.create_embedding(q)
                 
+                # Search FAISS index (get more candidates for re-ranking)
+                k_search = min(top_k * 4, len(self.memories))
+                distances, indices = self.index.search(
+                    query_embedding.reshape(1, -1), 
+                    k_search
+                )
+                
+                # Track best similarity for each memory
+                for i, idx in enumerate(indices[0]):
+                    if idx < 0 or idx >= len(self.memories):
+                        continue
+                    
+                    similarity = 1 / (1 + distances[0][i])
+                    
+                    # Keep best score across all query variations
+                    if idx not in all_candidates or similarity > all_candidates[idx]:
+                        all_candidates[idx] = similarity
+            
+            # Build and score results
+            scored_results = []
+            
+            for idx, base_similarity in all_candidates.items():
                 memory = self.memories[idx]
                 
-                # Apply filters
+                # Apply basic filters
                 if category_filter and memory["category"] != category_filter:
                     continue
                 
@@ -201,34 +380,99 @@ class RAGMemorySystem:
                     if mem_time < time_filter[0] or mem_time > time_filter[1]:
                         continue
                 
-                # Calculate similarity score (L2 distance to similarity)
-                similarity = 1 / (1 + distances[0][i])
+                # Tier 1: Calculate enhanced score
+                final_score = base_similarity
                 
-                results.append({
+                if use_advanced_features:
+                    # Importance scoring
+                    importance = self.calculate_importance_score(memory)
+                    final_score *= importance
+                    if importance > 1.0:
+                        self.stats["importance_boosts"] += 1
+                    
+                    # Temporal scoring
+                    temporal = self.calculate_temporal_score(memory["timestamp"])
+                    final_score = (
+                        final_score * (1 - RECENCY_WEIGHT) +  # Similarity component
+                        final_score * temporal * RECENCY_WEIGHT  # Recency component
+                    )
+                    if temporal < 1.0:
+                        self.stats["temporal_boosts"] += 1
+                    
+                    # Conversation context bonus
+                    if self.conversation_context:
+                        memory_text = memory["text"].lower()
+                        for context_turn in self.conversation_context[-3:]:  # Last 3 turns
+                            if any(word in memory_text for word in context_turn.lower().split()[:5]):
+                                final_score *= 1.2  # 20% boost for context match
+                                self.stats["context_matches"] += 1
+                                break
+                    
+                    # Avoid recently referenced memories (diversity)
+                    if idx in self.referenced_memories:
+                        final_score *= 0.7  # Penalty for repetition
+                
+                scored_results.append({
+                    "memory_idx": idx,
                     "text": memory["text"],
                     "category": memory["category"],
                     "timestamp": memory["timestamp"],
-                    "similarity": float(similarity),
+                    "similarity": float(base_similarity),
+                    "final_score": float(final_score),
                     "metadata": memory.get("metadata", {})
                 })
-                
-                if len(results) >= top_k:
-                    break
             
-            logging.info(f"[RAG] Retrieved {len(results)} memories for query: {query[:50]}...")
+            # Sort by final score
+            scored_results.sort(key=lambda x: x["final_score"], reverse=True)
+            
+            # Take top_k and mark as referenced
+            results = scored_results[:top_k]
+            
+            if use_advanced_features:
+                for result in results:
+                    self.referenced_memories.add(result["memory_idx"])
+                    # Update access tracking
+                    memory = self.memories[result["memory_idx"]]
+                    memory["access_count"] = memory.get("access_count", 0) + 1
+                    memory["last_accessed"] = time.time()
+                
+                # Limit referenced set size
+                if len(self.referenced_memories) > 20:
+                    self.referenced_memories = set(list(self.referenced_memories)[-20:])
+            
+            # Remove internal fields from results
+            for result in results:
+                result.pop("memory_idx", None)
+            
+            logging.info(f"[RAG] Retrieved {len(results)} memories (advanced) for: {query[:50]}...")
             return results
             
         except Exception as e:
             logging.error(f"[RAG] Retrieval failed: {e}")
             return []
     
+    def reset_conversation_context(self):
+        """Reset conversation context (e.g., new session)."""
+        self.conversation_context.clear()
+        self.referenced_memories.clear()
+        self.current_topic = None
+        logging.info("[RAG] Conversation context reset")
+    
     def get_stats(self) -> Dict:
-        """Get RAG system statistics."""
+        """Get enhanced RAG system statistics including Tier 1 metrics."""
+        total_requests = self.stats["cache_hits"] + self.stats["cache_misses"]
+        
         return {
             **self.stats,
             "total_memories": len(self.memories),
             "cache_size": len(self.embedding_cache),
-            "cache_hit_rate": self.stats["cache_hits"] / max(1, self.stats["cache_hits"] + self.stats["cache_misses"])
+            "cache_hit_rate": self.stats["cache_hits"] / max(1, total_requests),
+            "conversation_context_size": len(self.conversation_context),
+            "referenced_memories_count": len(self.referenced_memories),
+            "avg_queries_per_retrieval": self.stats["query_expansions"] / max(1, self.stats["retrievals"]),
+            "temporal_boost_rate": self.stats["temporal_boosts"] / max(1, self.stats["retrievals"]),
+            "importance_boost_rate": self.stats["importance_boosts"] / max(1, self.stats["retrievals"]),
+            "context_match_rate": self.stats["context_matches"] / max(1, self.stats["retrievals"])
         }
     
     async def load_from_supabase(self, supabase_client, limit: int = 500):
