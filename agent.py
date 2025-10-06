@@ -56,14 +56,11 @@ else:
 # ---------------------------
 # Session / Identity Helpers
 # ---------------------------
-def set_current_user_id(user_id: Optional[str]):
+def set_current_user_id(user_id: str):
     """Set the current user ID from LiveKit session"""
     global current_user_id
     current_user_id = user_id
-    if user_id:
-        print(f"[SESSION] User ID set to: {user_id}")
-    else:
-        print(f"[SESSION] User ID cleared")
+    print(f"[SESSION] User ID set to: {user_id}")
 
 def get_current_user_id() -> Optional[str]:
     """Get the current user ID"""
@@ -98,20 +95,6 @@ def extract_uuid_from_identity(identity: Optional[str]) -> Optional[str]:
 
     print(f"[UUID WARNING] Invalid identity format: {identity}")
     return None
-
-async def wait_for_participant_disconnect(room, participant_sid: str):
-    """
-    Waits for a specific participant to disconnect.
-    This prevents the reconnection loop from immediately re-greeting the same user.
-    """
-    print(f"[DISCONNECT WATCH] Monitoring participant {participant_sid}...")
-    while True:
-        # Check if participant is still in the room
-        if participant_sid not in room.remote_participants:
-            print(f"[DISCONNECT] Participant {participant_sid} disconnected")
-            return
-        await asyncio.sleep(1.0)
-
 
 async def wait_for_participant(room, *, target_identity: Optional[str] = None, timeout_s: int = 20):
     """
@@ -552,14 +535,16 @@ When saving, keep entries **short and concrete**.
 # ---------------------------
 async def entrypoint(ctx: agents.JobContext):
     """
-    LiveKit agent entrypoint with reconnection loop:
-    - Keeps agent alive for multiple connect/disconnect cycles
-    - Supports instant reconnection on page refresh
-    - No restart needed
+    LiveKit agent entrypoint:
+    - Start session to receive state updates
+    - Wait for the intended participant deterministically
+    - Extract & validate UUID from participant identity
+    - Defer Supabase writes until we have a valid user_id
+    - Initialize profile & proceed with conversation
     """
     print(f"[ENTRYPOINT] Starting session for room: {ctx.room.name}")
 
-    # Initialize media + agent ONCE (reused for all connections)
+    # Initialize media + agent FIRST so room state/events begin flowing
     tts = TTS(voice_id="17", output_format="MP3_22050_32")
     assistant = Assistant()
     session = AgentSession(
@@ -573,93 +558,51 @@ async def entrypoint(ctx: agents.JobContext):
     await session.start(room=ctx.room, agent=assistant, room_input_options=RoomInputOptions())
     print("[SESSION INIT] ✓ Session started")
 
-    # RECONNECTION LOOP - keeps agent alive for instant reconnections
-    connection_count = 0
-    while True:
-        connection_count += 1
-        print(f"\n{'='*60}")
-        print(f"[CONNECTION #{connection_count}] Waiting for participant...")
-        print(f"{'='*60}")
-        
-        # Clear previous user state
-        set_current_user_id(None)
-        
-        # Wait for participant
-        # First connection: 5 minutes timeout
-        # Reconnections: 1 minute timeout (faster for page refreshes)
-        timeout = 300 if connection_count == 1 else 60
-        expected_identity = None
-        
-        participant = await wait_for_participant(ctx.room, target_identity=expected_identity, timeout_s=timeout)
-        
-        if not participant:
-            print(f"[CONNECTION #{connection_count}] ⚠️  No participant within {timeout}s")
-            if connection_count == 1:
-                print("[ENTRYPOINT] First connection failed, exiting")
-                return
-            # On reconnection timeout, keep waiting
-            print("[ENTRYPOINT] Reconnection timeout, continuing to wait...")
-            continue
+    # If you know the expected identity (from your token minting), set it here
+    expected_identity = None
 
-        print(f"[CONNECTION #{connection_count}] ✓ Participant connected!")
-        print(f"  → SID: {participant.sid}")
-        print(f"  → Identity: {participant.identity}")
+    # Wait for the participant deterministically
+    participant = await wait_for_participant(ctx.room, target_identity=expected_identity, timeout_s=20)
+    if not participant:
+        print("[ENTRYPOINT] No participant joined within timeout; running without DB writes")
+        await session.generate_reply(instructions=assistant.instructions)
+        return
 
-        # Resolve to UUID
-        user_id = extract_uuid_from_identity(participant.identity)
-        if not user_id:
-            print(f"[CONNECTION #{connection_count}] ⚠️  Invalid UUID, skipping")
-            await session.generate_reply(instructions=assistant.instructions)
-            continue
+    print(f"[ENTRYPOINT] Participant: sid={participant.sid}, identity={participant.identity}, kind={getattr(participant, 'kind', None)}")
 
-        # Set current user
-        set_current_user_id(user_id)
+    # Resolve to UUID
+    user_id = extract_uuid_from_identity(participant.identity)
+    if not user_id:
+        print("[ENTRYPOINT] Participant identity could not be parsed as UUID; skipping DB writes")
+        await session.generate_reply(instructions=assistant.instructions)
+        return
 
-        # Setup Supabase for this user
-        if supabase:
-            print("[SUPABASE] ✓ Connected")
-            # Optional: smoke test
-            if save_memory("TEST", "connection_test", "Supabase connection OK"):
-                try:
-                    supabase.table("memory").delete() \
-                            .eq("user_id", user_id) \
-                            .eq("category", "TEST") \
-                            .eq("key", "connection_test") \
-                            .execute()
-                except Exception as e:
-                    print(f"[TEST] Cleanup warning: {e}")
-        else:
-            print("[SUPABASE] ✗ Not connected; running without persistence")
+    # Set current user
+    set_current_user_id(user_id)
 
-        # Get user's first name for personalized greeting
-        try:
-            result = supabase.table("onboarding_details").select("full_name").eq("user_id", user_id).execute()
-            full_name = result.data[0]["full_name"] if result.data else ""
-        except Exception as e:
-            print(f"[DB] Error fetching name: {e}")
-            full_name = ""
-        
-        # First response - use full AI personality (no instruction override)
-        print(f"[CONNECTION #{connection_count}] Greeting user{f" ({full_name})" if full_name else ""}...")
-        
-        # Let AI use its complete personality instructions naturally
-        await session.generate_reply()        
-        print(f"[CONNECTION #{connection_count}] ✓ Active")
-        print(f"[READY] Agent ready for conversation or reconnection")
-        
-        # Wait for this participant to disconnect before accepting next connection
-        await wait_for_participant_disconnect(ctx.room, participant.sid)
-        
-        # Participant disconnected, clean up and prepare for next connection
-        print(f"[CONNECTION #{connection_count}] Participant disconnected, cleaning up...")
-        set_current_user_id(None)
-        
-        # Small delay before accepting next connection
-        await asyncio.sleep(0.5)
-        print(f"[CONNECTION #{connection_count}] Ready for next connection\n")
-        
-        # Loop continues - agent stays alive for instant reconnection!
+    # Now that we have a valid user_id, it's safe to touch Supabase
+    if supabase:
+        print("[SUPABASE] ✓ Connected")
 
+        # Optional: smoke test memory table for this user
+        if save_memory("TEST", "connection_test", "Supabase connection OK"):
+            try:
+                supabase.table("memory").delete() \
+                        .eq("user_id", user_id) \
+                        .eq("category", "TEST") \
+                        .eq("key", "connection_test") \
+                        .execute()
+            except Exception as e:
+                print(f"[TEST] Cleanup warning: {e}")
+    else:
+        print("[SUPABASE] ✗ Not connected; running without persistence")
+
+    # Get user's first name for personalized greeting
+    result = supabase.table("onboarding_details").select("full_name").eq("user_id", user_id).execute()
+    full_name = result.data[0]["full_name"] if result.data else ""
+    
+    # First response - use full AI personality (no instruction override)
+    await session.generate_reply()
 
 if __name__ == "__main__":
     agents.cli.run_app(agents.WorkerOptions(
