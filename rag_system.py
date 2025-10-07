@@ -485,6 +485,7 @@ class RAGMemorySystem:
         """
         try:
             logging.info(f"[RAG] Loading memories from Supabase for user {self.user_id}...")
+            print(f"[DEBUG][DB] Querying memory table for user_id: {self.user_id[:8]}, limit: {limit}")
             
             # Fetch recent memories
             result = supabase_client.table("memory")\
@@ -496,6 +497,15 @@ class RAGMemorySystem:
             
             memories_data = result.data if result.data else []
             logging.info(f"[RAG] Loaded {len(memories_data)} memories from database")
+            print(f"[DEBUG][DB] ✅ Query returned {len(memories_data)} memories from database")
+            
+            # DEBUG: Show sample of memories
+            if memories_data:
+                print(f"[DEBUG][DB] Sample memories retrieved:")
+                for i, mem in enumerate(memories_data[:3], 1):
+                    print(f"[DEBUG][DB]   #{i}: [{mem.get('category')}] {mem.get('value', '')[:60]}...")
+            else:
+                print(f"[DEBUG][DB] ⚠️  No memories found in database for user {self.user_id[:8]}")
             
             # Create embeddings in parallel (batched for efficiency)
             embedding_tasks = []
@@ -504,10 +514,20 @@ class RAGMemorySystem:
                 if text:
                     embedding_tasks.append(self.create_embedding(text))
             
+            print(f"[DEBUG][DB] Creating embeddings for {len(embedding_tasks)} memories...")
+            
             if embedding_tasks:
                 embeddings = await asyncio.gather(*embedding_tasks, return_exceptions=True)
                 
+                print(f"[DEBUG][DB] Embeddings created: {len(embeddings)} total")
+                
+                # Count successful embeddings
+                successful = sum(1 for e in embeddings if not isinstance(e, Exception))
+                failed = len(embeddings) - successful
+                print(f"[DEBUG][DB] Successful: {successful}, Failed: {failed}")
+                
                 # Add to FAISS index
+                added_count = 0
                 for i, mem in enumerate(memories_data):
                     if i < len(embeddings) and not isinstance(embeddings[i], Exception):
                         embedding = embeddings[i]
@@ -523,11 +543,20 @@ class RAGMemorySystem:
                             "embedding": embedding,
                             "metadata": {"key": mem.get("key")}
                         })
+                        added_count += 1
                 
                 logging.info(f"[RAG] ✓ Indexed {len(self.memories)} memories")
+                print(f"[DEBUG][DB] ✅ Added {added_count} memories to FAISS index")
+                print(f"[DEBUG][DB] Total memories in RAG: {len(self.memories)}")
+                print(f"[DEBUG][DB] FAISS index size: {self.index.ntotal}")
+            else:
+                print(f"[DEBUG][DB] ⚠️  No embedding tasks created - no valid memory text found")
             
         except Exception as e:
             logging.error(f"[RAG] Failed to load from Supabase: {e}")
+            print(f"[DEBUG][DB] ❌ Error loading from Supabase: {type(e).__name__}: {str(e)}")
+            import traceback
+            print(f"[DEBUG][DB] Traceback: {traceback.format_exc()}")
     
     def save_index(self, filepath: str):
         """Save FAISS index and memories to disk."""
@@ -572,6 +601,17 @@ user_rag_systems = {}  # {user_id: RAGMemorySystem}
 
 def get_or_create_rag(user_id: str, openai_api_key: str) -> RAGMemorySystem:
     """Get existing RAG system or create new one for user."""
+    print(f"[DEBUG][RAG] get_or_create_rag called for user {user_id[:8]}")
+    print(f"[DEBUG][RAG] Current user_rag_systems keys: {[uid[:8] for uid in user_rag_systems.keys()]}")
+    
     if user_id not in user_rag_systems:
+        print(f"[DEBUG][RAG] 🆕 Creating NEW RAG instance for {user_id[:8]}")
         user_rag_systems[user_id] = RAGMemorySystem(user_id, openai_api_key)
+        print(f"[DEBUG][RAG] ✅ RAG instance created and stored in global dict")
+    else:
+        existing_rag = user_rag_systems[user_id]
+        print(f"[DEBUG][RAG] ♻️  Returning EXISTING RAG for {user_id[:8]}")
+        print(f"[DEBUG][RAG]    Existing RAG has {len(existing_rag.memories)} memories")
+        print(f"[DEBUG][RAG]    FAISS index size: {existing_rag.index.ntotal}")
+    
     return user_rag_systems[user_id]

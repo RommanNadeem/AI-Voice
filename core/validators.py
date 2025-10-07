@@ -14,13 +14,27 @@ _supabase_client = None
 def set_current_user_id(user_id: str):
     """Set the current user ID from LiveKit session"""
     global _current_user_id
+    
+    # DEBUG: Track user_id changes and potential collisions
+    old_user_id = _current_user_id
+    if old_user_id and old_user_id != user_id:
+        print(f"[DEBUG][USER_ID] ⚠️  USER_ID COLLISION DETECTED!")
+        print(f"[DEBUG][USER_ID]    Previous: {old_user_id[:8]}")
+        print(f"[DEBUG][USER_ID]    New:      {user_id[:8]}")
+        print(f"[DEBUG][USER_ID]    This indicates multiple sessions are active!")
+    
     _current_user_id = user_id
     print(f"[SESSION] User ID set to: {user_id}")
+    print(f"[DEBUG][USER_ID] ✅ Global _current_user_id = {user_id[:8]}")
 
 
 def get_current_user_id() -> Optional[str]:
     """Get the current user ID"""
-    return _current_user_id
+    result = _current_user_id
+    # DEBUG: Only log when result is None (reduce noise)
+    if result is None:
+        print(f"[DEBUG][USER_ID] ⚠️  Retrieved user_id: NONE")
+    return result
 
 
 def set_supabase_client(client):

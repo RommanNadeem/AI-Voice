@@ -198,7 +198,7 @@ Your main goal is "to be like a close, platonic female urdu speaking friend, use
 ## Tools & Memory
 
 ### Tool Usage
-- **`storeInMemory(category, key, value)`** — for specific facts/preferences with known keys. If unsure: "Kya yeh yaad rakhun?"  
+- **`storeInMemory(category, key, value)`** — for specific facts/preferences with known keys.
 - **`retrieveFromMemory(query)`** — retrieve a specific memory by exact category and key.  
 - **`searchMemories(query, limit)`** — POWERFUL semantic search across ALL memories.
 - **`createUserProfile(profile_input)`** — create or update a comprehensive user profile.
@@ -292,14 +292,29 @@ Your main goal is "to be like a close, platonic female urdu speaking friend, use
         """Search memories semantically using Advanced RAG"""
         print(f"[TOOL] 🔍 searchMemories called: query='{query}', limit={limit}")
         user_id = get_current_user_id()
+        
+        # DEBUG: Track user_id in tool execution
+        print(f"[DEBUG][USER_ID] searchMemories - Current user_id: {user_id[:8] if user_id else 'NONE'}")
+        
         if not user_id:
             print(f"[TOOL] ⚠️  No active user")
+            print(f"[DEBUG][USER_ID] ❌ Tool call failed - user_id is None!")
             return {"memories": [], "message": "No active user"}
         
         try:
             if not self.rag_service:
                 print(f"[TOOL] ⚠️  RAG not initialized")
+                print(f"[DEBUG][RAG] ❌ RAG service is None for user {user_id[:8]}")
                 return {"memories": [], "message": "RAG not initialized"}
+            
+            # DEBUG: Check RAG state
+            rag_system = self.rag_service.get_rag_system()
+            print(f"[DEBUG][RAG] RAG system exists: {rag_system is not None}")
+            if rag_system:
+                memory_count = len(rag_system.memories)
+                print(f"[DEBUG][RAG] Current RAG has {memory_count} memories loaded")
+                print(f"[DEBUG][RAG] RAG user_id: {rag_system.user_id[:8]}")
+                print(f"[DEBUG][RAG] FAISS index total: {rag_system.index.ntotal}")
             
             self.rag_service.update_conversation_context(query)
             results = await self.rag_service.search_memories(
@@ -327,6 +342,7 @@ Your main goal is "to be like a close, platonic female urdu speaking friend, use
             }
         except Exception as e:
             print(f"[TOOL] ❌ Error: {e}")
+            print(f"[DEBUG][RAG] Exception details: {type(e).__name__}: {str(e)}")
             return {"memories": [], "message": f"Error: {e}"}
 
     async def generate_reply_with_context(self, session, user_text: str = None, greet: bool = False):
@@ -336,11 +352,21 @@ Your main goal is "to be like a close, platonic female urdu speaking friend, use
         """
         user_id = get_current_user_id()
         
+        # DEBUG: Track user_id during reply generation
+        print(f"[DEBUG][USER_ID] generate_reply_with_context - user_id: {user_id[:8] if user_id else 'NONE'}")
+        print(f"[DEBUG][CONTEXT] Is greeting: {greet}, User text: {user_text[:50] if user_text else 'N/A'}")
+        
         # Build context string
         extra_context = ""
         
         if user_id:
             try:
+                # DEBUG: Check RAG service state before fetching
+                print(f"[DEBUG][RAG] RAG service attached: {self.rag_service is not None}")
+                if self.rag_service:
+                    rag_stats = self.rag_service.get_stats()
+                    print(f"[DEBUG][RAG] RAG stats: {rag_stats.get('total_memories', 0)} memories")
+                
                 # Fetch profile, memories, and RAG in parallel
                 profile_task = self.profile_service.get_profile_async(user_id)
                 rag_task = self.rag_service.search_memories(user_text or "user information", top_k=5) if self.rag_service else asyncio.sleep(0)
@@ -353,10 +379,17 @@ Your main goal is "to be like a close, platonic female urdu speaking friend, use
                     return_exceptions=True
                 )
                 
+                # DEBUG: Log what was fetched
+                print(f"[DEBUG][CONTEXT] Profile fetched: {len(profile) if profile and not isinstance(profile, Exception) else 0} chars")
+                print(f"[DEBUG][CONTEXT] RAG memories: {len(rag_memories) if rag_memories and not isinstance(rag_memories, Exception) else 0} items")
+                print(f"[DEBUG][CONTEXT] Context data fetched: {not isinstance(context_data, Exception)}")
+                
                 # Add user name
                 if context_data and not isinstance(context_data, Exception):
-                    if context_data.get("user_name"):
-                        extra_context += f"User's name: {context_data['user_name']}\n"
+                    user_name = context_data.get("user_name")
+                    print(f"[DEBUG][CONTEXT] User name from context: '{user_name}'")
+                    if user_name:
+                        extra_context += f"User's name: {user_name}\n"
                     
                     # Add conversation state
                     state = context_data.get("conversation_state", {})
@@ -366,22 +399,32 @@ Your main goal is "to be like a close, platonic female urdu speaking friend, use
                 # Add profile
                 if profile and not isinstance(profile, Exception) and profile.strip():
                     extra_context += f"User Profile: {profile}\n"
+                    print(f"[DEBUG][CONTEXT] Profile added: {profile[:100]}...")
                 
                 # Add RAG memories
                 if rag_memories and not isinstance(rag_memories, Exception) and len(rag_memories) > 0:
                     mem_text = "\n".join([f"- {m.get('text', '')[:100]}" for m in rag_memories[:5]])
                     extra_context += f"Known memories:\n{mem_text}\n"
+                    print(f"[DEBUG][CONTEXT] RAG memories added: {len(rag_memories)} items")
+                else:
+                    print(f"[DEBUG][CONTEXT] ⚠️  No RAG memories retrieved!")
                 
                 logging.info(f"[CONTEXT] Built context: {len(extra_context)} chars")
+                print(f"[DEBUG][CONTEXT] Total context length: {len(extra_context)} chars")
                 
             except Exception as e:
                 logging.error(f"[CONTEXT] Error fetching: {e}")
+                print(f"[DEBUG][CONTEXT] ❌ Exception: {type(e).__name__}: {str(e)}")
+        
+        else:
+            print(f"[DEBUG][USER_ID] ⚠️  No user_id available for context building!")
         
         # Generate reply with context
         base = self._base_instructions
         
         if greet:
             # First greeting
+            print(f"[DEBUG][GREETING] Sending greeting with {len(extra_context)} chars of context")
             await session.generate_reply(
                 instructions=f"{base}\n\nGreet the user warmly in Urdu.\n\n{extra_context}"
             )
@@ -520,6 +563,8 @@ async def entrypoint(ctx: agents.JobContext):
 
     # Set current user
     set_current_user_id(user_id)
+    print(f"[DEBUG][USER_ID] ✅ Set current user_id to: {user_id}")
+    print(f"[DEBUG][USER_ID] Verification - get_current_user_id(): {get_current_user_id()}")
     
     # Ensure user profile exists
     user_service = UserService(supabase)
@@ -527,21 +572,46 @@ async def entrypoint(ctx: agents.JobContext):
     
     # Initialize RAG for this user
     print(f"[RAG] Initializing for user {user_id[:8]}...")
+    print(f"[DEBUG][RAG] Creating RAGService instance...")
     rag_service = RAGService(user_id)
     assistant.rag_service = rag_service  # Set RAG service on assistant instance
+    print(f"[DEBUG][RAG] ✅ RAG service attached to assistant")
+    
+    # DEBUG: Check if RAG system already exists (persistence check)
+    from rag_system import user_rag_systems
+    if user_id in user_rag_systems:
+        existing_rag = user_rag_systems[user_id]
+        print(f"[DEBUG][RAG] ♻️  FOUND EXISTING RAG for user {user_id[:8]} with {len(existing_rag.memories)} memories")
+    else:
+        print(f"[DEBUG][RAG] 🆕 NO EXISTING RAG - Creating new instance for user {user_id[:8]}")
     
     # Load top 50 memories immediately (fast, prevents race condition)
     try:
+        print(f"[DEBUG][RAG] Loading top 50 memories from database...")
         await asyncio.wait_for(
             rag_service.load_from_database(supabase, limit=50),
             timeout=1.0
         )
         print(f"[RAG] ✓ Loaded top 50 memories")
+        
+        # DEBUG: Verify memories were loaded
+        rag_system = rag_service.get_rag_system()
+        if rag_system:
+            print(f"[DEBUG][RAG] ✅ RAG now has {len(rag_system.memories)} memories")
+            print(f"[DEBUG][RAG] FAISS index size: {rag_system.index.ntotal}")
+        else:
+            print(f"[DEBUG][RAG] ❌ RAG system is None after loading!")
+            
+    except asyncio.TimeoutError:
+        print(f"[RAG] ⚠️  Timeout loading memories (>1s)")
+        print(f"[DEBUG][RAG] ❌ Load timeout - RAG may be empty!")
     except Exception as e:
         print(f"[RAG] Warning: {e}")
+        print(f"[DEBUG][RAG] ❌ Load exception: {type(e).__name__}: {str(e)}")
     
     # Load remaining memories in background (no offset support, so load all 500)
     # Note: This will re-load the first 50, but FAISS will deduplicate
+    print(f"[DEBUG][RAG] Starting background task to load 500 memories...")
     asyncio.create_task(rag_service.load_from_database(supabase, limit=500))
     print(f"[RAG] 🔄 Loading all 500 memories in background (includes top 50)")
 
@@ -566,6 +636,13 @@ async def entrypoint(ctx: agents.JobContext):
 
     # Send initial greeting WITH FULL CONTEXT
     logging.info(f"[GREETING] Generating first message with context...")
+    print(f"[DEBUG][GREETING] About to generate first message...")
+    print(f"[DEBUG][USER_ID] Current user_id before greeting: {get_current_user_id()}")
+    print(f"[DEBUG][RAG] RAG service exists: {assistant.rag_service is not None}")
+    if assistant.rag_service:
+        rag_stats = assistant.rag_service.get_stats()
+        print(f"[DEBUG][RAG] RAG stats before greeting: {rag_stats}")
+    
     await assistant.generate_reply_with_context(session, greet=True)
     logging.info(f"[GREETING] ✓ First message sent!")
 
