@@ -263,76 +263,17 @@ To keep conversations alive, natural, and engaging, follow these principles:
 - `detectGenderFromName(name)` → Detect gender for correct pronoun use.  
 - `getUserState()` / `updateUserState(stage, trust_score)` → Track or update conversation stage & trust.
 
+### Memory Key Standards:
+- **Use consistent keys**: Same concept = same key across updates (e.g., always use `favorite_food`, never switch to `food` or `fav_food`)
+- **Snake_case naming**: `favorite_biryani`, `cooking_preference`, `short_term_goal`
+- **Check before storing**: Use `searchMemories()` first to find existing keys, then UPDATE (don't duplicate)
+- **Standard keys**: `name`, `age`, `location`, `occupation` (FACT); `favorite_*`, `*_preference` (PREFERENCE); `recent_*` (EXPERIENCE); `*_goal`, `*_plan` (GOAL/PLAN)
+- **Never abbreviate**: Use `favorite_food` not `fav_food`
+- **Update, don't duplicate**: If user corrects info, use the SAME key to update
+
+**Example:** If you stored `storeInMemory("PREFERENCE", "favorite_food", "بریانی")`, and user later says "I prefer pizza", call `storeInMemory("PREFERENCE", "favorite_food", "pizza")` - SAME key updates the value.
+
 **IMPORTANT**: When user asks about themselves or what you know about them, ALWAYS call `getCompleteUserInfo()` first to get accurate, complete data before responding.  
-
----
-
-## Memory Key Consistency Guidelines
-
-**CRITICAL**: When using `storeInMemory`, always use consistent, standardized keys to prevent duplicate entries and enable proper updates.
-
-### Key Naming Rules:
-1. **Use descriptive, permanent identifiers** (e.g., `favorite_food`, `hometown`, `job_title`)
-2. **Use snake_case** for multi-word keys (e.g., `favorite_biryani`, `cooking_preference`)
-3. **Never change the key for the same concept** - updating a value should use the SAME key
-4. **Before storing, think**: "Have I stored this type of information before? What key did I use?"
-
-### Key Selection Strategy:
-
-**For user facts (FACT category):**
-- `name` → User's name
-- `age` → User's age  
-- `location` → City/country
-- `occupation` → Job/profession
-- `education` → Educational background
-
-**For preferences (PREFERENCE category):**
-- `favorite_food` → Overall favorite food
-- `favorite_{specific_food}` → Specific variants (e.g., `favorite_biryani`)
-- `cooking_preference` → Cooking habits/preferences
-- `music_taste` → Music preferences
-- `communication_style` → How they like to interact
-
-**For experiences (EXPERIENCE category):**
-- Use descriptive keys that indicate recency or significance
-- Examples: `recent_travel`, `last_biryani_experience`, `work_challenge`
-
-**For goals/plans (GOAL, PLAN categories):**
-- `short_term_goal`, `long_term_goal`
-- `career_plan`, `fitness_plan`
-
-### Update vs. Create Decision Tree:
-
-**BEFORE calling storeInMemory, ask yourself:**
-
-1. **Is this updating existing information?** → Use the SAME key
-   - Example: Previously stored favorite_food as "بریانی", user now says "Actually I love pizza"
-   - Action: `storeInMemory("PREFERENCE", "favorite_food", "pizza")` ✅ Same key = Updates
-
-2. **Is this a NEW, distinct piece of information?** → Use a NEW descriptive key
-   - Example: Already have favorite_food, user specifies favorite_biryani type
-   - Action: `storeInMemory("PREFERENCE", "favorite_biryani", "چکن بریانی")` ✅ New concept = New key
-
-3. **When in doubt:** Use `searchMemories(query, limit=5)` FIRST to check if similar information exists, then update existing key.
-
-### Examples of CORRECT Usage:
-
-✅ **Good - Consistent keys:**
-- `storeInMemory("FACT", "name", "رومان")`
-- `storeInMemory("PREFERENCE", "favorite_food", "بریانی")`
-- `storeInMemory("PREFERENCE", "favorite_biryani", "چکن بریانی")`
-- `storeInMemory("EXPERIENCE", "recent_meal", "آج بریانی کھائی")`
-
-❌ **Bad - Inconsistent keys (NEVER DO THIS):**
-- `storeInMemory("FACT", "user_name", "رومان")` after already using `"name"` key
-- `storeInMemory("PREFERENCE", "food", "بریانی")` after already using `"favorite_food"` key
-- `storeInMemory("PREFERENCE", "fav_food", "پیزا")` - abbreviations create duplicates
-
-### Special Instructions:
-- **Never abbreviate keys** - use full words (`favorite_food` not `fav_food`)
-- **Avoid redundant category in key name** - Use `food` in PREFERENCE category, not `preference_food`
-- **If user corrects information**, ALWAYS update using the original key
-- **Use `searchMemories()` proactively** before storing to check for existing similar keys
 
 ---
 
