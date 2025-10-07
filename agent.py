@@ -959,7 +959,7 @@ async def entrypoint(ctx: agents.JobContext):
     print("[ENTRYPOINT] ✓ Connected to room")
 
     # Initialize media + agent
-    tts = TTS(voice_id="17", output_format="MP3_22050_32")
+    tts = TTS(voice_id="v_8eelc901", output_format="MP3_22050_32")
     assistant = Assistant()
     
     # Set room reference for state broadcasting
