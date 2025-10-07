@@ -162,114 +162,153 @@ Respond in JSON format:
                 "reason": f"Analysis error: {str(e)}"
             }
     
-    async def get_intelligent_greeting_instructions(
+    async def get_simple_greeting_instructions(
         self,
         user_id: str,
         assistant_instructions: str
     ) -> str:
         """
-        Generate intelligent first message instructions based on conversation history.
-        Uses Redis cache for improved performance.
+        Generate SIMPLE first message instructions using only name + last conversation summary.
+        OPTIMIZED for speed - minimal database queries, no AI analysis.
         
         Args:
             user_id: User UUID
             assistant_instructions: Base assistant instructions
             
         Returns:
-            Enhanced instructions with greeting strategy
+            Lightweight greeting instructions (name + last conversation summary only)
         """
         try:
-            print(f"[CONVERSATION SERVICE] Analyzing conversation context for user {user_id}...")
+            print(f"[CONVERSATION SERVICE] 🚀 Simple greeting generation (name + last convo only)...")
             
             # Check Redis cache for recent greeting
             redis_cache = await get_redis_cache()
-            cache_key = f"user:{user_id}:greeting_instructions"
+            cache_key = f"user:{user_id}:simple_greeting"
             cached_instructions = await redis_cache.get(cache_key)
             
             if cached_instructions:
-                print(f"[CONVERSATION SERVICE] Cache hit for greeting instructions")
+                print(f"[CONVERSATION SERVICE] ✓ Cache hit for greeting")
                 return cached_instructions
             
-            # Import here to avoid circular dependency
-            from services.profile_service import ProfileService
+            # Fetch only name + last conversation (parallel, no profile)
+            name_task = self._get_user_name_fast(user_id)
+            last_convo_task = self.get_last_conversation_context(user_id)
             
-            # Get conversation history
-            context = await self.get_last_conversation_context(user_id)
+            try:
+                user_name, context = await asyncio.wait_for(
+                    asyncio.gather(name_task, last_convo_task, return_exceptions=True),
+                    timeout=1.0  # Max 1 second
+                )
+            except asyncio.TimeoutError:
+                print(f"[CONVERSATION SERVICE] ⚠️  Timeout, using defaults")
+                user_name = None
+                context = {"has_history": False}
             
-            # Get user profile
-            profile_service = ProfileService(self.supabase)
-            user_profile = await profile_service.get_profile_async(user_id)
+            # Handle exceptions
+            if isinstance(user_name, Exception):
+                user_name = None
+            if isinstance(context, Exception):
+                context = {"has_history": False}
+            
+            # Build simple instructions
+            name_text = f"User's name: **{user_name}**\n\n" if user_name else ""
             
             if not context["has_history"]:
-                print(f"[CONVERSATION SERVICE] No history - fresh start")
-                instructions = assistant_instructions + """
+                # New user - simple greeting
+                print(f"[CONVERSATION SERVICE] ✓ New user - simple greeting")
+                instructions = f"""
 
-## First Message Strategy
-Since this appears to be a new conversation or first interaction, start with a warm, welcoming greeting in Urdu. Introduce yourself briefly as their AI companion and ask how they're doing today. Keep it simple and friendly.
+## First Message - Simple Greeting
+{name_text}
+This is a new conversation. Start with a warm, welcoming greeting in Urdu. Keep it simple and friendly.
 
-Example: "Assalam-o-alaikum! Main aapki AI companion hun. Aaj aap kaise hain?"
-
-"""
-                # Cache for 2 minutes
-                await redis_cache.set(cache_key, instructions, ttl=120)
-                return instructions
-            
-            # Analyze conversation continuity
-            analysis = await self.analyze_conversation_continuity(
-                context["last_messages"],
-                context["time_since_last_hours"],
-                user_profile
-            )
-            
-            if analysis["decision"] == "FOLLOW_UP":
-                print(f"[CONVERSATION SERVICE] Following up on previous conversation")
-                suggested_opening = analysis.get("suggested_opening", "")
-                
-                instructions = assistant_instructions + f"""
-
-## First Message Strategy - Follow-up
-Based on conversation analysis, continue the previous discussion naturally. The last conversation was about: {analysis.get('detected_topic', 'unknown topic')}.
-
-Use this suggested opening: "{suggested_opening}"
-
-Guidelines:
-- Reference the previous conversation naturally
-- Show you remember what was discussed
-- Continue the emotional tone appropriately
-- Keep the conversation flowing
+Example: "Assalam-o-alaikum{f" {user_name}" if user_name else ""}! Aaj aap kaise hain?"
 
 """
-                await redis_cache.set(cache_key, instructions, ttl=120)
-                return instructions
             else:
-                print(f"[CONVERSATION SERVICE] Fresh start approach")
-                instructions = assistant_instructions + f"""
+                # Returning user - check if follow-up is appropriate
+                hours = context.get("time_since_last_hours", 999)
+                last_msg = context.get("most_recent", "")
+                
+                # Simple heuristic: follow-up if < 12 hours
+                if hours < 12:
+                    print(f"[CONVERSATION SERVICE] ✓ Follow-up greeting ({hours:.1f}h ago)")
+                    instructions = f"""
 
-## First Message Strategy - Fresh Start
-Start with a natural, warm greeting. The previous conversation ended naturally, so begin fresh while being aware of the user's profile.
+## First Message - Follow-up
+{name_text}
+Last conversation was {hours:.1f} hours ago. Last message: "{last_msg[:100]}"
 
-User Profile Context: {user_profile[:200] if user_profile else "No profile available"}
+Continue naturally from where you left off. Reference the previous conversation briefly.
 
-Guidelines:
-- Use a warm, friendly greeting in Urdu
-- Reference their profile naturally if relevant
-- Ask how they're doing today
-- Keep it conversational and natural
-
-Example: "Assalam-o-alaikum! Kaise hain aap aaj? [Reference profile naturally if appropriate]"
+Example: "Assalam-o-alaikum{f" {user_name}" if user_name else ""}! Kaisi hain aap? [reference previous topic briefly]"
 
 """
-                await redis_cache.set(cache_key, instructions, ttl=120)
-                return instructions
+                else:
+                    print(f"[CONVERSATION SERVICE] ✓ Fresh start ({hours:.1f}h ago)")
+                    instructions = f"""
+
+## First Message - Fresh Start
+{name_text}
+Last conversation was {hours:.1f} hours ago (a while back). Start fresh with a warm greeting.
+
+Example: "Assalam-o-alaikum{f" {user_name}" if user_name else ""}! Kaafi time baad baat ho rahi hai. Aap kaise hain?"
+
+"""
+            
+            # Cache for 2 minutes
+            await redis_cache.set(cache_key, instructions, ttl=120)
+            return instructions
             
         except Exception as e:
-            print(f"[CONVERSATION SERVICE] get_intelligent_greeting_instructions failed: {e}")
-            return assistant_instructions + """
+            print(f"[CONVERSATION SERVICE] ❌ get_simple_greeting_instructions failed: {e}")
+            return """
 
-## First Message Strategy - Fallback
-Start with a simple, warm greeting in Urdu. Ask how they're doing today.
+## First Message - Fallback
+Start with a simple, warm greeting in Urdu.
 
-Example: "Assalam-o-alaikum! Main aapki AI companion hun. Aaj aap kaise hain?"
+Example: "Assalam-o-alaikum! Aap kaise hain?"
 
 """
+    
+    async def _get_user_name_fast(self, user_id: str) -> Optional[str]:
+        """
+        Fetch user's name quickly from memory.
+        Checks only the most common name key.
+        """
+        try:
+            result = await asyncio.to_thread(
+                lambda: self.supabase.table("memory")
+                .select("value")
+                .eq("user_id", user_id)
+                .eq("key", "name")
+                .order("created_at", desc=True)
+                .limit(1)
+                .execute()
+            )
+            if result.data:
+                name = result.data[0].get("value", None)
+                if name:
+                    print(f"[CONVERSATION SERVICE] ✓ Name found: '{name}'")
+                    return name
+            return None
+        except Exception as e:
+            print(f"[CONVERSATION SERVICE] Name fetch error: {e}")
+            return None
+    
+    async def get_intelligent_greeting_instructions(
+        self,
+        user_id: str,
+        assistant_instructions: str
+    ) -> str:
+        """
+        DEPRECATED: Use get_simple_greeting_instructions() instead for faster first message.
+        
+        This method does heavy AI analysis and is kept for backward compatibility only.
+        """
+        print(f"[CONVERSATION SERVICE] ⚠️  Using deprecated get_intelligent_greeting_instructions()")
+        print(f"[CONVERSATION SERVICE] ⚠️  Consider using get_simple_greeting_instructions() for faster first message")
+        
+        # Fallback to simple version
+        return await self.get_simple_greeting_instructions(user_id, assistant_instructions)
 

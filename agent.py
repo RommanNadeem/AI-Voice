@@ -295,6 +295,7 @@ This context appears in the "AUTOMATIC CONTEXT" section above. Use it naturally 
         self._context_injection_count = 0
         self._last_context_injection_time = 0
         self._cache_timestamp = 0
+        self._is_first_message = True  # Skip context injection for first message (speed)
 
 
     @function_tool()
@@ -708,14 +709,24 @@ This context appears in the "AUTOMATIC CONTEXT" section above. Use it naturally 
             return []
     
     async def on_agent_turn_started(self):
-        """Simplified context refresh hook"""
+        """Simplified context refresh hook - skips first message for speed"""
         user_id = get_current_user_id()
         if not user_id:
+            return
+        
+        # OPTIMIZATION: Skip context injection for first message (too slow)
+        # First message uses simple greeting with name only
+        if self._is_first_message:
+            logging.info(f"[CONTEXT] ⚡ Skipping context injection for first message (speed mode)")
+            self._is_first_message = False
             return
         
         try:
             enhanced = await self.get_enhanced_instructions()
             self.update_instructions(enhanced)
+            self._context_injection_count += 1
+            self._last_context_injection_time = time.time()
+            logging.info(f"[CONTEXT] ✓ Context injected (#{self._context_injection_count})")
         except Exception as e:
             logging.error(f"[CONTEXT] {e}")
     
@@ -732,8 +743,11 @@ This context appears in the "AUTOMATIC CONTEXT" section above. Use it naturally 
         # Track message timing for rapid message skip logic
         self._last_user_message_time = time.time()
         
-        # Clear cache to force refresh
+        # Clear cache to force refresh (for next agent turn)
         self._cache_timestamp = 0
+        
+        # After first user message, enable full context for subsequent messages
+        self._is_first_message = False
         
         # Background processing
         asyncio.create_task(self._process_with_rag_background(user_text))
@@ -936,26 +950,26 @@ async def entrypoint(ctx: agents.JobContext):
     except Exception as e:
         print(f"[BATCH] Warning: Prefetch failed: {e}")
     
-    # Initialize RAG system and onboarding (parallel)
-    print("[INIT] 🔄 Starting parallel initialization (RAG + Onboarding)...")
+    # OPTIMIZATION: Skip RAG loading for first message - load in background instead
+    print("[INIT] 🚀 Quick start mode - RAG loading in background")
     rag_service = RAGService(user_id)
     onboarding_service = OnboardingService(supabase)
     
-    # OPTIMIZED: Load top 100 memories immediately, rest in background
-    # This reduces initial latency while ensuring core memories are available
-    print("[RAG] Loading critical memories from database...")
-    rag_initial_task = asyncio.create_task(rag_service.load_from_database(supabase, limit=100))
-    onboarding_task = asyncio.create_task(onboarding_service.initialize_user_from_onboarding(user_id))
+    # Initialize onboarding only (fast)
+    try:
+        await asyncio.wait_for(
+            onboarding_service.initialize_user_from_onboarding(user_id),
+            timeout=0.5  # Max 500ms
+        )
+        print("[ONBOARDING] ✓ User initialization complete")
+    except asyncio.TimeoutError:
+        print("[ONBOARDING] ⚠️  Initialization timeout, continuing")
+    except Exception as e:
+        print(f"[ONBOARDING] ⚠️  Initialization error: {e}")
     
-    # Wait for initial batch and onboarding
-    await asyncio.gather(rag_initial_task, onboarding_task, return_exceptions=True)
-    
-    print("[RAG] ✓ Critical memories loaded (100 most recent)")
-    print("[ONBOARDING] ✓ User initialization complete")
-    
-    # Load remaining memories in background (non-blocking)
-    asyncio.create_task(rag_service.load_from_database(supabase, limit=400, offset=100))
-    print("[RAG] 🔄 Loading remaining memories in background...")
+    # Load ALL memories in background (non-blocking) - will be available for subsequent messages
+    asyncio.create_task(rag_service.load_from_database(supabase, limit=500))
+    print("[RAG] 🔄 Loading memories in background (non-blocking)...")
 
     # Test Supabase connection
     if supabase:
@@ -975,39 +989,53 @@ async def entrypoint(ctx: agents.JobContext):
     else:
         print("[SUPABASE] ✗ Not connected; running without persistence")
 
-    # Intelligent first message with AUTOMATIC CONTEXT INJECTION
-    logging.info(f"[GREETING] 🎯 Generating intelligent first message...")
-    logging.info(f"[GREETING] Context will be auto-injected via on_agent_turn_started() hook")
+    # OPTIMIZED: Simple first message with minimal context (name + last conversation only)
+    logging.info(f"[GREETING] 🚀 Generating FAST first message (simple greeting)...")
     
-    # Get conversation state
-    conversation_state_service = ConversationStateService(supabase)
-    state = await conversation_state_service.get_state(user_id)
-    logging.info(f"[STATE] Current: {state['stage']} (Trust: {state['trust_score']:.1f}/10)")
-    
-    # Get stage-specific guidance
-    stage_guidance = conversation_state_service.get_stage_guidance(state["stage"])
-    
-    # Get intelligent greeting
+    # Get simple greeting instructions (name + last conversation only)
     conversation_service = ConversationService(supabase)
-    first_message_instructions = await conversation_service.get_intelligent_greeting_instructions(
-        user_id=user_id,
-        assistant_instructions=assistant._base_instructions
-    )
+    try:
+        first_message_instructions = await asyncio.wait_for(
+            conversation_service.get_simple_greeting_instructions(
+                user_id=user_id,
+                assistant_instructions=assistant._base_instructions
+            ),
+            timeout=1.5  # Max 1.5 seconds for greeting preparation
+        )
+        logging.info(f"[GREETING] ✓ Simple greeting prepared")
+    except asyncio.TimeoutError:
+        logging.warning(f"[GREETING] ⚠️  Timeout, using fallback greeting")
+        first_message_instructions = """
+
+## First Message - Simple Greeting
+Start with a warm, welcoming greeting in Urdu. Keep it simple and friendly.
+
+Example: "Assalam-o-alaikum! Aaj aap kaise hain?"
+
+"""
+    except Exception as e:
+        logging.error(f"[GREETING] ❌ Error: {e}")
+        first_message_instructions = """
+
+## First Message - Fallback
+Start with a simple greeting in Urdu.
+
+Example: "Assalam-o-alaikum! Aap kaise hain?"
+
+"""
     
-    # Combine: Base Instructions + Greeting Strategy + Stage Guidance
-    # Note: Context will be auto-injected by on_agent_turn_started() hook
-    final_instructions = assistant._base_instructions + "\n\n" + first_message_instructions + "\n\n" + stage_guidance
+    # Update the agent's instructions with the simple greeting strategy
+    # Note: We skip automatic context injection for first message (too slow)
+    # Context will be available for subsequent messages
+    assistant.update_instructions(first_message_instructions)
     
-    # Update the agent's instructions with the greeting strategy
-    assistant.update_instructions(final_instructions)
-    
-    logging.info(f"[GREETING] ✓ Greeting strategy prepared")
-    logging.info(f"[GREETING] 🚀 Generating response (context will be auto-injected)...")
+    logging.info(f"[GREETING] 🚀 Generating first message (lightweight mode)...")
     
     # Generate the greeting
-    # on_agent_turn_started() will be called automatically before LLM inference
-    # This ensures context is fresh and cache is properly used
     await session.generate_reply()
+    
+    logging.info(f"[GREETING] ✓ First message sent!")
+    logging.info(f"[BACKGROUND] Full context will be available for next message")
 
 
 async def shutdown_handler():
