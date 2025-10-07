@@ -710,25 +710,30 @@ This context appears in the "AUTOMATIC CONTEXT" section above. Use it naturally 
     
     async def on_agent_turn_started(self):
         """Simplified context refresh hook - skips first message for speed"""
+        logging.info(f"[HOOK] on_agent_turn_started called, first_message={self._is_first_message}")
+        
         user_id = get_current_user_id()
         if not user_id:
+            logging.info(f"[HOOK] No user_id, skipping")
             return
         
         # OPTIMIZATION: Skip context injection for first message (too slow)
         # First message uses simple greeting with name only
         if self._is_first_message:
-            logging.info(f"[CONTEXT] ⚡ Skipping context injection for first message (speed mode)")
+            logging.info(f"[HOOK] ⚡ Skipping context injection for first message (speed mode)")
+            logging.info(f"[HOOK] Instructions already set in entrypoint, length: {len(self.instructions)}")
             self._is_first_message = False
             return
         
         try:
+            logging.info(f"[HOOK] Getting enhanced instructions for message #{self._context_injection_count + 1}")
             enhanced = await self.get_enhanced_instructions()
             self.update_instructions(enhanced)
             self._context_injection_count += 1
             self._last_context_injection_time = time.time()
-            logging.info(f"[CONTEXT] ✓ Context injected (#{self._context_injection_count})")
+            logging.info(f"[HOOK] ✓ Context injected (#{self._context_injection_count})")
         except Exception as e:
-            logging.error(f"[CONTEXT] {e}")
+            logging.error(f"[HOOK ERROR] {e}", exc_info=True)
     
     async def on_user_turn_completed(self, turn_ctx, new_message):
         """Simplified user input handling"""
@@ -914,7 +919,7 @@ async def entrypoint(ctx: agents.JobContext):
     )
 
     print("[SESSION INIT] Starting LiveKit session…")
-    await session.start(room=ctx.room, agent=assistant, room_input_options=RoomInputOptions())
+    await session.start(room=ctx.room, agent=assistant)
     print("[SESSION INIT] ✓ Session started")
 
     # Wait for participant
@@ -1033,12 +1038,17 @@ Example: "Assalam-o-alaikum! Aap kaise hain?"
     assistant.update_instructions(full_instructions)
     
     logging.info(f"[GREETING] 🚀 Generating first message (lightweight mode)...")
+    logging.info(f"[GREETING] Instructions length: {len(full_instructions)} chars")
     
     # Generate the greeting
-    await session.generate_reply()
-    
-    logging.info(f"[GREETING] ✓ First message sent!")
-    logging.info(f"[BACKGROUND] Full context will be available for next message")
+    try:
+        await session.generate_reply()
+        logging.info(f"[GREETING] ✓ First message sent!")
+        logging.info(f"[BACKGROUND] Full context will be available for next message")
+    except Exception as e:
+        logging.error(f"[GREETING] ❌ FAILED to generate first message: {e}", exc_info=True)
+        print(f"[GREETING] ❌ CRITICAL ERROR generating first message: {e}")
+        raise
 
 
 async def shutdown_handler():
