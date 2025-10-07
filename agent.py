@@ -207,58 +207,41 @@ At the same time, you gently help the user reflect on themselves and learn more 
 
 To keep conversations alive, natural, and engaging, follow these principles:
 
-- **React like a person**  
-  Start with a short emotional beat (“Arrey wah!”, “Oof!”, “Haye, ajeeb baat hai”).  
+- **React like a person** Start with a short emotional beat (“Arrey wah!”, “Oof!”, “Haye, ajeeb baat hai”).  
   Emotion first, logic second.  
 
-- **Add a Point of View**  
-  Share tiny opinions, playful teasing, or mild contradictions. Keep it safe but spicy.  
+- **Add a Point of View** Share tiny opinions, playful teasing, or mild contradictions. Keep it safe but spicy.  
 
-- **Callback Magic**  
-  Remember and bring back small details from earlier chats. Makes the conversation feel alive.  
+- **Callback Magic** Remember and bring back small details from earlier chats. Makes the conversation feel alive.  
 
-- **Thematic Loops**  
-  Notice recurring themes (e.g., discipline, curiosity, stress) and gently highlight them later.  
+- **Thematic Loops** Notice recurring themes (e.g., discipline, curiosity, stress) and gently highlight them later.  
 
-- **Pivot Lightly**  
-  Shift topics using a word the user just said, the time of day, or a callback. Keep it natural.  
+- **Pivot Lightly** Shift topics using a word the user just said, the time of day, or a callback. Keep it natural.  
 
-- **Micro-Stories**  
-  Occasionally share tiny fictional “life” slices to feel two-way, not just Q&A.  
+- **Micro-Stories** Occasionally share tiny fictional “life” slices to feel two-way, not just Q&A.  
 
-- **Mood-Mirroring**  
-  Match the user’s energy: playful if they are playful, calm if they are reflective.  
+- **Mood-Mirroring** Match the user’s energy: playful if they are playful, calm if they are reflective.  
 
-- **Mini-Challenges**  
-  Suggest small, playful tasks (e.g., “5 minute bina phone ke try karo”) to spark reflection.  
+- **Mini-Challenges**  Suggest small, playful tasks (e.g., “5 minute bina phone ke try karo”) to spark reflection.  
 
-- **Humor Beats**  
-  Add light jokes or absurd twists (never at the user’s expense).  
+- **Humor Beats** Add light jokes or absurd twists (never at the user’s expense).  
 
-- **Cultural Anchors**  
-  Use relatable Urdu/Pakistani context — chai, cricket, poetry, mehfil, ghazal, etc.  
+- **Cultural Anchors** Use relatable Urdu/Pakistani context — chai, cricket, poetry, mehfil, ghazal, etc.  
 
-- **Self-Hints / Persona Flavors**  
-  Occasionally drop subtle quirks about yourself to build relatability.  
+- **Self-Hints / Persona Flavors** Occasionally drop subtle quirks about yourself to build relatability.  
 
-- **“Why Not” Pivots**  
-  If the chat stalls, pick a casual detail and explore it with curiosity.  
+- **“Why Not” Pivots** If the chat stalls, pick a casual detail and explore it with curiosity.  
 
-- **Insight Finder**  
-  When the user shares something meaningful (a value, habit, or feeling), highlight a small **insight**.  
+- **Insight Finder** When the user shares something meaningful (a value, habit, or feeling), highlight a small **insight**.  
   *Important: not every message is an insight — only when it feels natural.*  
 
-- **Frictionless Pacing**  
-  Use short replies for casual talk, longer ones when the user opens up. Match their vibe.  
+- **Frictionless Pacing** Use short replies for casual talk, longer ones when the user opens up. Match their vibe.  
 
-- **Time Awareness**  
-  Tie reflections to time of day or rhythms of life (e.g., “Shaam ka waqt sochnay pe majboor karta hai”).  
+- **Time Awareness** Tie reflections to time of day or rhythms of life (e.g., “Shaam ka waqt sochnay pe majboor karta hai”).  
 
-- **Earned Memory**  
-  Use remembered facts to show care, never to pressure or corner the user.  
+- **Earned Memory** Use remembered facts to show care, never to pressure or corner the user.  
 
-- **Meta-Awareness (light)**  
-  Occasionally comment on the conversation itself to make it co-created.  
+- **Meta-Awareness (light)** Occasionally comment on the conversation itself to make it co-created.  
   (e.g., “Arrey, hum kitna ghoom phir ke baatein kar rahe hain, mazay ki baat hai na?”)  
  
 
@@ -793,24 +776,30 @@ async def entrypoint(ctx: agents.JobContext):
         ),
     )
 
-    print("[SESSION INIT] Starting LiveKit session…")
-    await session.start(room=ctx.room, agent=assistant)
-    print("[SESSION INIT] ✓ Session started")
-
-    # Wait for participant
+    # Wait for participant FIRST before starting session
+    print("[ENTRYPOINT] Waiting for participant to join...")
     participant = await wait_for_participant(ctx.room, timeout_s=20)
     if not participant:
         print("[ENTRYPOINT] No participant joined within timeout")
-        # Send greeting anyway (no user context)
-        await assistant.generate_reply_with_context(session, greet=True)
         return
 
-    print(f"[ENTRYPOINT] Participant: sid={participant.sid}, identity={participant.identity}")
+    print(f"[ENTRYPOINT] Participant joined: sid={participant.sid}, identity={participant.identity}")
+    
+    # Start the session with the agent
+    # NOTE: In production, each user should have their own room (1:1 conversation)
+    # This ensures participants don't hear each other
+    print("[SESSION INIT] Starting LiveKit session with participant...")
+    await session.start(
+        room=ctx.room, 
+        agent=assistant
+    )
+    print("[SESSION INIT] ✓ Session started and ready to listen")
 
     # Resolve to UUID
     user_id = extract_uuid_from_identity(participant.identity)
     if not user_id:
         print("[ENTRYPOINT] Participant identity could not be parsed as UUID")
+        print("[ENTRYPOINT] Sending generic greeting without user context...")
         await assistant.generate_reply_with_context(session, greet=True)
         return
 
@@ -899,9 +888,33 @@ async def entrypoint(ctx: agents.JobContext):
 
     # CRITICAL: Wait for audio track to be ready before first message
     # Without this wait, first message is silent
-    print("[AUDIO] Waiting for audio track connection...")
-    await asyncio.sleep(1.0)  # Give audio track time to establish
-    print("[AUDIO] ✓ Audio track ready")
+    print("[AUDIO] Waiting for participant audio track to be ready...")
+    
+    # Wait for participant's audio track to be published and subscribed
+    max_wait = 5.0  # 5 seconds max
+    start_time = time.time()
+    audio_track_ready = False
+    
+    while time.time() - start_time < max_wait:
+        # Check if participant has published an audio track
+        if participant.track_publications:
+            for track_sid, publication in participant.track_publications.items():
+                if publication.kind.name == "KIND_AUDIO" and publication.subscribed:
+                    audio_track_ready = True
+                    print(f"[AUDIO] ✓ Audio track subscribed: {track_sid}")
+                    break
+        
+        if audio_track_ready:
+            break
+        
+        await asyncio.sleep(0.2)
+    
+    if not audio_track_ready:
+        print("[AUDIO] ⚠️  Audio track not fully ready, but proceeding...")
+    else:
+        # Give extra 500ms for WebRTC negotiation to stabilize
+        await asyncio.sleep(0.5)
+        print("[AUDIO] ✓ Audio track fully ready")
 
     # Send initial greeting WITH FULL CONTEXT
     logging.info(f"[GREETING] Generating first message with context...")
