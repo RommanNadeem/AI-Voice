@@ -943,49 +943,52 @@ async def entrypoint(ctx: agents.JobContext):
     
     # Prefetch user data with batching
     print("[INIT] Prefetching user data with database batching...")
+    prefetch_succeeded = False
     try:
         batcher = await get_db_batcher(supabase)
         prefetch_data = await batcher.prefetch_user_data(user_id)
+        prefetch_succeeded = True
         print(f"[BATCH] ✓ Prefetched {prefetch_data.get('memory_count', 0)} memories")
     except Exception as e:
         print(f"[BATCH] Warning: Prefetch failed: {e}")
     
-    # OPTIMIZATION: Skip RAG loading for first message - load in background instead
-    print("[INIT] 🚀 Quick start mode - RAG loading in background")
-    rag_service = RAGService(user_id)
+    # FIX Issue 1: Skip onboarding if prefetch succeeded (avoids duplicate profile check)
     onboarding_service = OnboardingService(supabase)
+    if not prefetch_succeeded:
+        print("[ONBOARDING] Running (prefetch failed)...")
+        try:
+            await asyncio.wait_for(
+                onboarding_service.initialize_user_from_onboarding(user_id),
+                timeout=0.5
+            )
+            print("[ONBOARDING] ✓ Complete")
+        except Exception as e:
+            print(f"[ONBOARDING] ⚠️  {e}")
+    else:
+        print("[ONBOARDING] ⚡ Skipped (prefetch succeeded)")
     
-    # Initialize onboarding only (fast)
+    # FIX Issue 3: Load top 50 RAG memories synchronously to avoid race condition
+    # User might respond in 200ms, so we need SOME memories ready
+    print("[RAG] ⚡ Loading critical memories (top 50)...")
+    rag_service = RAGService(user_id)
     try:
         await asyncio.wait_for(
-            onboarding_service.initialize_user_from_onboarding(user_id),
+            rag_service.load_from_database(supabase, limit=50),
             timeout=0.5  # Max 500ms
         )
-        print("[ONBOARDING] ✓ User initialization complete")
+        print("[RAG] ✓ Top 50 memories ready")
     except asyncio.TimeoutError:
-        print("[ONBOARDING] ⚠️  Initialization timeout, continuing")
+        print("[RAG] ⚠️  Timeout on top 50, continuing")
     except Exception as e:
-        print(f"[ONBOARDING] ⚠️  Initialization error: {e}")
+        print(f"[RAG] ⚠️  {e}")
     
-    # Load ALL memories in background (non-blocking) - will be available for subsequent messages
-    asyncio.create_task(rag_service.load_from_database(supabase, limit=500))
-    print("[RAG] 🔄 Loading memories in background (non-blocking)...")
+    # Load remaining memories in background
+    asyncio.create_task(rag_service.load_from_database(supabase, limit=450, offset=50))
+    print("[RAG] 🔄 Loading remaining 450 memories in background...")
 
-    # Test Supabase connection
+    # FIX Issue 2: Connection test deleted (waste of 60-160ms with no benefit)
     if supabase:
         print("[SUPABASE] ✓ Connected")
-
-        # Optional smoke test
-        memory_service = MemoryService(supabase)
-        if memory_service.save_memory("TEST", "connection_test", "Supabase connection OK"):
-            try:
-                supabase.table("memory").delete() \
-                        .eq("user_id", user_id) \
-                        .eq("category", "TEST") \
-                        .eq("key", "connection_test") \
-                        .execute()
-            except Exception as e:
-                print(f"[TEST] Cleanup warning: {e}")
     else:
         print("[SUPABASE] ✗ Not connected; running without persistence")
 
