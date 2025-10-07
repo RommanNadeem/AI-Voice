@@ -23,19 +23,19 @@ The fix implements **automatic context injection for every message** by:
 
 ## Implementation Details
 
-### 1. Dynamic Instructions Property
+### 1. Using `update_instructions()` Method
+
+The key to making context injection work is LiveKit's Agent class method `update_instructions()`. This method dynamically updates the agent's instructions that will be used for the next LLM inference.
 
 ```python
-@property
-def instructions(self) -> str:
-    """
-    Dynamic instructions property that automatically injects context before each LLM inference.
-    Returns cached enhanced instructions that were prepared in on_user_turn_completed.
-    """
-    # Returns cached enhanced instructions with user context
+# After fetching enhanced instructions with context
+enhanced = await self.get_enhanced_instructions()
+
+# Update the agent's instructions dynamically
+self.update_instructions(enhanced)
 ```
 
-The `instructions` property is now dynamic and returns cached enhanced instructions that include user context.
+This is the **correct way** to inject context - using the official LiveKit API rather than trying to override the property.
 
 ### 2. Context Refresh on Every User Turn
 
@@ -45,10 +45,16 @@ async def on_user_turn_completed(self, turn_ctx, new_message):
     # ... existing background processing ...
     
     # CRITICAL: Refresh context for next AI response
-    await self.get_enhanced_instructions()
+    enhanced = await self.get_enhanced_instructions()
+    
+    # Update agent instructions with context
+    self.update_instructions(enhanced)
 ```
 
-**Key Hook Point**: `on_user_turn_completed()` is called by LiveKit after each user message. We use this to refresh the context cache before the AI generates its response.
+**Key Hook Point**: `on_user_turn_completed()` is called by LiveKit after each user message. We use this to:
+1. Fetch fresh context from the database/cache
+2. Format and inject context into instructions
+3. Call `update_instructions()` to apply the enhanced instructions for the next AI response
 
 ### 3. Enhanced Context Injection Method
 
@@ -68,18 +74,21 @@ async def get_enhanced_instructions(self) -> str:
     self._cached_enhanced_instructions = context_text + "\n\n" + self._base_instructions
 ```
 
-### 4. Optional: before_llm_inference Hook
+### 4. Initial Greeting with Context
+
+For the initial greeting, we also use `update_instructions()`:
 
 ```python
-async def before_llm_inference(self, chat_ctx) -> None:
-    """
-    Hook called by AgentSession before each LLM inference.
-    This provides an additional hook point for context refresh.
-    """
-    await self.get_enhanced_instructions()
-```
+# Get context and prepare enhanced instructions
+enhanced_base = await assistant.get_enhanced_instructions()
+final_instructions = enhanced_base + "\n\n" + greeting_strategy + "\n\n" + stage_guidance
 
-This is an **optional safety hook** - if LiveKit's AgentSession supports this method, it will be called automatically before each LLM inference.
+# Update the agent's instructions
+assistant.update_instructions(final_instructions)
+
+# Generate greeting - uses the updated instructions
+await session.generate_reply()
+```
 
 ## Logging & Verification
 
@@ -301,12 +310,13 @@ logging.basicConfig(level=logging.DEBUG)
 
 ## Key Code Changes Summary
 
-1. **agent.py Line 170-282**: Store base instructions separately, initialize with dynamic property
-2. **agent.py Line 297-336**: Dynamic `instructions` property with caching
-3. **agent.py Line 664-737**: Enhanced `get_enhanced_instructions()` with logging and metrics
-4. **agent.py Line 739-776**: Updated `on_user_turn_completed()` to refresh context
-5. **agent.py Line 555-586**: New `getContextInjectionStats()` diagnostic tool
-6. **agent.py Line 1009-1022**: Updated entrypoint to use new pattern
+1. **agent.py Line 170-282**: Store base instructions separately (`_base_instructions`)
+2. **agent.py Line 652-700**: Enhanced `get_enhanced_instructions()` with logging and metrics
+3. **agent.py Line 702-803**: Updated `on_user_turn_completed()` to call `update_instructions()`
+4. **agent.py Line 516-543**: New `getContextInjectionStats()` diagnostic tool
+5. **agent.py Line 980-995**: Updated entrypoint to use `update_instructions()` pattern
+
+**Key Change**: Using `self.update_instructions(enhanced)` instead of property overrides - this is the official LiveKit API for dynamically updating agent instructions.
 
 ## Testing Checklist
 

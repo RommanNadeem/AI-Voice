@@ -295,46 +295,6 @@ This context appears in the "AUTOMATIC CONTEXT" section above. Use it naturally 
         self._context_injection_count = 0
         self._last_context_injection_time = 0
 
-    @property
-    def instructions(self) -> str:
-        """
-        Dynamic instructions property that automatically injects context before each LLM inference.
-        This is the key hook point that makes context injection work for every message.
-        
-        The property returns cached enhanced instructions that were prepared in on_user_turn_completed.
-        """
-        try:
-            user_id = get_current_user_id()
-            if not user_id:
-                logging.debug("[INSTRUCTIONS PROPERTY] No user_id, using base instructions")
-                return self._base_instructions
-            
-            # Check if we have cached enhanced instructions
-            if not hasattr(self, '_cached_enhanced_instructions'):
-                self._cached_enhanced_instructions = None
-                self._cache_timestamp = 0
-            
-            # Use cached enhanced instructions if available
-            if self._cached_enhanced_instructions:
-                import time
-                age = time.time() - self._cache_timestamp
-                logging.debug(f"[INSTRUCTIONS PROPERTY] Returning cached enhanced instructions (age: {age*1000:.1f}ms)")
-                return self._cached_enhanced_instructions
-            else:
-                logging.warning("[INSTRUCTIONS PROPERTY] No cached context available, using base instructions")
-                return self._base_instructions
-                
-        except Exception as e:
-            logging.error(f"[INSTRUCTIONS PROPERTY ERROR] {e}")
-            return self._base_instructions
-    
-    @instructions.setter
-    def instructions(self, value: str) -> None:
-        """
-        Setter for instructions property. Stores as base instructions.
-        """
-        logging.debug(f"[INSTRUCTIONS SETTER] Setting base instructions ({len(value)} chars)")
-        self._base_instructions = value
 
     @function_tool()
     async def storeInMemory(self, context: RunContext, category: str, key: str, value: str):
@@ -566,22 +526,18 @@ This context appears in the "AUTOMATIC CONTEXT" section above. Use it naturally 
         try:
             import time
             
-            has_cached = hasattr(self, '_cached_enhanced_instructions') and self._cached_enhanced_instructions is not None
-            cache_age = 0
-            if has_cached:
-                cache_age = time.time() - self._cache_timestamp
+            current_instructions = self.instructions
             
             return {
                 "injection_count": self._context_injection_count,
                 "last_injection_time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(self._last_context_injection_time)) if self._last_context_injection_time > 0 else "Never",
                 "seconds_since_last_injection": time.time() - self._last_context_injection_time if self._last_context_injection_time > 0 else -1,
-                "has_cached_context": has_cached,
-                "cache_age_ms": cache_age * 1000 if has_cached else -1,
                 "base_instructions_length": len(self._base_instructions),
-                "enhanced_instructions_length": len(self._cached_enhanced_instructions) if has_cached else 0,
-                "context_overhead_chars": len(self._cached_enhanced_instructions) - len(self._base_instructions) if has_cached else 0,
-                "status": "active" if has_cached else "no_cache",
-                "message": f"Context injected {self._context_injection_count} times. Cache: {'active' if has_cached else 'empty'}"
+                "current_instructions_length": len(current_instructions),
+                "context_overhead_chars": len(current_instructions) - len(self._base_instructions),
+                "has_context_injected": len(current_instructions) > len(self._base_instructions),
+                "status": "active" if self._context_injection_count > 0 else "not_started",
+                "message": f"Context injected {self._context_injection_count} times via update_instructions()"
             }
         except Exception as e:
             return {"message": f"Error: {e}", "status": "error"}
@@ -738,29 +694,6 @@ This context appears in the "AUTOMATIC CONTEXT" section above. Use it naturally 
         except Exception as e:
             logging.error(f"[CONTEXT INJECTION ERROR] {e}", exc_info=True)
             return self._base_instructions
-    
-    async def before_llm_inference(self, chat_ctx) -> None:
-        """
-        Hook called by AgentSession before each LLM inference.
-        This is the perfect place to refresh context for every message.
-        """
-        try:
-            user_id = get_current_user_id()
-            if not user_id:
-                logging.debug("[BEFORE_LLM_INFERENCE] No user_id, skipping context injection")
-                return
-            
-            logging.info("[BEFORE_LLM_INFERENCE] Preparing enhanced instructions...")
-            
-            # Fetch and cache enhanced instructions
-            enhanced = await self.get_enhanced_instructions()
-            
-            # Update the agent's instructions for this inference
-            # Note: AgentSession will read from the instructions property
-            logging.debug(f"[BEFORE_LLM_INFERENCE] ✓ Instructions prepared ({len(enhanced)} chars)")
-            
-        except Exception as e:
-            logging.error(f"[BEFORE_LLM_INFERENCE ERROR] {e}", exc_info=True)
 
     async def on_user_turn_completed(self, turn_ctx, new_message):
         """
@@ -793,8 +726,12 @@ This context appears in the "AUTOMATIC CONTEXT" section above. Use it naturally 
         # This ensures the AI has the latest context before generating a reply
         try:
             logging.info("[ON_USER_TURN] Refreshing context for next AI response...")
-            await self.get_enhanced_instructions()
-            logging.info("[ON_USER_TURN] ✓ Context refreshed and cached for next response")
+            enhanced = await self.get_enhanced_instructions()
+            
+            # Use update_instructions() to dynamically update the agent's instructions
+            self.update_instructions(enhanced)
+            
+            logging.info("[ON_USER_TURN] ✓ Context refreshed and instructions updated")
         except Exception as e:
             logging.error(f"[ON_USER_TURN CONTEXT ERROR] {e}")
 
@@ -964,7 +901,7 @@ async def entrypoint(ctx: agents.JobContext):
     participant = await wait_for_participant(ctx.room, target_identity=expected_identity, timeout_s=20)
     if not participant:
         print("[ENTRYPOINT] No participant joined within timeout; running without DB writes")
-        await session.generate_reply(instructions=assistant.instructions)
+        await session.generate_reply()
         return
 
     print(f"[ENTRYPOINT] Participant: sid={participant.sid}, identity={participant.identity}")
@@ -973,7 +910,7 @@ async def entrypoint(ctx: agents.JobContext):
     user_id = extract_uuid_from_identity(participant.identity)
     if not user_id:
         print("[ENTRYPOINT] Participant identity could not be parsed as UUID; skipping DB writes")
-        await session.generate_reply(instructions=assistant.instructions)
+        await session.generate_reply()
         return
 
     # Set current user
@@ -1047,13 +984,15 @@ async def entrypoint(ctx: agents.JobContext):
     # Combine: Enhanced Instructions (with context) + Greeting Strategy + Stage Guidance
     final_instructions = enhanced_base + "\n\n" + first_message_instructions + "\n\n" + stage_guidance
     
+    # Update the agent's instructions with context-enhanced version
+    assistant.update_instructions(final_instructions)
+    
     cache_stats = assistant.conversation_context_service.get_stats()
     logging.info(f"[GREETING] ✓ Context injected (cache hit rate: {cache_stats['hit_rate']})")
     logging.info(f"[GREETING] Strategy ready, generating response...")
     
-    # For the first message, we pass explicit instructions
-    # For subsequent messages, the instructions property will be used automatically
-    await session.generate_reply(instructions=final_instructions)
+    # Generate the greeting - the updated instructions will be used
+    await session.generate_reply()
 
 
 async def shutdown_handler():
