@@ -374,6 +374,68 @@ For every message you generate:
             print(f"[DEBUG][RAG] Exception details: {type(e).__name__}: {str(e)}")
             return {"memories": [], "message": f"Error: {e}"}
 
+    @function_tool()
+    async def getUserState(self, context: RunContext):
+        """Get current conversation state and trust score"""
+        print(f"[TOOL] 📊 getUserState called")
+        user_id = get_current_user_id()
+        
+        if not user_id:
+            print(f"[TOOL] ⚠️  No active user")
+            return {"message": "No active user"}
+        
+        try:
+            state = await self.conversation_state_service.get_state(user_id)
+            print(f"[TOOL] ✅ State retrieved: Stage={state['stage']}, Trust={state['trust_score']:.1f}")
+            
+            return {
+                "stage": state["stage"],
+                "trust_score": state["trust_score"],
+                "last_updated": state.get("last_updated"),
+                "metadata": state.get("metadata", {}),
+                "stage_history": state.get("stage_history", []),
+                "message": f"Current stage: {state['stage']}, Trust: {state['trust_score']:.1f}/10"
+            }
+        except Exception as e:
+            print(f"[TOOL] ❌ Error: {e}")
+            return {"message": f"Error: {e}"}
+
+    @function_tool()
+    async def updateUserState(self, context: RunContext, stage: str = None, trust_score: float = None):
+        """Update conversation state and trust score"""
+        print(f"[TOOL] 📊 updateUserState called: stage={stage}, trust_score={trust_score}")
+        user_id = get_current_user_id()
+        
+        if not user_id:
+            print(f"[TOOL] ⚠️  No active user")
+            return {"message": "No active user"}
+        
+        try:
+            success = await self.conversation_state_service.update_state(
+                stage=stage,
+                trust_score=trust_score,
+                user_id=user_id
+            )
+            
+            if success:
+                # Get updated state
+                new_state = await self.conversation_state_service.get_state(user_id)
+                print(f"[TOOL] ✅ State updated: Stage={new_state['stage']}, Trust={new_state['trust_score']:.1f}")
+                
+                return {
+                    "success": True,
+                    "stage": new_state["stage"],
+                    "trust_score": new_state["trust_score"],
+                    "message": f"Updated to stage: {new_state['stage']}, Trust: {new_state['trust_score']:.1f}/10"
+                }
+            else:
+                print(f"[TOOL] ❌ State update failed")
+                return {"success": False, "message": "Failed to update state"}
+                
+        except Exception as e:
+            print(f"[TOOL] ❌ Error: {e}")
+            return {"success": False, "message": f"Error: {e}"}
+
 
     async def generate_reply_with_context(self, session, user_text: str = None, greet: bool = False):
         """
@@ -394,10 +456,12 @@ For every message you generate:
 
             profile_task = self.profile_service.get_profile_async(user_id)
             context_task = self.conversation_context_service.get_context(user_id)
+            state_task = self.conversation_state_service.get_state(user_id)
 
-            profile, context_data = await asyncio.gather(
+            profile, context_data, conversation_state = await asyncio.gather(
                 profile_task,
                 context_task,
+                state_task,
                 return_exceptions=True
             )
 
@@ -426,6 +490,13 @@ For every message you generate:
                 print(f"[DEBUG][CONTEXT] No profile available")
             else:
                 print(f"[DEBUG][CONTEXT] Profile fetched: {len(profile)} chars")
+
+            # Process conversation state
+            if isinstance(conversation_state, Exception) or not conversation_state:
+                conversation_state = {"stage": "ORIENTATION", "trust_score": 2.0}
+                print(f"[DEBUG][CONTEXT] Using default conversation state")
+            else:
+                print(f"[DEBUG][CONTEXT] Conversation state: Stage={conversation_state['stage']}, Trust={conversation_state['trust_score']:.1f}")
 
             print(f"[DEBUG][MEMORY] Querying memory table by categories...")
             memories_by_category = {}
@@ -458,6 +529,10 @@ For every message you generate:
     👤 USER'S NAME: {user_name if user_name else "NOT YET KNOWN - ASK NATURALLY"}
        ⚠️  {'ALWAYS address them as: ' + user_name if user_name else 'Must ask for their name in conversation'}
 
+    📊 CONVERSATION STATE:
+    - Stage: {conversation_state['stage']} (Trust: {conversation_state['trust_score']:.1f}/10)
+    - Guidance: {self.conversation_state_service.get_stage_guidance(conversation_state['stage']).split('**Goal**:')[1].split('**Approach**:')[0].strip() if conversation_state else 'Build safety and comfort'}
+
     📋 USER PROFILE:
     {profile[:800] if profile and len(profile) > 800 else profile if profile else "(Profile not available yet - will be built from conversation)"}
 
@@ -469,6 +544,7 @@ For every message you generate:
     ✅ Reference profile/memories naturally in your response
     ✅ Show you remember previous conversations
     ✅ Connect what they say to what you know about them
+    ✅ Match conversation depth to current stage and trust level
     ❌ DO NOT ask for information already listed above
     ❌ DO NOT ignore this context - it defines who they are!
     ❌ DO NOT say "I don't know about you" when context exists above
@@ -599,6 +675,23 @@ For every message you generate:
                 if generated_profile and generated_profile != existing_profile:
                     await self.profile_service.save_profile_async(generated_profile, user_id)
                     logging.info(f"[PROFILE] ✅ Updated")
+            
+            # Update conversation state automatically
+            try:
+                state_update_result = await self.conversation_state_service.auto_update_from_interaction(
+                    user_input=user_text,
+                    user_profile=existing_profile or "",
+                    user_id=user_id
+                )
+                
+                if state_update_result.get("action_taken") != "none":
+                    logging.info(f"[STATE] ✅ Updated: {state_update_result['action_taken']}")
+                    if state_update_result.get("action_taken") == "stage_transition":
+                        old_stage = state_update_result["old_state"]["stage"]
+                        new_stage = state_update_result["new_state"]["stage"]
+                        logging.info(f"[STATE] 🎯 Stage transition: {old_stage} → {new_stage}")
+            except Exception as e:
+                logging.error(f"[STATE] Background update failed: {e}")
             
             logging.info(f"[BACKGROUND] ✅ Complete")
             
