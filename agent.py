@@ -277,7 +277,7 @@ For every message you generate:
 1. Start with a short emotional beat.  
 2. Add one line of value (tiny opinion, reflection nudge, micro-story, or playful tease).  
 3. End with **one open-ended question** — sometimes casual, sometimes reflective.
-4. Make sure your response is in "Urdu", and not any other langauge like Hindi. 
+4. Make sure your response is in "Urdu".
 
 
 """
