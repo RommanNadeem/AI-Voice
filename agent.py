@@ -645,321 +645,97 @@ This context appears in the "AUTOMATIC CONTEXT" section above. Use it naturally 
             return {"message": f"Error: {e}"}
 
     async def get_enhanced_instructions(self) -> str:
-        """
-        Get assistant instructions enhanced with automatic conversation context.
-        OPTIMIZED: Uses aggressive caching and selective updates.
-        
-        Enhanced Features:
-        - Profile with name and pronouns
-        - RAG-based relevant memory retrieval
-        - Conversation state (stage, trust score)
-        - Recent context from database
-        
-        Returns:
-            Enhanced instructions with injected context
-        """
+        """Simplified context injection - 40 lines max"""
         user_id = get_current_user_id()
         if not user_id:
-            logging.debug("[CONTEXT INJECTION] No user_id in get_enhanced_instructions")
             return self._base_instructions
         
         try:
-            start_time = time.time()
+            # Skip if <5s since last message (rapid messages)
+            if hasattr(self, '_last_user_message_time'):
+                time_since_last = time.time() - self._last_user_message_time
+                if time_since_last < 5.0:
+                    logging.info(f"[CONTEXT] Skipping rapid message ({time_since_last:.1f}s)")
+                    return self._cached_enhanced_instructions if hasattr(self, '_cached_enhanced_instructions') else self._base_instructions
             
-            # Track injection count
-            self._context_injection_count += 1
-            self._last_context_injection_time = start_time
+            # Fetch context in parallel
+            context, rag_memories, profile = await asyncio.gather(
+                self.conversation_context_service.get_context(user_id),
+                self._get_rag_memories(user_id),
+                self.profile_service.get_profile_async(user_id),
+                return_exceptions=True
+            )
             
-            logging.info(f"[CONTEXT INJECTION #{self._context_injection_count}] 🔄 Fetching enhanced context for user {user_id[:8]}...")
+            # Build context sections
+            sections = []
             
-            # OPTIMIZATION: Check if we have very recent cached instructions
-            if hasattr(self, '_cached_enhanced_instructions') and hasattr(self, '_cache_timestamp'):
-                cache_age = time.time() - self._cache_timestamp
-                # If cache is less than 2 seconds old, reuse it (within same conversation turn)
-                if cache_age < 2.0:
-                    logging.debug(f"[CONTEXT INJECTION] Using very recent cache ({cache_age*1000:.0f}ms old)")
-                    return self._cached_enhanced_instructions
+            if context.get("user_name"):
+                sections.append(f"**Name**: {context['user_name']}")
             
-            # Fetch all context components in parallel
-            tasks = [
-                self.conversation_context_service.get_context(user_id),  # Standard context
-                self._get_rag_memories(user_id),  # RAG-based relevant memories
-                self.profile_service.get_profile_async(user_id),  # Profile
-            ]
+            if profile and not isinstance(profile, Exception):
+                sections.append(f"**Profile**: {profile[:200]}")
             
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            
-            # Unpack results
-            context = results[0] if not isinstance(results[0], Exception) else {}
-            rag_memories = results[1] if not isinstance(results[1], Exception) else []
-            profile_text = results[2] if not isinstance(results[2], Exception) else ""
-            
-            # Build enhanced context sections
-            context_parts = []
-            
-            # --- SECTION 1: USER IDENTITY ---
-            identity_parts = []
-            
-            # Name
-            user_name = context.get("user_name")
-            if user_name:
-                identity_parts.append(f"**Name**: {user_name}")
-            
-            # Pronouns (from memory or profile)
-            pronouns = await self._get_user_pronouns(user_id, context)
-            if pronouns:
-                identity_parts.append(f"**Pronouns**: {pronouns}")
-            
-            if identity_parts:
-                context_parts.append("## User Identity\n" + "\n".join(identity_parts) + "\n")
-            
-            # --- SECTION 2: USER PROFILE ---
-            if profile_text:
-                context_parts.append(f"## User Profile\n{profile_text}\n")
-            
-            # --- SECTION 3: CONVERSATION STATE ---
-            state = context.get("conversation_state", {})
+            state = context.get("conversation_state", {}) if not isinstance(context, Exception) else {}
             if state:
-                stage = state.get("stage", "ORIENTATION")
-                trust = state.get("trust_score", 5.0)
-                context_parts.append(f"## Current Stage\n**Stage**: {stage} | **Trust Level**: {trust:.1f}/10\n")
+                sections.append(f"**Stage**: {state.get('stage', 'ORIENTATION')} | **Trust**: {state.get('trust_score', 5):.1f}/10")
             
-            # --- SECTION 4: RELEVANT MEMORIES (RAG) ---
-            if rag_memories:
-                memory_lines = []
-                for mem in rag_memories[:10]:  # Top 10 relevant
-                    text = mem.get("text", "")
-                    category = mem.get("category", "")
-                    relevance = mem.get("relevance_score", mem.get("similarity", 0))
-                    memory_lines.append(f"- [{category}] {text[:200]} (relevance: {relevance:.2f})")
-                
-                if memory_lines:
-                    context_parts.append("## Relevant Memories (RAG)\n" + "\n".join(memory_lines) + "\n")
+            if rag_memories and not isinstance(rag_memories, Exception):
+                mem_text = "\n".join([f"- {m.get('text', '')[:150]}" for m in rag_memories[:5]])
+                sections.append(f"**Recent Memories**:\n{mem_text}")
             
-            # --- SECTION 5: RECENT CONTEXT (from standard context service) ---
-            recent_memories = context.get("recent_memories", [])
-            if recent_memories:
-                memory_lines = []
-                for mem in recent_memories[:5]:
-                    category = mem.get("category", "")
-                    value = mem.get("value", "")
-                    memory_lines.append(f"- [{category}] {value[:150]}")
-                
-                if memory_lines:
-                    context_parts.append("## Recent Context\n" + "\n".join(memory_lines) + "\n")
-            
-            # --- SECTION 6: LAST CONVERSATION ---
-            last_conv = context.get("last_conversation", {})
-            if last_conv.get("has_history"):
-                hours = last_conv.get("time_since_last_hours", 999)
-                if hours < 24:
-                    context_parts.append(f"## Conversation Continuity\nLast interaction: {hours:.1f} hours ago\n")
-            
-            # --- SECTION 7: USER GOALS (from onboarding) ---
-            onboarding = context.get("onboarding_data", {})
-            if onboarding:
-                goals = onboarding.get("goals", "")
-                if goals:
-                    context_parts.append(f"## User Goals\n{goals}\n")
-            
-            # Combine all sections
-            if context_parts:
-                context_text = "# AUTOMATIC CONTEXT (Updated Each Message)\n\n" + "\n".join(context_parts)
-            else:
-                context_text = ""
-            
-            elapsed = time.time() - start_time
-            
-            if context_text:
-                # IMPORTANT: Keep _base_instructions LAST
-                enhanced = context_text + "\n\n---\n\n" + self._base_instructions
-                
-                # OPTIMIZATION: Cache the enhanced instructions with timestamp
+            # Combine and cache
+            if sections:
+                context_text = "# CONTEXT\n" + "\n\n".join(sections) + "\n\n---\n\n"
+                enhanced = context_text + self._base_instructions
                 self._cached_enhanced_instructions = enhanced
                 self._cache_timestamp = time.time()
-                
-                # Log success with metrics
-                cache_stats = self.conversation_context_service.get_stats()
-                logging.info(f"[CONTEXT INJECTION #{self._context_injection_count}] ✅ Enhanced context injected in {elapsed*1000:.1f}ms (cache hit rate: {cache_stats['hit_rate']})")
-                logging.debug(f"[CONTEXT DETAILS] RAG memories: {len(rag_memories)}, Recent memories: {len(recent_memories)}, Profile: {bool(profile_text)}")
-                logging.debug(f"[CONTEXT SIZE] Base: {len(self._base_instructions)} chars, Enhanced: {len(enhanced)} chars, Overhead: {len(enhanced) - len(self._base_instructions)} chars")
-                
                 return enhanced
-            else:
-                logging.warning(f"[CONTEXT INJECTION #{self._context_injection_count}] ⚠️  No context available, using base instructions")
-                return self._base_instructions
-                
+            
+            return self._base_instructions
         except Exception as e:
-            logging.error(f"[CONTEXT INJECTION ERROR] {e}", exc_info=True)
+            logging.error(f"[CONTEXT ERROR] {e}")
             return self._base_instructions
     
     async def _get_rag_memories(self, user_id: str) -> list:
-        """
-        Get relevant memories using RAG semantic search.
-        OPTIMIZED: Uses timeout and caches results.
-        """
+        """Simplified RAG search - 10 lines max"""
         try:
-            logging.debug(f"[RAG] 🔍 Searching for relevant memories...")
             rag_service = RAGService(user_id)
-            
-            # Use a broad query to get contextually relevant memories
-            # We'll use the last few conversation turns as context
-            query = "user's important information, preferences, and recent topics"
-            
-            # OPTIMIZATION: Add timeout to prevent slow searches from blocking
-            # Search using advanced RAG features with timeout
-            memories = await asyncio.wait_for(
-                rag_service.search_memories(
-                    query=query,
-                    top_k=10,
-                    use_advanced_features=True
-                ),
-                timeout=1.5  # Max 1.5 seconds for RAG search
+            return await asyncio.wait_for(
+                rag_service.search_memories("user information and preferences", top_k=5),
+                timeout=1.0
             )
-            
-            if memories:
-                logging.debug(f"[RAG] ✅ Retrieved {len(memories)} relevant memories")
-                # Log top 3 memories for debugging
-                for i, mem in enumerate(memories[:3], 1):
-                    logging.debug(f"[RAG #{i}] {mem.get('category', 'N/A')}: {mem.get('text', '')[:50]}... (score: {mem.get('final_score', 0):.3f})")
-            else:
-                logging.debug(f"[RAG] ℹ️  No memories found yet")
-            
-            return memories
-            
-        except asyncio.TimeoutError:
-            logging.warning(f"[RAG] ⚠️  Search timeout (>1.5s), returning empty")
-            return []
-        except Exception as e:
-            logging.error(f"[RAG RETRIEVAL ERROR] {e}", exc_info=True)
+        except:
             return []
     
-    async def _get_user_pronouns(self, user_id: str, context: dict) -> Optional[str]:
-        """
-        Get user's pronouns from memory or inferred from gender detection.
-        """
-        try:
-            # Check if pronouns are explicitly stored in memory
-            recent_memories = context.get("recent_memories", [])
-            for mem in recent_memories:
-                key = mem.get("key", "").lower()
-                if "pronoun" in key:
-                    return mem.get("value", "")
-            
-            # Check if gender info is available
-            for mem in recent_memories:
-                key = mem.get("key", "").lower()
-                value = mem.get("value", "").lower()
-                if "gender" in key:
-                    # Map gender to pronouns
-                    if "male" in value:
-                        return "he/him"
-                    elif "female" in value:
-                        return "she/her"
-            
-            # Try to get from Redis cache (from previous gender detection)
-            try:
-                redis_cache = await get_redis_cache()
-                cache_key = f"user:{user_id}:gender_detection"
-                cached_gender = await redis_cache.get(cache_key)
-                
-                if cached_gender and isinstance(cached_gender, dict):
-                    pronouns = cached_gender.get("pronouns")
-                    if pronouns:
-                        logging.debug(f"[PRONOUNS] Found from cache: {pronouns}")
-                        return pronouns
-            except Exception as e:
-                logging.debug(f"[PRONOUNS] Cache check failed: {e}")
-            
-            return None
-            
-        except Exception as e:
-            logging.error(f"[PRONOUNS ERROR] {e}")
-            return None
-    
-    async def _invalidate_context_cache(self, user_id: str):
-        """
-        Invalidate context cache after user input.
-        This ensures fresh data is loaded on next context fetch.
-        """
-        try:
-            # Invalidate conversation context service cache
-            await self.conversation_context_service.invalidate_cache(user_id)
-            
-            # Clear local cache timestamp to force refresh
-            self._cache_timestamp = 0
-            
-            logging.debug(f"[CACHE] Context cache invalidated for user {user_id[:8]}")
-        except Exception as e:
-            logging.error(f"[CACHE INVALIDATION ERROR] {e}")
-
     async def on_agent_turn_started(self):
-        """
-        OFFICIAL LIVEKIT HOOK: Called automatically before every agent response.
-        Refreshes context to ensure the AI has the latest information.
-        
-        This hook ensures that:
-        1. Context is fresh before EVERY AI response (not just the first one)
-        2. Profile, memories, and state are up-to-date
-        3. Cache is properly invalidated and refreshed
-        4. All context changes are logged for debugging
-        """
+        """Simplified context refresh hook"""
         user_id = get_current_user_id()
         if not user_id:
-            logging.debug("[ON_AGENT_TURN] No user_id, skipping context refresh")
             return
         
         try:
-            logging.info(f"[ON_AGENT_TURN #{self._context_injection_count + 1}] 🔄 Refreshing context before AI response...")
-            start_time = time.time()
-            
-            # Get enhanced instructions with fresh context
             enhanced = await self.get_enhanced_instructions()
-            
-            # Update instructions before LLM processes the message
             self.update_instructions(enhanced)
-            
-            elapsed = (time.time() - start_time) * 1000
-            logging.info(f"[ON_AGENT_TURN #{self._context_injection_count}] ✓ Context refreshed in {elapsed:.1f}ms")
         except Exception as e:
-            logging.error(f"[ON_AGENT_TURN ERROR] {e}", exc_info=True)
+            logging.error(f"[CONTEXT] {e}")
     
     async def on_user_turn_completed(self, turn_ctx, new_message):
-        """
-        Called after user completes their turn.
-        Handles background processing and cache invalidation.
-        
-        IMPORTANT: Context refresh happens in on_agent_turn_started() hook.
-        This method handles:
-        - User input logging
-        - RAG conversation context update
-        - Cache invalidation after user input
-        - Background memory processing (zero-latency)
-        """
+        """Simplified user input handling"""
         user_text = new_message.text_content or ""
-        logging.info(f"[USER INPUT] 💬 {user_text[:100]}{'...' if len(user_text) > 100 else ''}")
+        logging.info(f"[USER] {user_text[:80]}")
 
         if not can_write_for_current_user():
-            logging.debug("[AUTO PROCESSING] Skipped (no valid user_id or no DB)")
             return
         
-        # Update conversation context for better retrieval
-        try:
-            user_id = get_current_user_id()
-            rag_service = RAGService(user_id)
-            rag_service.update_conversation_context(user_text)
-            logging.debug(f"[CONTEXT UPDATE] ✓ RAG context updated with user input")
-        except Exception as e:
-            logging.error(f"[CONTEXT UPDATE ERROR] {e}")
+        user_id = get_current_user_id()
         
-        # Invalidate context cache after user input
-        try:
-            await self._invalidate_context_cache(user_id)
-            logging.debug(f"[CACHE INVALIDATION] ✓ Context cache invalidated after user input")
-        except Exception as e:
-            logging.error(f"[CACHE INVALIDATION ERROR] {e}")
-
-        # Fire-and-forget background processing (zero latency impact)
+        # Track message timing for rapid message skip logic
+        self._last_user_message_time = time.time()
+        
+        # Clear cache to force refresh
+        self._cache_timestamp = 0
+        
+        # Background processing
         asyncio.create_task(self._process_with_rag_background(user_text))
     
     async def _process_with_rag_background(self, user_text: str):
