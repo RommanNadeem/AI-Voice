@@ -8,8 +8,10 @@ import os
 import logging
 import time
 import asyncio
+import threading
 from typing import Optional
 from contextlib import asynccontextmanager
+from aiohttp import web
 
 from supabase import create_client, Client
 from livekit import agents, rtc
@@ -1163,6 +1165,44 @@ async def entrypoint(ctx: agents.JobContext):
         print("[ENTRYPOINT] ✓ Entrypoint finished")
 
 
+def start_health_check_server():
+    """
+    Start HTTP server for platform health checks.
+    Railway and other platforms need HTTP endpoints to verify the service is alive.
+    """
+    async def health(request):
+        return web.Response(text="OK\n", status=200)
+    
+    async def run_server():
+        app = web.Application()
+        app.router.add_get('/health', health)
+        app.router.add_get('/', health)
+        
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, '0.0.0.0', 8080)
+        await site.start()
+        print("[HEALTH] ✓ HTTP health check server running on port 8080")
+        print("[HEALTH] Endpoints: GET / and GET /health")
+        
+        # Keep server running indefinitely
+        while True:
+            await asyncio.sleep(3600)
+    
+    # Run server in background thread
+    def thread_target():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(run_server())
+        except Exception as e:
+            print(f"[HEALTH] ❌ Health check server error: {e}")
+    
+    thread = threading.Thread(target=thread_target, daemon=True, name="HealthCheckServer")
+    thread.start()
+    print("[HEALTH] Background health check thread started")
+
+
 async def shutdown_handler():
     """Gracefully shutdown connections and cleanup resources"""
     print("[SHUTDOWN] Initiating graceful shutdown...")
@@ -1187,6 +1227,17 @@ async def shutdown_handler():
 
 
 if __name__ == "__main__":
+    print("="*80)
+    print("🚀 Starting Companion Agent")
+    print("="*80)
+    
+    # Start health check HTTP server for Railway/platform health checks
+    start_health_check_server()
+    
+    # Give health server a moment to start
+    time.sleep(0.5)
+    
+    print("[MAIN] Starting LiveKit agent worker...")
     agents.cli.run_app(agents.WorkerOptions(
         entrypoint_fnc=entrypoint,
         initialize_process_timeout=60,
