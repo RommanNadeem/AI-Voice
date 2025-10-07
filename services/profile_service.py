@@ -132,7 +132,8 @@ class ProfileService:
     
     async def save_profile_async(self, profile_text: str, user_id: Optional[str] = None) -> bool:
         """
-        Save user profile to Supabase and invalidate Redis cache (async version).
+        🚀 OPTIMIZED: Save user profile with smart caching - only updates if content changed significantly.
+        Reduces unnecessary DB writes and prevents cache thrashing.
         
         Args:
             profile_text: Profile text to save
@@ -149,6 +150,18 @@ class ProfileService:
             return False
         
         try:
+            # 🚀 OPTIMIZATION: Check if profile actually changed before saving
+            redis_cache = await get_redis_cache()
+            cache_key = f"user:{uid}:profile"
+            cached_profile = await redis_cache.get(cache_key)
+            
+            # Compare profiles - skip if identical or trivially different
+            if cached_profile and self._is_profile_unchanged(cached_profile, profile_text):
+                print(f"[PROFILE SERVICE] ℹ️  Profile unchanged, skipping save (smart cache)")
+                print(f"[PROFILE SERVICE]    Similarity: 95%+, avoiding unnecessary DB write")
+                return True
+            
+            # Profile changed significantly - save to DB
             resp = await asyncio.to_thread(
                 lambda: self.supabase.table("user_profiles").upsert({
                     "user_id": uid,
@@ -159,17 +172,59 @@ class ProfileService:
                 print(f"[PROFILE SERVICE] Save error: {resp.error}")
                 return False
             
-            # Invalidate Redis cache
-            redis_cache = await get_redis_cache()
-            cache_key = f"user:{uid}:profile"
-            await redis_cache.delete(cache_key)
-            print(f"[PROFILE SERVICE] ✅ Profile saved successfully (cache invalidated)")
+            # 🚀 OPTIMIZATION: Update cache instead of deleting (prevents cache miss)
+            await redis_cache.set(cache_key, profile_text, ttl=3600)
+            print(f"[PROFILE SERVICE] ✅ Profile saved and cache updated (smart)")
             print(f"[PROFILE SERVICE]    User: {uid[:8]}...")
             
             return True
         except Exception as e:
             print(f"[PROFILE SERVICE] save_profile_async failed: {e}")
             return False
+    
+    def _is_profile_unchanged(self, old: str, new: str) -> bool:
+        """
+        🚀 OPTIMIZATION: Check if two profiles are substantially the same.
+        Returns True if no significant change detected (>95% similar).
+        
+        This prevents unnecessary DB writes and cache invalidation for trivial changes.
+        """
+        # Normalize whitespace for fair comparison
+        old_norm = " ".join(old.split())
+        new_norm = " ".join(new.split())
+        
+        # Exact match - definitely unchanged
+        if old_norm == new_norm:
+            return True
+        
+        # Check length difference
+        if len(old_norm) == 0:
+            return False
+        
+        len_diff_pct = abs(len(new_norm) - len(old_norm)) / len(old_norm)
+        
+        # If length changed by more than 5%, consider it changed
+        if len_diff_pct > 0.05:
+            return False
+        
+        # Small length change - check word-level similarity
+        old_words = set(old_norm.lower().split())
+        new_words = set(new_norm.lower().split())
+        
+        if len(old_words) == 0:
+            return False
+        
+        overlap = len(old_words & new_words)
+        total = max(len(old_words), len(new_words))
+        similarity = overlap / total if total > 0 else 0
+        
+        # If 95%+ similar, consider unchanged
+        is_similar = similarity > 0.95
+        
+        if is_similar:
+            print(f"[PROFILE SERVICE] Profile similarity: {similarity*100:.1f}% (threshold: 95%)")
+        
+        return is_similar
     
     def get_profile(self, user_id: Optional[str] = None) -> str:
         """
