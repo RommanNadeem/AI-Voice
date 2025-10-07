@@ -62,14 +62,12 @@ class OnboardingService:
             profile_service = ProfileService(self.supabase)
             memory_service = MemoryService(self.supabase)
             
-            # Detect gender from name for appropriate pronoun usage
+            # Detect gender from name for appropriate pronoun usage (will be stored with other memories)
+            gender_info = None
             if full_name:
                 try:
                     gender_info = await profile_service.detect_gender_from_name(full_name, user_id)
                     print(f"[ONBOARDING SERVICE] Gender detected: {gender_info['gender']} ({gender_info['pronouns']})")
-                    # Store gender preference as a memory
-                    memory_service.save_memory("PREFERENCE", "pronouns", gender_info['pronouns'], user_id)
-                    memory_service.save_memory("FACT", "gender", gender_info['gender'], user_id)
                 except Exception as e:
                     print(f"[ONBOARDING SERVICE] Gender detection failed: {e}")
             
@@ -102,19 +100,29 @@ class OnboardingService:
             # Add memories for each onboarding field
             if not has_memories:
                 memories_added = 0
+                rag = get_or_create_rag(user_id, Config.OPENAI_API_KEY)
                 
                 if full_name:
+                    # Store name
                     if memory_service.save_memory("FACT", "full_name", full_name, user_id):
                         memories_added += 1
-                        # Also add to RAG
-                        rag = get_or_create_rag(user_id, Config.OPENAI_API_KEY)
                         rag.add_memory_background(f"User's name is {full_name}", "FACT")
+                    
+                    # Store detected gender and pronouns
+                    if gender_info:
+                        if memory_service.save_memory("FACT", "gender", gender_info['gender'], user_id):
+                            memories_added += 1
+                            rag.add_memory_background(f"User's gender is {gender_info['gender']}", "FACT")
+                        
+                        if memory_service.save_memory("PREFERENCE", "pronouns", gender_info['pronouns'], user_id):
+                            memories_added += 1
+                            rag.add_memory_background(f"Use {gender_info['pronouns']} pronouns for user", "PREFERENCE")
+                        
+                        print(f"[ONBOARDING SERVICE] ✓ Stored gender: {gender_info['gender']} ({gender_info['pronouns']})")
                 
                 if occupation:
                     if memory_service.save_memory("FACT", "occupation", occupation, user_id):
                         memories_added += 1
-                        # Also add to RAG
-                        rag = get_or_create_rag(user_id, Config.OPENAI_API_KEY)
                         rag.add_memory_background(f"User works as {occupation}", "FACT")
                 
                 if interests:
@@ -128,7 +136,6 @@ class OnboardingService:
                             memories_added += 1
                         
                         # Add each interest to RAG for better semantic search
-                        rag = get_or_create_rag(user_id, Config.OPENAI_API_KEY)
                         for interest in interest_list:
                             rag.add_memory_background(f"User is interested in {interest}", "INTEREST")
                 
