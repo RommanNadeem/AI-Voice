@@ -522,9 +522,10 @@ async def entrypoint(ctx: agents.JobContext):
     except Exception as e:
         print(f"[RAG] Warning: {e}")
     
-    # Load remaining memories in background
-    asyncio.create_task(rag_service.load_from_database(supabase, limit=450, offset=50))
-    print(f"[RAG] 🔄 Loading remaining memories in background")
+    # Load remaining memories in background (no offset support, so load all 500)
+    # Note: This will re-load the first 50, but FAISS will deduplicate
+    asyncio.create_task(rag_service.load_from_database(supabase, limit=500))
+    print(f"[RAG] 🔄 Loading all 500 memories in background (includes top 50)")
 
     # Prefetch user data
     try:
