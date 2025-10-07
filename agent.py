@@ -568,41 +568,37 @@ For every message you generate:
             print(f"[DEBUG][MEMORY] Total categories: {len(memories_by_category)}")
 
 
+            # Build compact memory summary (reduce prompt size for faster LLM response)
             mem_sections = []
             if memories_by_category:
-                for category, values in memories_by_category.items():
-                    if values:
-                        mem_list = "\n".join([f"    • {(v or '')[:150]}" for v in values[:3]])
-                        mem_sections.append(f"  {category}:\n{mem_list}")
+                # Prioritize most important categories
+                priority_cats = ['FACT', 'INTEREST', 'GOAL', 'RELATIONSHIP']
+                for category in priority_cats:
+                    if category in memories_by_category:
+                        values = memories_by_category[category]
+                        if values:
+                            # Limit to 2 memories per category, 100 chars each
+                            mem_list = "\n".join([f"    • {(v or '')[:100]}" for v in values[:2]])
+                            mem_sections.append(f"  {category}:\n{mem_list}")
 
-            categorized_mems = "\n\n".join(mem_sections) if mem_sections else "  (No prior memories retrieved)"
+            categorized_mems = "\n".join(mem_sections) if mem_sections else "  (No prior memories)"
 
+            # Compact context block (reduce prompt size to prevent timeouts)
             context_block = f"""
-    🔴 CRITICAL: YOU MUST USE THIS EXISTING INFORMATION
+    🎯 CONTEXT (Use this info naturally):
 
-    👤 USER'S NAME: {user_name if user_name else "NOT YET KNOWN - ASK NATURALLY"}
-       ⚠️  {'ALWAYS address them as: ' + user_name if user_name else 'Must ask for their name in conversation'}
+    Name: {user_name or "Unknown - ask naturally"}
+    Stage: {conversation_state['stage']} (Trust: {conversation_state['trust_score']:.1f}/10)
+    
+    Profile: {profile[:400] if profile and len(profile) > 400 else profile if profile else "(Building from conversation)"}
 
-    📊 CONVERSATION STATE:
-    - Stage: {conversation_state['stage']} (Trust: {conversation_state['trust_score']:.1f}/10)
-    - Guidance: {self.conversation_state_service.get_stage_guidance(conversation_state['stage']).split('**Goal**:')[1].split('**Approach**:')[0].strip() if conversation_state else 'Build safety and comfort'}
-
-    📋 USER PROFILE:
-    {profile[:800] if profile and len(profile) > 800 else profile if profile else "(Profile not available yet - will be built from conversation)"}
-
-    🧠 WHAT YOU ALREADY KNOW ABOUT {'THIS USER' if not user_name else user_name.upper()}:
+    Key Memories:
     {categorized_mems}
 
-    ⚠️  MANDATORY RULES FOR USING THIS CONTEXT:
-    ✅ USE their name when greeting or responding (if known)
-    ✅ Reference profile/memories naturally in your response
-    ✅ Show you remember previous conversations
-    ✅ Connect what they say to what you know about them
-    ✅ Match conversation depth to current stage and trust level
-    ❌ DO NOT ask for information already listed above
-    ❌ DO NOT ignore this context - it defines who they are!
-    ❌ DO NOT say "I don't know about you" when context exists above
-
+    Rules:
+    ✅ Use their name if known
+    ✅ Reference memories naturally
+    ❌ Don't ask for info already shown above
     """
 
 
@@ -616,22 +612,14 @@ For every message you generate:
             )
 
             if greet:
+                # Compact greeting prompt (reduce size for faster response)
                 full_instructions = f"""{base}
 
     {context_block}
 
-    🎯 YOUR TASK: Generate FIRST GREETING in Urdu
-
-    REQUIREMENTS:
-    1. {'Use their name: ' + user_name if user_name else 'Greet warmly (name not yet known)'}
-    2. {callout_2}
-    3. Keep it warm, natural, and personal
-    4. Use simple spoken Urdu (2 short sentences)
-
-    {'Example: "السلام علیکم ' + user_name + '! کیسی ہیں؟ [mention something from context]"' if user_name 
-    else 'Example: "السلام علیکم! آج کیسے ہیں آپ؟"'}
-
-    Generate greeting NOW incorporating the context shown above:
+    Task: First greeting in Urdu (2 short sentences)
+    {'Use name: ' + user_name if user_name else 'Greet warmly'}
+    {callout_2}
     """
                 print(f"[DEBUG][PROMPT] Greeting prompt length: {len(full_instructions)} chars")
                 print(f"[DEBUG][PROMPT] Context block length: {len(context_block)} chars")
@@ -642,22 +630,16 @@ For every message you generate:
                 await session.generate_reply(instructions=full_instructions)
 
             else:
+                # Compact response prompt (reduce size for faster response)
                 full_instructions = f"""{base}
 
     {context_block}
 
-    🎯 YOUR TASK: Respond to user's message in Urdu
-
     User said: "{user_text}"
 
-    REQUIREMENTS:
-    1. {'Address them by name: ' + user_name if user_name else 'Respond warmly'}
-    2. Consider their profile and memories when responding
-    3. Reference relevant context naturally if applicable
-    4. Connect their message to what you know about them
-    5. Respond in natural spoken Urdu (2-3 short sentences)
-
-    Generate response NOW using the context shown above:
+    Task: Respond in Urdu (2-3 sentences)
+    {'Use name: ' + user_name if user_name else 'Be warm'}
+    Reference context naturally.
     """
                 print(f"[DEBUG][PROMPT] Response prompt length: {len(full_instructions)} chars")
                 print(f"[DEBUG][PROMPT] User text: '{user_text[:100]}'")
@@ -808,9 +790,16 @@ async def entrypoint(ctx: agents.JobContext):
     # Initialize media + agent
     tts = TTS(voice_id="17", output_format="MP3_22050_32")
     assistant = Assistant()
+    
+    # Configure LLM with increased timeout for context-heavy prompts
+    llm = lk_openai.LLM(
+        model="gpt-4o-mini",
+        temperature=0.8,  # More creative responses
+    )
+    
     session = AgentSession(
         stt=lk_openai.STT(model="gpt-4o-transcribe", language="ur"),
-        llm=lk_openai.LLM(model="gpt-4o-mini"),
+        llm=llm,
         tts=tts,
         vad=silero.VAD.load(
             min_silence_duration=0.5,
