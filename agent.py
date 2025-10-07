@@ -857,7 +857,7 @@ For every message you generate:
             print(f"[CLEANUP] ✓ All background tasks completed")
     
     async def _process_background(self, user_text: str):
-        """Background processing - save memory, update profile, index in RAG"""
+        """Background processing - index in RAG and update profile (LLM handles memory storage via tools)"""
         try:
             user_id = get_current_user_id()
             if not user_id:
@@ -868,27 +868,19 @@ For every message you generate:
             
             logging.info(f"[BACKGROUND] Processing: {user_text[:50] if len(user_text) > 50 else user_text}...")
             
-            # Categorize and save
+            # Categorize for RAG metadata (but don't auto-save to memory table)
             category = await asyncio.to_thread(categorize_user_input, user_text, self.memory_service)
             ts_ms = int(time.time() * 1000)
-            memory_key = f"user_input_{ts_ms}"
             
-            # Save memory
-            success = await asyncio.to_thread(
-                self.memory_service.save_memory, category, memory_key, user_text
-            )
-            
-            if success:
-                logging.info(f"[MEMORY] ✅ Saved [{category}] {memory_key}")
-            
-            # Add to RAG
+            # ✅ Index in RAG for semantic search (without storing in memory table)
+            # LLM will use storeInMemory() tool with consistent keys when needed
             if self.rag_service:
                 self.rag_service.add_memory_background(
                     text=user_text,
                     category=category,
-                    metadata={"key": memory_key, "timestamp": ts_ms}
+                    metadata={"timestamp": ts_ms}
                 )
-                logging.info(f"[RAG] ✅ Indexed")
+                logging.info(f"[RAG] ✅ Indexed for search (memory storage handled by LLM tools)")
             
             # Update profile - use async method with explicit user_id
             existing_profile = await self.profile_service.get_profile_async(user_id)
