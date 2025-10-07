@@ -169,6 +169,9 @@ def categorize_user_input(user_text: str, memory_service: MemoryService) -> str:
 # ---------------------------
 class Assistant(Agent):
     def __init__(self):
+        # Track background tasks to prevent memory leaks
+        self._background_tasks = set()
+        
         self._base_instructions = """
 # Prompt: Humraaz – Urdu Companion
 
@@ -685,8 +688,17 @@ For every message you generate:
         if not can_write_for_current_user():
             return
         
-        # Background processing (zero latency)
-        asyncio.create_task(self._process_background(user_text))
+        # Background processing (zero latency) - track task to prevent leaks
+        task = asyncio.create_task(self._process_background(user_text))
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+    
+    async def cleanup(self):
+        """Cleanup background tasks on shutdown"""
+        if self._background_tasks:
+            print(f"[CLEANUP] Waiting for {len(self._background_tasks)} background tasks...")
+            await asyncio.gather(*self._background_tasks, return_exceptions=True)
+            print(f"[CLEANUP] ✓ All background tasks completed")
     
     async def _process_background(self, user_text: str):
         """Background processing - save memory, update profile, index in RAG"""
@@ -695,7 +707,10 @@ For every message you generate:
             if not user_id:
                 return
             
-            logging.info(f"[BACKGROUND] Processing: {user_text[:50]}...")
+            if not user_text:
+                return
+            
+            logging.info(f"[BACKGROUND] Processing: {user_text[:50] if len(user_text) > 50 else user_text}...")
             
             # Categorize and save
             category = await asyncio.to_thread(categorize_user_input, user_text, self.memory_service)
@@ -841,8 +856,12 @@ async def entrypoint(ctx: agents.JobContext):
     print(f"[DEBUG][USER_ID] Verification - get_current_user_id(): {get_current_user_id()}")
     
     # Ensure user profile exists
-    user_service = UserService(supabase)
-    user_service.ensure_profile_exists(user_id)
+    try:
+        user_service = UserService(supabase)
+        await asyncio.to_thread(user_service.ensure_profile_exists, user_id)
+        print("[PROFILE] ✓ User profile ensured")
+    except Exception as e:
+        print(f"[PROFILE] ⚠️ Failed to ensure profile: {e}")
     
     # Initialize RAG for this user
     print(f"[RAG] Initializing for user {user_id[:8]}...")
@@ -859,51 +878,34 @@ async def entrypoint(ctx: agents.JobContext):
     else:
         print(f"[DEBUG][RAG] 🆕 NO EXISTING RAG - Creating new instance for user {user_id[:8]}")
     
-    # Load top 50 memories immediately (fast, prevents race condition)
+    # Load memories with proper error handling and no race conditions
+    # Strategy: Load all 500 at once instead of two separate loads
     try:
-        print(f"[DEBUG][RAG] Loading top 50 memories from database...")
-        await asyncio.wait_for(
-            rag_service.load_from_database(supabase, limit=50),
-            timeout=3.0
-        )
-        print(f"[RAG] ✓ Loaded top 50 memories")
-        
-        # DEBUG: Verify memories were loaded
-        rag_system = rag_service.get_rag_system()
-        if rag_system:
-            print(f"[DEBUG][RAG] ✅ RAG now has {len(rag_system.memories)} memories")
-            print(f"[DEBUG][RAG] FAISS index size: {rag_system.index.ntotal}")
-        else:
-            print(f"[DEBUG][RAG] ❌ RAG system is None after loading!")
-            
-    except asyncio.TimeoutError:
-        print(f"[RAG] ⚠️  Timeout loading memories (>3s)")
-        print(f"[DEBUG][RAG] ❌ Load timeout - RAG may be empty!")
-    except Exception as e:
-        print(f"[RAG] Warning: {e}")
-        print(f"[DEBUG][RAG] ❌ Load exception: {type(e).__name__}: {str(e)}")
-    
-    # Load remaining memories with a reasonable timeout
-    # Note: This will re-load the first 50, but FAISS will deduplicate
-    print(f"[DEBUG][RAG] Loading all 500 memories (with 5s timeout)...")
-    try:
+        print(f"[DEBUG][RAG] Loading up to 500 memories from database...")
         await asyncio.wait_for(
             rag_service.load_from_database(supabase, limit=500),
-            timeout=5.0  # 5 seconds should be enough
+            timeout=8.0  # Longer timeout for single load
         )
+        
+        # Verify memories were loaded
         rag_system = rag_service.get_rag_system()
         if rag_system:
-            print(f"[RAG] ✅ Loaded {len(rag_system.memories)} total memories")
-            print(f"[DEBUG][RAG] FAISS index size after full load: {rag_system.index.ntotal}")
+            print(f"[RAG] ✅ Loaded {len(rag_system.memories)} memories")
+            print(f"[DEBUG][RAG] FAISS index size: {rag_system.index.ntotal}")
         else:
             print(f"[DEBUG][RAG] ⚠️ RAG system is None after loading!")
+            
     except asyncio.TimeoutError:
-        print(f"[RAG] ⚠️ Full load timeout (>5s), will complete in background")
-        # Continue loading in background if timeout
-        asyncio.create_task(rag_service.load_from_database(supabase, limit=500))
+        print(f"[RAG] ⚠️ Timeout loading memories (>8s) - using partial load")
+        # If timeout, at least try to get some memories in background
+        # Track this background task
+        bg_task = asyncio.create_task(rag_service.load_from_database(supabase, limit=100))
+        # Don't wait for it, but log when it completes
+        bg_task.add_done_callback(lambda t: print(f"[RAG] Background load completed") if not t.exception() else print(f"[RAG] Background load failed: {t.exception()}"))
     except Exception as e:
         print(f"[RAG] ⚠️ Load error: {e}")
-        print(f"[DEBUG][RAG] ❌ Full load exception: {type(e).__name__}: {str(e)}")
+        print(f"[DEBUG][RAG] ❌ Exception: {type(e).__name__}: {str(e)}")
+        # Don't fail the entire entrypoint, continue without RAG
 
     # Prefetch user data
     try:
