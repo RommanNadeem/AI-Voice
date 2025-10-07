@@ -1019,11 +1019,25 @@ async def entrypoint(ctx: agents.JobContext):
     # The session runs in the background handling user interactions
     # We need to wait until the participant disconnects
     print("[ENTRYPOINT] 🎧 Agent is now listening and ready for conversation...")
-    print("[ENTRYPOINT] Waiting for session to complete...")
+    print("[ENTRYPOINT] Waiting for participant to disconnect...")
     
     try:
-        # Wait for the session to complete (when user disconnects)
-        await session.wait_for_completion()
+        # Wait until the participant disconnects
+        # This is a simple polling loop since LiveKit doesn't have wait_for_completion
+        while True:
+            # Check if participant is still connected
+            if participant not in ctx.room.remote_participants.values():
+                print("[ENTRYPOINT] ✓ Participant disconnected")
+                break
+            
+            # Check if room is still active
+            if ctx.room.connection_state == rtc.ConnectionState.CONN_DISCONNECTED:
+                print("[ENTRYPOINT] ✓ Room disconnected")
+                break
+                
+            # Sleep briefly to avoid busy waiting
+            await asyncio.sleep(1.0)
+            
         print("[ENTRYPOINT] ✓ Session completed normally")
     except Exception as e:
         print(f"[ENTRYPOINT] ⚠️ Session ended with exception: {e}")
@@ -1031,7 +1045,10 @@ async def entrypoint(ctx: agents.JobContext):
         # Cleanup
         print("[ENTRYPOINT] 🧹 Cleaning up resources...")
         if hasattr(assistant, 'cleanup'):
-            await assistant.cleanup()
+            try:
+                await assistant.cleanup()
+            except Exception as cleanup_error:
+                print(f"[ENTRYPOINT] ⚠️  Cleanup error: {cleanup_error}")
         print("[ENTRYPOINT] ✓ Entrypoint finished")
 
 

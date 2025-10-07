@@ -162,15 +162,48 @@ class ConversationStateService:
                 .execute()
             )
             
-            if getattr(resp, "error", None):
-                print(f"[STATE SERVICE] Update error: {resp.error}")
-                return False
+            # Check for errors
+            error = getattr(resp, "error", None)
+            if error:
+                error_dict = error if isinstance(error, dict) else {}
+                error_code = error_dict.get("code", "")
+                error_msg = error_dict.get("message", str(error))
+                
+                # Special handling for RLS policy violations
+                if error_code == "42501":
+                    print(f"[STATE SERVICE] ⚠️  RLS Policy Error: Cannot update conversation_state")
+                    print(f"[STATE SERVICE] → This happens when using ANON key instead of SERVICE_ROLE key")
+                    print(f"[STATE SERVICE] → See CRITICAL_FIXES_APPLIED.md for solution")
+                    print(f"[STATE SERVICE] → Continuing without state persistence...")
+                    # Continue gracefully - update cache even if DB fails
+                    # This allows the system to work with in-memory state
+                    pass  # Don't return False
+                else:
+                    print(f"[STATE SERVICE] update_state failed: {error_dict}")
+                    return False
             
-            # Invalidate cache
+            # Invalidate cache (or update it with new state if DB failed)
             redis_cache = await get_redis_cache()
-            await redis_cache.delete(f"user:{uid}:conversation_state")
+            cache_key = f"user:{uid}:conversation_state"
             
-            print(f"[STATE SERVICE] Updated state - Stage: {update_data['stage']}, Trust: {update_data['trust_score']:.1f}")
+            # If we had an RLS error, at least cache the state so it works in-memory
+            if error and error_dict.get("code") == "42501":
+                await redis_cache.delete(cache_key)
+                # Cache the intended state even though DB update failed
+                state_to_cache = {
+                    "stage": update_data["stage"],
+                    "trust_score": update_data["trust_score"],
+                    "last_updated": update_data["updated_at"],
+                    "metadata": update_data.get("metadata", {}),
+                    "stage_history": update_data.get("stage_history", []),
+                }
+                await redis_cache.set(cache_key, state_to_cache, ttl=300)
+                print(f"[STATE SERVICE] ⚠️  State cached (DB update failed) - Stage: {update_data['stage']}, Trust: {update_data['trust_score']:.1f}")
+            else:
+                # Normal case - invalidate cache so next read comes from DB
+                await redis_cache.delete(cache_key)
+                print(f"[STATE SERVICE] Updated state - Stage: {update_data['stage']}, Trust: {update_data['trust_score']:.1f}")
+            
             return True
             
         except Exception as e:
