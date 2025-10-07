@@ -226,13 +226,24 @@ Your main goal is "to be like a close, platonic female urdu speaking friend, use
     @function_tool()
     async def storeInMemory(self, context: RunContext, category: str, key: str, value: str):
         """Save a memory item"""
+        print(f"[TOOL] 💾 storeInMemory called: [{category}] {key}")
+        print(f"[TOOL]    Value: {value[:100]}{'...' if len(value) > 100 else ''}")
         success = self.memory_service.save_memory(category, key, value)
+        if success:
+            print(f"[TOOL] ✅ Memory stored successfully")
+        else:
+            print(f"[TOOL] ❌ Memory storage failed")
         return {"success": success, "message": f"Memory [{category}] {key} saved" if success else "Failed to save memory"}
 
     @function_tool()
     async def retrieveFromMemory(self, context: RunContext, category: str, key: str):
         """Get a memory item"""
+        print(f"[TOOL] 🔍 retrieveFromMemory called: [{category}] {key}")
         memory = self.memory_service.get_memory(category, key)
+        if memory:
+            print(f"[TOOL] ✅ Memory retrieved: {memory[:100]}{'...' if len(memory) > 100 else ''}")
+        else:
+            print(f"[TOOL] ℹ️  Memory not found: [{category}] {key}")
         return {"value": memory or "", "found": memory is not None}
 
     @function_tool()
@@ -279,12 +290,15 @@ Your main goal is "to be like a close, platonic female urdu speaking friend, use
     @function_tool()
     async def searchMemories(self, context: RunContext, query: str, limit: int = 5):
         """Search memories semantically using Advanced RAG"""
+        print(f"[TOOL] 🔍 searchMemories called: query='{query}', limit={limit}")
         user_id = get_current_user_id()
         if not user_id:
+            print(f"[TOOL] ⚠️  No active user")
             return {"memories": [], "message": "No active user"}
         
         try:
             if not self.rag_service:
+                print(f"[TOOL] ⚠️  RAG not initialized")
                 return {"memories": [], "message": "RAG not initialized"}
             
             self.rag_service.update_conversation_context(query)
@@ -293,6 +307,10 @@ Your main goal is "to be like a close, platonic female urdu speaking friend, use
                 top_k=limit,
                 use_advanced_features=True
             )
+            
+            print(f"[TOOL] ✅ Found {len(results)} memories")
+            for i, mem in enumerate(results[:3], 1):
+                print(f"[TOOL]    #{i}: {mem.get('text', '')[:80]}...")
             
             return {
                 "memories": [
@@ -308,7 +326,7 @@ Your main goal is "to be like a close, platonic female urdu speaking friend, use
                 "message": f"Found {len(results)} relevant memories (advanced RAG)"
             }
         except Exception as e:
-            print(f"[RAG TOOL ERROR] {e}")
+            print(f"[TOOL] ❌ Error: {e}")
             return {"memories": [], "message": f"Error: {e}"}
 
     async def generate_reply_with_context(self, session, user_text: str = None, greet: bool = False):
