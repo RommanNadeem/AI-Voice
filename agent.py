@@ -249,7 +249,7 @@ To keep conversations alive, natural, and engaging, follow these principles:
 
 - **Meta-Awareness (light)** Occasionally comment on the conversation itself to make it co-created.  
   (e.g., “Arrey, hum kitna ghoom phir ke baatein kar rahe hain, mazay ki baat hai na?”)  
- 
+
 
 ---
 
@@ -259,8 +259,11 @@ To keep conversations alive, natural, and engaging, follow these principles:
 - `searchMemories(query, limit)` → Semantic search across all memories.  
 - `createUserProfile(profile_input)` → Build or update the user profile.  
 - `getUserProfile()` → View stored user profile info.  
+- **`getCompleteUserInfo()`** → **[USE THIS]** When user asks "what do you know about me?" or "what have you learned?" - retrieves EVERYTHING (profile + all memories + state).
 - `detectGenderFromName(name)` → Detect gender for correct pronoun use.  
-- `getUserState()` / `updateUserState(stage, trust_score)` → Track or update conversation stage & trust.  
+- `getUserState()` / `updateUserState(stage, trust_score)` → Track or update conversation stage & trust.
+
+**IMPORTANT**: When user asks about themselves or what you know about them, ALWAYS call `getCompleteUserInfo()` first to get accurate, complete data before responding.  
 
 ---
 
@@ -367,9 +370,98 @@ For every message you generate:
 
     @function_tool()
     async def getUserProfile(self, context: RunContext):
-        """Get user profile information"""
-        profile = self.profile_service.get_profile()
-        return {"profile": profile}
+        """Get user profile information - includes comprehensive user details"""
+        print(f"[TOOL] 👤 getUserProfile called")
+        user_id = get_current_user_id()
+        
+        if not user_id:
+            print(f"[TOOL] ⚠️  No active user")
+            return {"profile": None, "message": "No active user"}
+        
+        try:
+            # Get profile with proper user_id
+            profile = await self.profile_service.get_profile_async(user_id)
+            
+            if profile:
+                print(f"[TOOL] ✅ Profile retrieved: {len(profile)} chars")
+                print(f"[TOOL]    Preview: {profile[:100]}...")
+                return {
+                    "profile": profile,
+                    "message": "Profile retrieved successfully"
+                }
+            else:
+                print(f"[TOOL] ℹ️  No profile found for user")
+                return {
+                    "profile": None,
+                    "message": "No profile information available yet"
+                }
+        except Exception as e:
+            print(f"[TOOL] ❌ Error: {e}")
+            return {"profile": None, "message": f"Error: {e}"}
+    
+    @function_tool()
+    async def getCompleteUserInfo(self, context: RunContext):
+        """
+        Get EVERYTHING we know about the user - profile, memories, state, etc.
+        Use this when user asks: 'what do you know about me?', 'what have you learned?', etc.
+        """
+        print(f"[TOOL] 📋 getCompleteUserInfo called - retrieving ALL user data")
+        user_id = get_current_user_id()
+        
+        if not user_id:
+            print(f"[TOOL] ⚠️  No active user")
+            return {"message": "No active user"}
+        
+        try:
+            # Fetch everything in parallel
+            profile_task = self.profile_service.get_profile_async(user_id)
+            name_task = self.conversation_context_service.get_context(user_id)
+            state_task = self.conversation_state_service.get_state(user_id)
+            
+            profile, context_data, state = await asyncio.gather(
+                profile_task, name_task, state_task,
+                return_exceptions=True
+            )
+            
+            # Get memories by category
+            memories_by_category = {}
+            categories = ['FACT', 'GOAL', 'INTEREST', 'EXPERIENCE', 'PREFERENCE', 'RELATIONSHIP', 'PLAN', 'OPINION']
+            
+            for category in categories:
+                try:
+                    mems = self.memory_service.get_memories_by_category(category, limit=5, user_id=user_id)
+                    if mems:
+                        memories_by_category[category] = [m['value'] for m in mems]
+                except Exception as e:
+                    print(f"[TOOL] Error fetching {category}: {e}")
+            
+            # Extract name
+            user_name = None
+            if context_data and not isinstance(context_data, Exception):
+                user_name = context_data.get("user_name")
+            
+            # Build response
+            result = {
+                "user_name": user_name,
+                "profile": profile if not isinstance(profile, Exception) else None,
+                "conversation_stage": state.get("stage") if not isinstance(state, Exception) else "ORIENTATION",
+                "trust_score": state.get("trust_score") if not isinstance(state, Exception) else 2.0,
+                "memories_by_category": memories_by_category,
+                "total_memories": sum(len(v) for v in memories_by_category.values()),
+                "message": "Complete user information retrieved"
+            }
+            
+            print(f"[TOOL] ✅ Retrieved complete info:")
+            print(f"[TOOL]    Name: {user_name}")
+            print(f"[TOOL]    Profile: {'Yes' if result['profile'] else 'No'} ({len(result['profile']) if result['profile'] else 0} chars)")
+            print(f"[TOOL]    Stage: {result['conversation_stage']}, Trust: {result['trust_score']:.1f}")
+            print(f"[TOOL]    Memories: {result['total_memories']} across {len(memories_by_category)} categories")
+            
+            return result
+            
+        except Exception as e:
+            print(f"[TOOL] ❌ Error: {e}")
+            return {"message": f"Error: {e}"}
     
     @function_tool()
     async def detectGenderFromName(self, context: RunContext, name: str):
@@ -624,20 +716,20 @@ For every message you generate:
 
             # Compact context block (reduce prompt size to prevent timeouts)
             context_block = f"""
-    🎯 CONTEXT (Use this info naturally):
+    🎯 QUICK CONTEXT (for reference - NOT complete):
 
     Name: {user_name or "Unknown - ask naturally"}
     Stage: {conversation_state['stage']} (Trust: {conversation_state['trust_score']:.1f}/10)
     
-    Profile: {profile[:400] if profile and len(profile) > 400 else profile if profile else "(Building from conversation)"}
+    Profile (partial): {profile[:400] if profile and len(profile) > 400 else profile if profile else "(Building from conversation)"}
 
-    Key Memories:
+    Recent Memories (sample only):
     {categorized_mems}
 
     Rules:
-    ✅ Use their name if known
-    ✅ Reference memories naturally
+    ✅ Use their name and reference memories naturally
     ❌ Don't ask for info already shown above
+    ⚠️  If user asks "what do you know about me?" → CALL getCompleteUserInfo() tool for full data!
     """
 
 
