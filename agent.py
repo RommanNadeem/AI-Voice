@@ -172,6 +172,10 @@ class Assistant(Agent):
         # Track background tasks to prevent memory leaks
         self._background_tasks = set()
         
+        # Store room reference for state broadcasting
+        self._room = None
+        self._current_state = "idle"
+        
         self._base_instructions = """
 # Prompt: Humraaz – Urdu Companion
 
@@ -289,6 +293,38 @@ For every message you generate:
         self.conversation_state_service = ConversationStateService(supabase)
         self.onboarding_service = OnboardingService(supabase)
         self.rag_service = None  # Set per-user in entrypoint
+    
+    def set_room(self, room):
+        """Set the room reference for state broadcasting"""
+        self._room = room
+        print(f"[STATE] Room reference set for state broadcasting")
+    
+    async def broadcast_state(self, state: str):
+        """
+        Broadcast agent state to frontend via LiveKit data channel.
+        States: 'idle', 'listening', 'thinking', 'speaking'
+        """
+        if not self._room:
+            print(f"[STATE] ⚠️  Cannot broadcast '{state}' - no room reference")
+            return
+        
+        if state == self._current_state:
+            # Don't spam duplicate states
+            print(f"[STATE] ⏭️  Skipping duplicate state: {state}")
+            return
+        
+        try:
+            message = state.encode('utf-8')
+            await self._room.local_participant.publish_data(
+                message,
+                reliable=True,
+                destination_identities=[]  # Broadcast to all
+            )
+            old_state = self._current_state
+            self._current_state = state
+            print(f"[STATE] 📡 Broadcasted: {old_state} → {state}")
+        except Exception as e:
+            print(f"[STATE] ❌ Failed to broadcast '{state}': {e}")
 
     @function_tool()
     async def storeInMemory(self, context: RunContext, category: str, key: str, value: str):
@@ -480,6 +516,9 @@ For every message you generate:
         Generate reply with STRONG context emphasis.
         SKIPS RAG - queries memory table directly by categories.
         """
+        # Broadcast "thinking" state before processing
+        await self.broadcast_state("thinking")
+        
         # Check if session is running before proceeding
         if not hasattr(session, '_started') or not session._started:
             print(f"[DEBUG][SESSION] ⚠️ Session not started yet, waiting...")
@@ -647,6 +686,9 @@ For every message you generate:
                 await session.generate_reply(instructions=full_instructions)
 
             logging.info(f"[CONTEXT] Generated reply with {len(context_block)} chars of context")
+            
+            # Don't broadcast "listening" here - TTS playback happens asynchronously
+            # State will be updated via on_agent_speech_committed callback
 
         except Exception as e:
             logging.error(f"[CONTEXT] Error in generate_reply_with_context: {e}")
@@ -662,10 +704,23 @@ For every message you generate:
             else:
                 print(f"[DEBUG][CONTEXT] ⚠️ Session not running - skipping reply generation")
 
+    async def on_agent_speech_started(self, turn_ctx):
+        """Called when agent starts speaking (TTS playback begins)"""
+        logging.info(f"[AGENT] Started speaking")
+        await self.broadcast_state("speaking")
+    
+    async def on_agent_speech_committed(self, turn_ctx):
+        """Called when agent finishes generating and committing speech to the output"""
+        logging.info(f"[AGENT] Speech committed - transitioning to listening")
+        # Agent has finished speaking (TTS is queued/starting)
+        # We can now transition to listening state
+        await self.broadcast_state("listening")
+    
     async def on_user_turn_completed(self, turn_ctx, new_message):
         """Save user input to memory and update profile (background)"""
         user_text = new_message.text_content or ""
         logging.info(f"[USER] {user_text[:80]}")
+        print(f"[STATE] 🎤 User finished speaking")
 
         if not can_write_for_current_user():
             return
@@ -790,6 +845,9 @@ async def entrypoint(ctx: agents.JobContext):
     # Initialize media + agent
     tts = TTS(voice_id="17", output_format="MP3_22050_32")
     assistant = Assistant()
+    
+    # Set room reference for state broadcasting
+    assistant.set_room(ctx.room)
     
     # Configure LLM with increased timeout for context-heavy prompts
     llm = lk_openai.LLM(
