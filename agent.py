@@ -1027,10 +1027,10 @@ Example: "Assalam-o-alaikum! Aap kaise hain?"
 
 """
     
-    # Update the agent's instructions with the simple greeting strategy
-    # Note: We skip automatic context injection for first message (too slow)
-    # Context will be available for subsequent messages
-    assistant.update_instructions(first_message_instructions)
+    # Update the agent's instructions: BASE + GREETING
+    # CRITICAL: Must include base instructions or AI has no personality/rules!
+    full_instructions = assistant._base_instructions + "\n\n" + first_message_instructions
+    assistant.update_instructions(full_instructions)
     
     logging.info(f"[GREETING] 🚀 Generating first message (lightweight mode)...")
     
