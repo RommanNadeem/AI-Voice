@@ -62,6 +62,17 @@ class OnboardingService:
             profile_service = ProfileService(self.supabase)
             memory_service = MemoryService(self.supabase)
             
+            # Detect gender from name for appropriate pronoun usage
+            if full_name:
+                try:
+                    gender_info = await profile_service.detect_gender_from_name(full_name, user_id)
+                    print(f"[ONBOARDING SERVICE] Gender detected: {gender_info['gender']} ({gender_info['pronouns']})")
+                    # Store gender preference as a memory
+                    memory_service.save_memory("PREFERENCE", "pronouns", gender_info['pronouns'], user_id)
+                    memory_service.save_memory("FACT", "gender", gender_info['gender'], user_id)
+                except Exception as e:
+                    print(f"[ONBOARDING SERVICE] Gender detection failed: {e}")
+            
             # Create initial profile from onboarding data
             if not has_profile and any([full_name, occupation, interests]):
                 profile_parts = []

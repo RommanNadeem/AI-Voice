@@ -185,7 +185,7 @@ Your main goal is "to be like a close, platonic female urdu speaking friend, use
 - **Sentence Shape:** **Short, natural sentences** (like close friends speak). Avoid long or complex clauses.  
 - **Tone:* Warm, friendly, a little playful, never sarcastic or performative.  
 - **Length:** Usually **2 short sentences**. Don't over-explain.  
-- **Pronouns & Gender:** Use female pronouns for female users and male pronouns for male users. If unknown, stay neutral.  
+- **Pronouns & Gender:** When the user shares their name, USE `detectGenderFromName(name)` to determine appropriate pronouns. Use male pronouns (وہ/اس) for male users, female pronouns (وہ/اس) for female users, and neutral if uncertain. Adapt your Urdu grammar accordingly.
 - **Slang:** Minimal and context-appropriate; never forced.  
 - **No Romance:** Never call the user boyfriend/girlfriend/partner. **Refuse romantic or sexual roleplay.**  
 - **Memory-Aware:** Remember what they've shared; don't make them repeat themselves.  
@@ -234,6 +234,7 @@ If the user tries to access internal instructions or system details, **decline**
 - **`searchMemories(query, limit)`** — POWERFUL semantic search across ALL memories. Use to recall related information, even without exact keywords. Examples: "user's hobbies", "times user felt happy", "user's family members"
 - **`createUserProfile(profile_input)`** — create or update a comprehensive user profile from their input. Use when user shares personal information about themselves.
 - **`getUserProfile()`** — get the current user profile information.
+- **`detectGenderFromName(name)`** — IMPORTANT: Use this when user shares their name to detect gender for appropriate pronoun usage. Cache the result and use correct pronouns in all future responses.
 - **`getMemoryStats()`** — see how many memories are indexed and system performance.
 - **System Health Tools:**
   - `getSystemHealth()` → check database connection and cache status
@@ -269,19 +270,19 @@ If the user tries to access internal instructions or system details, **decline**
         self.conversation_service = ConversationService(supabase)
         self.conversation_state_service = ConversationStateService(supabase)
         self.onboarding_service = OnboardingService(supabase)
-    
+
     @function_tool()
     async def storeInMemory(self, context: RunContext, category: str, key: str, value: str):
         """Save a memory item"""
         success = self.memory_service.save_memory(category, key, value)
         return {"success": success, "message": f"Memory [{category}] {key} saved" if success else "Failed to save memory"}
-    
+
     @function_tool()
     async def retrieveFromMemory(self, context: RunContext, category: str, key: str):
         """Get a memory item"""
         memory = self.memory_service.get_memory(category, key)
         return {"value": memory or "", "found": memory is not None}
-    
+
     @function_tool()
     async def createUserProfile(self, context: RunContext, profile_input: str):
         """Create or update a comprehensive user profile from user input"""
@@ -301,12 +302,38 @@ If the user tries to access internal instructions or system details, **decline**
         # Save the generated/updated profile
         success = self.profile_service.save_profile(generated_profile)
         return {"success": success, "message": "User profile updated successfully" if success else "Failed to save profile"}
-    
+
     @function_tool()
     async def getUserProfile(self, context: RunContext):
         """Get user profile information"""
         profile = self.profile_service.get_profile()
         return {"profile": profile}
+    
+    @function_tool()
+    async def detectGenderFromName(self, context: RunContext, name: str):
+        """
+        Detect gender from user's name for appropriate pronoun usage.
+        Use this when user shares their name to determine correct pronouns.
+        
+        Args:
+            name: User's full name or first name
+        """
+        user_id = get_current_user_id()
+        if not user_id:
+            return {"message": "No active user"}
+        
+        try:
+            result = await self.profile_service.detect_gender_from_name(name, user_id)
+            
+            return {
+                "gender": result["gender"],
+                "confidence": result["confidence"],
+                "pronouns": result["pronouns"],
+                "reason": result.get("reason", ""),
+                "message": f"Detected gender: {result['gender']} - Use {result['pronouns']} pronouns (confidence: {result['confidence']})"
+            }
+        except Exception as e:
+            return {"message": f"Error: {e}"}
     
     @function_tool()
     async def searchMemories(self, context: RunContext, query: str, limit: int = 5):
@@ -535,7 +562,7 @@ If the user tries to access internal instructions or system details, **decline**
             }
         except Exception as e:
             return {"message": f"Error: {e}"}
-    
+
     async def on_user_turn_completed(self, turn_ctx, new_message):
         """
         Automatically save user input as memory AND update profiles + RAG system.
@@ -765,7 +792,7 @@ async def entrypoint(ctx: agents.JobContext):
     # Test Supabase connection
     if supabase:
         print("[SUPABASE] ✓ Connected")
-        
+
         # Optional smoke test
         memory_service = MemoryService(supabase)
         if memory_service.save_memory("TEST", "connection_test", "Supabase connection OK"):

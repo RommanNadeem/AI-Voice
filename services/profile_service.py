@@ -3,12 +3,13 @@ Profile Service - Handles user profile generation and management
 """
 
 import asyncio
-from typing import Optional
+import json
+from typing import Optional, Dict
 from supabase import Client
 import openai
 from core.validators import can_write_for_current_user, get_current_user_id
 from core.config import Config
-from infrastructure.connection_pool import get_connection_pool_sync
+from infrastructure.connection_pool import get_connection_pool_sync, get_connection_pool
 from infrastructure.redis_cache import get_redis_cache
 
 
@@ -226,4 +227,124 @@ class ProfileService:
         except Exception as e:
             print(f"[PROFILE SERVICE] get_profile_async failed: {e}")
             return ""
+    
+    async def detect_gender_from_name(self, name: str, user_id: Optional[str] = None) -> Dict[str, str]:
+        """
+        Detect likely gender from user's name using OpenAI.
+        Returns gender prediction for appropriate pronoun usage.
+        
+        Args:
+            name: User's full name or first name
+            user_id: Optional user ID for caching
+            
+        Returns:
+            Dict with gender ("male", "female", "neutral"), confidence, and pronouns
+        """
+        if not name or not name.strip():
+            return {
+                "gender": "neutral",
+                "confidence": "unknown",
+                "pronouns": "they/them",
+                "reason": "No name provided"
+            }
+        
+        uid = user_id or get_current_user_id()
+        
+        # Try Redis cache first
+        if uid:
+            try:
+                redis_cache = await get_redis_cache()
+                cache_key = f"user:{uid}:gender_detection"
+                cached_result = await redis_cache.get(cache_key)
+                
+                if cached_result:
+                    print(f"[PROFILE SERVICE] Gender cache hit for {name}")
+                    return cached_result
+            except Exception as e:
+                print(f"[PROFILE SERVICE] Cache check failed: {e}")
+        
+        try:
+            # Use pooled async OpenAI client
+            pool = await get_connection_pool()
+            client = pool.get_openai_client(async_client=True)
+            
+            prompt = f"""
+Based on the name "{name}", determine the most likely gender for appropriate pronoun usage in conversation.
+
+Consider:
+- Cultural name patterns (South Asian, Arabic, Western, etc.)
+- Common gender associations with names
+- Return "neutral" if uncertain or gender-neutral name
+
+Respond in JSON format:
+{{
+    "gender": "male" | "female" | "neutral",
+    "confidence": "high" | "medium" | "low",
+    "pronouns": "he/him" | "she/her" | "they/them",
+    "reason": "brief explanation"
+}}
+"""
+            
+            response = await asyncio.wait_for(
+                client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": "You are a helpful assistant that identifies likely gender from names for pronoun selection. Be respectful and default to neutral when uncertain. Always respond with valid JSON."
+                        },
+                        {"role": "user", "content": prompt}
+                    ],
+                    response_format={"type": "json_object"},
+                    temperature=0.3,
+                    max_tokens=150,
+                    timeout=3.0
+                ),
+                timeout=3.0
+            )
+            
+            result = json.loads(response.choices[0].message.content)
+            
+            # Validate result
+            valid_genders = ["male", "female", "neutral"]
+            if result.get("gender") not in valid_genders:
+                result["gender"] = "neutral"
+            
+            # Ensure pronouns are set
+            if "pronouns" not in result:
+                result["pronouns"] = {
+                    "male": "he/him",
+                    "female": "she/her",
+                    "neutral": "they/them"
+                }.get(result["gender"], "they/them")
+            
+            print(f"[PROFILE SERVICE] Gender detected for '{name}': {result['gender']} ({result.get('confidence', 'unknown')} confidence)")
+            
+            # Cache result for 30 days (gender from name is stable)
+            if uid:
+                try:
+                    redis_cache = await get_redis_cache()
+                    cache_key = f"user:{uid}:gender_detection"
+                    await redis_cache.set(cache_key, result, ttl=2592000)  # 30 days
+                except Exception as e:
+                    print(f"[PROFILE SERVICE] Cache save failed: {e}")
+            
+            return result
+            
+        except asyncio.TimeoutError:
+            print(f"[PROFILE SERVICE] Gender detection timeout for '{name}'")
+            return {
+                "gender": "neutral",
+                "confidence": "unknown",
+                "pronouns": "they/them",
+                "reason": "Detection timeout"
+            }
+        except Exception as e:
+            print(f"[PROFILE SERVICE] detect_gender_from_name failed: {e}")
+            return {
+                "gender": "neutral",
+                "confidence": "unknown",
+                "pronouns": "they/them",
+                "reason": f"Error: {str(e)}"
+            }
 
