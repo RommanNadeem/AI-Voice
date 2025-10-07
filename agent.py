@@ -679,7 +679,7 @@ async def entrypoint(ctx: agents.JobContext):
 
     # Initialize infrastructure
     try:
-        pool = await get_connection_pool()
+        await get_connection_pool()
         print("[ENTRYPOINT] ✓ Connection pool initialized")
     except Exception as e:
         print(f"[ENTRYPOINT] Warning: Connection pool initialization failed: {e}")
