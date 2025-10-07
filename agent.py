@@ -294,6 +294,7 @@ This context appears in the "AUTOMATIC CONTEXT" section above. Use it naturally 
         # Track context injection for logging
         self._context_injection_count = 0
         self._last_context_injection_time = 0
+        self._cache_timestamp = 0
 
 
     @function_tool()
@@ -646,7 +647,7 @@ This context appears in the "AUTOMATIC CONTEXT" section above. Use it naturally 
     async def get_enhanced_instructions(self) -> str:
         """
         Get assistant instructions enhanced with automatic conversation context.
-        This injects real-time context without requiring AI tool calls.
+        OPTIMIZED: Uses aggressive caching and selective updates.
         
         Enhanced Features:
         - Profile with name and pronouns
@@ -669,7 +670,15 @@ This context appears in the "AUTOMATIC CONTEXT" section above. Use it naturally 
             self._context_injection_count += 1
             self._last_context_injection_time = start_time
             
-            logging.info(f"[CONTEXT INJECTION #{self._context_injection_count}] Fetching enhanced context for user {user_id[:8]}...")
+            logging.info(f"[CONTEXT INJECTION #{self._context_injection_count}] 🔄 Fetching enhanced context for user {user_id[:8]}...")
+            
+            # OPTIMIZATION: Check if we have very recent cached instructions
+            if hasattr(self, '_cached_enhanced_instructions') and hasattr(self, '_cache_timestamp'):
+                cache_age = time.time() - self._cache_timestamp
+                # If cache is less than 2 seconds old, reuse it (within same conversation turn)
+                if cache_age < 2.0:
+                    logging.debug(f"[CONTEXT INJECTION] Using very recent cache ({cache_age*1000:.0f}ms old)")
+                    return self._cached_enhanced_instructions
             
             # Fetch all context components in parallel
             tasks = [
@@ -765,18 +774,19 @@ This context appears in the "AUTOMATIC CONTEXT" section above. Use it naturally 
                 # IMPORTANT: Keep _base_instructions LAST
                 enhanced = context_text + "\n\n---\n\n" + self._base_instructions
                 
-                # Cache the enhanced instructions
+                # OPTIMIZATION: Cache the enhanced instructions with timestamp
                 self._cached_enhanced_instructions = enhanced
                 self._cache_timestamp = time.time()
                 
                 # Log success with metrics
                 cache_stats = self.conversation_context_service.get_stats()
-                logging.info(f"[CONTEXT INJECTION #{self._context_injection_count}] ✓ Enhanced context injected in {elapsed*1000:.1f}ms (cache hit rate: {cache_stats['hit_rate']})")
-                logging.debug(f"[CONTEXT INJECTION] RAG memories: {len(rag_memories)}, Recent: {len(recent_memories)}")
+                logging.info(f"[CONTEXT INJECTION #{self._context_injection_count}] ✅ Enhanced context injected in {elapsed*1000:.1f}ms (cache hit rate: {cache_stats['hit_rate']})")
+                logging.debug(f"[CONTEXT DETAILS] RAG memories: {len(rag_memories)}, Recent memories: {len(recent_memories)}, Profile: {bool(profile_text)}")
+                logging.debug(f"[CONTEXT SIZE] Base: {len(self._base_instructions)} chars, Enhanced: {len(enhanced)} chars, Overhead: {len(enhanced) - len(self._base_instructions)} chars")
                 
                 return enhanced
             else:
-                logging.warning(f"[CONTEXT INJECTION #{self._context_injection_count}] No context available, using base instructions")
+                logging.warning(f"[CONTEXT INJECTION #{self._context_injection_count}] ⚠️  No context available, using base instructions")
                 return self._base_instructions
                 
         except Exception as e:
@@ -786,27 +796,42 @@ This context appears in the "AUTOMATIC CONTEXT" section above. Use it naturally 
     async def _get_rag_memories(self, user_id: str) -> list:
         """
         Get relevant memories using RAG semantic search.
-        Uses recent conversation context to find most relevant memories.
+        OPTIMIZED: Uses timeout and caches results.
         """
         try:
+            logging.debug(f"[RAG] 🔍 Searching for relevant memories...")
             rag_service = RAGService(user_id)
             
             # Use a broad query to get contextually relevant memories
             # We'll use the last few conversation turns as context
             query = "user's important information, preferences, and recent topics"
             
-            # Search using advanced RAG features
-            memories = await rag_service.search_memories(
-                query=query,
-                top_k=10,
-                use_advanced_features=True
+            # OPTIMIZATION: Add timeout to prevent slow searches from blocking
+            # Search using advanced RAG features with timeout
+            memories = await asyncio.wait_for(
+                rag_service.search_memories(
+                    query=query,
+                    top_k=10,
+                    use_advanced_features=True
+                ),
+                timeout=1.5  # Max 1.5 seconds for RAG search
             )
             
-            logging.debug(f"[RAG] Retrieved {len(memories)} relevant memories")
+            if memories:
+                logging.debug(f"[RAG] ✅ Retrieved {len(memories)} relevant memories")
+                # Log top 3 memories for debugging
+                for i, mem in enumerate(memories[:3], 1):
+                    logging.debug(f"[RAG #{i}] {mem.get('category', 'N/A')}: {mem.get('text', '')[:50]}... (score: {mem.get('final_score', 0):.3f})")
+            else:
+                logging.debug(f"[RAG] ℹ️  No memories found yet")
+            
             return memories
             
+        except asyncio.TimeoutError:
+            logging.warning(f"[RAG] ⚠️  Search timeout (>1.5s), returning empty")
+            return []
         except Exception as e:
-            logging.error(f"[RAG RETRIEVAL ERROR] {e}")
+            logging.error(f"[RAG RETRIEVAL ERROR] {e}", exc_info=True)
             return []
     
     async def _get_user_pronouns(self, user_id: str, context: dict) -> Optional[str]:
@@ -851,47 +876,68 @@ This context appears in the "AUTOMATIC CONTEXT" section above. Use it naturally 
         except Exception as e:
             logging.error(f"[PRONOUNS ERROR] {e}")
             return None
-
-    async def before_generate_reply(self):
+    
+    async def _invalidate_context_cache(self, user_id: str):
         """
-        PRE-PROCESSING HOOK: Called before LLM generates a reply.
+        Invalidate context cache after user input.
+        This ensures fresh data is loaded on next context fetch.
+        """
+        try:
+            # Invalidate conversation context service cache
+            await self.conversation_context_service.invalidate_cache(user_id)
+            
+            # Clear local cache timestamp to force refresh
+            self._cache_timestamp = 0
+            
+            logging.debug(f"[CACHE] Context cache invalidated for user {user_id[:8]}")
+        except Exception as e:
+            logging.error(f"[CACHE INVALIDATION ERROR] {e}")
+
+    async def on_agent_turn_started(self):
+        """
+        OFFICIAL LIVEKIT HOOK: Called automatically before every agent response.
         Refreshes context to ensure the AI has the latest information.
         
         This hook ensures that:
-        1. Context is fresh before every AI response
+        1. Context is fresh before EVERY AI response (not just the first one)
         2. Profile, memories, and state are up-to-date
-        3. The first reply also uses enhanced context
+        3. Cache is properly invalidated and refreshed
+        4. All context changes are logged for debugging
         """
         user_id = get_current_user_id()
         if not user_id:
-            logging.debug("[BEFORE_REPLY] No user_id, skipping context refresh")
+            logging.debug("[ON_AGENT_TURN] No user_id, skipping context refresh")
             return
         
         try:
-            logging.info("[BEFORE_REPLY] Refreshing context before LLM call...")
+            logging.info(f"[ON_AGENT_TURN #{self._context_injection_count + 1}] 🔄 Refreshing context before AI response...")
+            start_time = time.time()
+            
+            # Get enhanced instructions with fresh context
             enhanced = await self.get_enhanced_instructions()
             
             # Update instructions before LLM processes the message
             self.update_instructions(enhanced)
             
-            logging.info("[BEFORE_REPLY] ✓ Context refreshed, instructions updated")
+            elapsed = (time.time() - start_time) * 1000
+            logging.info(f"[ON_AGENT_TURN #{self._context_injection_count}] ✓ Context refreshed in {elapsed:.1f}ms")
         except Exception as e:
-            logging.error(f"[BEFORE_REPLY ERROR] {e}")
+            logging.error(f"[ON_AGENT_TURN ERROR] {e}", exc_info=True)
     
     async def on_user_turn_completed(self, turn_ctx, new_message):
         """
-        Automatically save user input as memory AND update profiles + RAG system.
-        ZERO-LATENCY: All processing happens in background without blocking responses.
+        Called after user completes their turn.
+        Handles background processing and cache invalidation.
         
-        AUTOMATIC CONTEXT INJECTION:
-        Context is automatically fetched and injected into the next AI response
-        without requiring any tool calls. This provides:
-        - Instant access to user profile, state, memories
-        - Multi-layer caching (session → Redis → database)
-        - No manual retrieval needed
+        IMPORTANT: Context refresh happens in on_agent_turn_started() hook.
+        This method handles:
+        - User input logging
+        - RAG conversation context update
+        - Cache invalidation after user input
+        - Background memory processing (zero-latency)
         """
         user_text = new_message.text_content or ""
-        logging.info(f"[USER INPUT] {user_text[:100]}{'...' if len(user_text) > 100 else ''}")
+        logging.info(f"[USER INPUT] 💬 {user_text[:100]}{'...' if len(user_text) > 100 else ''}")
 
         if not can_write_for_current_user():
             logging.debug("[AUTO PROCESSING] Skipped (no valid user_id or no DB)")
@@ -902,12 +948,16 @@ This context appears in the "AUTOMATIC CONTEXT" section above. Use it naturally 
             user_id = get_current_user_id()
             rag_service = RAGService(user_id)
             rag_service.update_conversation_context(user_text)
+            logging.debug(f"[CONTEXT UPDATE] ✓ RAG context updated with user input")
         except Exception as e:
             logging.error(f"[CONTEXT UPDATE ERROR] {e}")
-
-        # CRITICAL: Refresh context BEFORE AI generates reply
-        # Call the pre-processing hook
-        await self.before_generate_reply()
+        
+        # Invalidate context cache after user input
+        try:
+            await self._invalidate_context_cache(user_id)
+            logging.debug(f"[CACHE INVALIDATION] ✓ Context cache invalidated after user input")
+        except Exception as e:
+            logging.error(f"[CACHE INVALIDATION ERROR] {e}")
 
         # Fire-and-forget background processing (zero latency impact)
         asyncio.create_task(self._process_with_rag_background(user_text))
@@ -917,9 +967,10 @@ This context appears in the "AUTOMATIC CONTEXT" section above. Use it naturally 
         try:
             user_id = get_current_user_id()
             if not user_id:
+                logging.debug("[BACKGROUND] No user_id, skipping background processing")
                 return
             
-            logging.info(f"[BACKGROUND] Processing user input with RAG (optimized)...")
+            logging.info(f"[BACKGROUND] 🔄 Processing user input with RAG (optimized)...")
             start_time = time.time()
             
             # Initialize services
@@ -929,26 +980,30 @@ This context appears in the "AUTOMATIC CONTEXT" section above. Use it naturally 
             ts_ms = int(time.time() * 1000)
             memory_key = f"user_input_{ts_ms}"
             
-            # Parallel execution: categorization, profile retrieval
+            # OPTIMIZATION: Parallel execution with timeout for categorization and profile
             categorization_task = asyncio.to_thread(categorize_user_input, user_text, self.memory_service)
             profile_task = asyncio.to_thread(self.profile_service.get_profile)
             
-            # Wait for both tasks to complete in parallel
-            category, existing_profile = await asyncio.gather(
-                categorization_task,
-                profile_task,
-                return_exceptions=True
-            )
+            # Wait for both tasks to complete in parallel with timeout
+            try:
+                category, existing_profile = await asyncio.wait_for(
+                    asyncio.gather(categorization_task, profile_task, return_exceptions=True),
+                    timeout=3.0  # Max 3 seconds for categorization + profile fetch
+                )
+            except asyncio.TimeoutError:
+                logging.warning(f"[BACKGROUND] ⚠️  Categorization/profile timeout, using defaults")
+                category = "FACT"
+                existing_profile = ""
             
             # Handle exceptions from gather
             if isinstance(category, Exception):
-                logging.warning(f"[BACKGROUND] Categorization error: {category}, using FACT")
+                logging.warning(f"[BACKGROUND] ⚠️  Categorization error: {category}, using FACT")
                 category = "FACT"
             if isinstance(existing_profile, Exception):
-                logging.warning(f"[BACKGROUND] Profile retrieval error: {existing_profile}")
+                logging.warning(f"[BACKGROUND] ⚠️  Profile retrieval error: {existing_profile}")
                 existing_profile = ""
             
-            logging.info(f"[AUTO MEMORY] Saving: [{category}] {memory_key}")
+            logging.info(f"[AUTO MEMORY] 💾 Saving: [{category}] {memory_key}")
             
             # Parallel execution: Save memory, add to RAG, update profile
             memory_task = asyncio.to_thread(self.memory_service.save_memory, category, memory_key, user_text)
@@ -959,7 +1014,7 @@ This context appears in the "AUTOMATIC CONTEXT" section above. Use it naturally 
                 category=category,
                 metadata={"key": memory_key, "timestamp": ts_ms}
             )
-            logging.debug(f"[RAG] ✓ Queued for indexing")
+            logging.debug(f"[RAG] ✅ Memory queued for indexing")
             
             # Generate profile update in parallel with memory save
             profile_generation_task = asyncio.to_thread(
@@ -977,20 +1032,20 @@ This context appears in the "AUTOMATIC CONTEXT" section above. Use it naturally 
             
             # Handle exceptions
             if isinstance(memory_success, Exception):
-                logging.error(f"[AUTO MEMORY] ✗ Error: {memory_success}")
+                logging.error(f"[AUTO MEMORY] ❌ Error: {memory_success}")
                 memory_success = False
             elif memory_success:
-                logging.info(f"[AUTO MEMORY] ✓ Saved to Supabase")
+                logging.info(f"[AUTO MEMORY] ✅ Saved to Supabase")
             
             if isinstance(generated_profile, Exception):
-                logging.error(f"[AUTO PROFILE] Error: {generated_profile}")
+                logging.error(f"[AUTO PROFILE] ❌ Error: {generated_profile}")
             elif generated_profile and generated_profile != existing_profile:
                 # Save profile asynchronously with Redis cache invalidation
                 profile_success = await self.profile_service.save_profile_async(generated_profile)
                 if profile_success:
-                    logging.info(f"[AUTO PROFILE] ✓ Updated (cache invalidated)")
+                    logging.info(f"[AUTO PROFILE] ✅ Updated (cache invalidated)")
             else:
-                logging.debug(f"[AUTO PROFILE] No new info")
+                logging.debug(f"[AUTO PROFILE] ℹ️  No new info to extract")
             
             # Background: Update conversation state based on user input
             try:
@@ -1001,19 +1056,21 @@ This context appears in the "AUTOMATIC CONTEXT" section above. Use it naturally 
                 )
                 
                 if state_update.get("action_taken") == "stage_transition":
-                    logging.info(f"[AUTO STATE] ✓ Transitioned: {state_update['old_state']['stage']} → {state_update['new_state']['stage']}")
+                    logging.info(f"[AUTO STATE] 🔄 Transitioned: {state_update['old_state']['stage']} → {state_update['new_state']['stage']}")
                 elif state_update.get("action_taken") == "trust_adjustment":
                     old_trust = state_update['old_state']['trust_score']
                     new_trust = state_update['new_state']['trust_score']
-                    logging.info(f"[AUTO STATE] ✓ Trust adjusted: {old_trust:.1f} → {new_trust:.1f}")
+                    logging.info(f"[AUTO STATE] 📊 Trust adjusted: {old_trust:.1f} → {new_trust:.1f}")
+                else:
+                    logging.debug(f"[AUTO STATE] ℹ️  No state changes needed")
             except Exception as e:
-                logging.error(f"[AUTO STATE] Error: {e}")
+                logging.error(f"[AUTO STATE] ❌ Error: {e}", exc_info=True)
             
             elapsed = time.time() - start_time
-            logging.info(f"[BACKGROUND] ✓ Completed in {elapsed:.2f}s (optimized with parallel processing)")
+            logging.info(f"[BACKGROUND] ✅ Completed in {elapsed:.2f}s (optimized with parallel processing)")
             
         except Exception as e:
-            logging.error(f"[BACKGROUND ERROR] {e}")
+            logging.error(f"[BACKGROUND ERROR] ❌ {e}", exc_info=True)
 
 
 # ---------------------------
@@ -1103,17 +1160,26 @@ async def entrypoint(ctx: agents.JobContext):
     except Exception as e:
         print(f"[BATCH] Warning: Prefetch failed: {e}")
     
-    # Initialize RAG system and onboarding (parallel, background)
-    print("[INIT] Starting parallel initialization (RAG + Onboarding)...")
+    # Initialize RAG system and onboarding (parallel)
+    print("[INIT] 🔄 Starting parallel initialization (RAG + Onboarding)...")
     rag_service = RAGService(user_id)
     onboarding_service = OnboardingService(supabase)
     
-    # Launch both in parallel (background, zero latency)
-    rag_task = asyncio.create_task(rag_service.load_from_database(supabase, limit=500))
+    # OPTIMIZED: Load top 100 memories immediately, rest in background
+    # This reduces initial latency while ensuring core memories are available
+    print("[RAG] Loading critical memories from database...")
+    rag_initial_task = asyncio.create_task(rag_service.load_from_database(supabase, limit=100))
     onboarding_task = asyncio.create_task(onboarding_service.initialize_user_from_onboarding(user_id))
     
-    print("[RAG] ✓ Initialized (loading memories in background)")
-    print("[ONBOARDING] ✓ User initialization queued")
+    # Wait for initial batch and onboarding
+    await asyncio.gather(rag_initial_task, onboarding_task, return_exceptions=True)
+    
+    print("[RAG] ✓ Critical memories loaded (100 most recent)")
+    print("[ONBOARDING] ✓ User initialization complete")
+    
+    # Load remaining memories in background (non-blocking)
+    asyncio.create_task(rag_service.load_from_database(supabase, limit=400, offset=100))
+    print("[RAG] 🔄 Loading remaining memories in background...")
 
     # Test Supabase connection
     if supabase:
@@ -1134,7 +1200,8 @@ async def entrypoint(ctx: agents.JobContext):
         print("[SUPABASE] ✗ Not connected; running without persistence")
 
     # Intelligent first message with AUTOMATIC CONTEXT INJECTION
-    logging.info(f"[GREETING] Generating intelligent first message with automatic context injection...")
+    logging.info(f"[GREETING] 🎯 Generating intelligent first message...")
+    logging.info(f"[GREETING] Context will be auto-injected via on_agent_turn_started() hook")
     
     # Get conversation state
     conversation_state_service = ConversationStateService(supabase)
@@ -1151,25 +1218,19 @@ async def entrypoint(ctx: agents.JobContext):
         assistant_instructions=assistant._base_instructions
     )
     
-    # CRITICAL: Refresh context BEFORE first reply using the pre-processing hook
-    # This ensures even the first message uses enhanced context with profile, memories, and state
-    logging.info("[GREETING] Refreshing context before first reply...")
-    await assistant.before_generate_reply()
+    # Combine: Base Instructions + Greeting Strategy + Stage Guidance
+    # Note: Context will be auto-injected by on_agent_turn_started() hook
+    final_instructions = assistant._base_instructions + "\n\n" + first_message_instructions + "\n\n" + stage_guidance
     
-    # Get current enhanced instructions (now with context injected)
-    current_instructions = assistant.instructions
-    
-    # Combine: Current Enhanced Instructions + Greeting Strategy + Stage Guidance
-    final_instructions = current_instructions + "\n\n" + first_message_instructions + "\n\n" + stage_guidance
-    
-    # Update the agent's instructions with the full greeting strategy
+    # Update the agent's instructions with the greeting strategy
     assistant.update_instructions(final_instructions)
     
-    cache_stats = assistant.conversation_context_service.get_stats()
-    logging.info(f"[GREETING] ✓ Context injected (cache hit rate: {cache_stats['hit_rate']})")
-    logging.info(f"[GREETING] Strategy ready, generating response...")
+    logging.info(f"[GREETING] ✓ Greeting strategy prepared")
+    logging.info(f"[GREETING] 🚀 Generating response (context will be auto-injected)...")
     
-    # Generate the greeting - the updated instructions will be used
+    # Generate the greeting
+    # on_agent_turn_started() will be called automatically before LLM inference
+    # This ensures context is fresh and cache is properly used
     await session.generate_reply()
 
 

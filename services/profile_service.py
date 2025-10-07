@@ -22,6 +22,7 @@ class ProfileService:
     def generate_profile(self, user_input: str, existing_profile: str = "") -> str:
         """
         Generate or update comprehensive user profile using OpenAI.
+        OPTIMIZED: Skip generation for trivial inputs or when profile is complete.
         
         Args:
             user_input: New information to incorporate
@@ -32,6 +33,17 @@ class ProfileService:
         """
         if not user_input or not user_input.strip():
             return existing_profile
+        
+        # OPTIMIZATION: Skip profile generation for short/trivial inputs
+        if len(user_input.strip()) < 15:
+            return existing_profile
+        
+        # OPTIMIZATION: Skip if profile is long enough and input seems trivial
+        if existing_profile and len(existing_profile) > 200:
+            # Check if input contains meaningful profile information
+            trivial_patterns = ["ok", "okay", "yes", "no", "haan", "nahi", "achha", "theek"]
+            if user_input.lower().strip() in trivial_patterns:
+                return existing_profile
         
         try:
             # Use pooled OpenAI client
@@ -72,10 +84,11 @@ class ProfileService:
             profile = response.choices[0].message.content.strip()
             
             if profile == "NO_PROFILE_INFO" or len(profile) < 20:
-                print(f"[PROFILE SERVICE] No meaningful profile info found in: {user_input[:50]}...")
+                print(f"[PROFILE SERVICE] ℹ️  No meaningful profile info found in: {user_input[:50]}...")
                 return existing_profile
             
-            print(f"[PROFILE SERVICE] {'Updated' if existing_profile else 'Generated'} profile")
+            print(f"[PROFILE SERVICE] ✅ {'Updated' if existing_profile else 'Generated'} profile:")
+            print(f"[PROFILE SERVICE]    {profile[:150]}{'...' if len(profile) > 150 else ''}")
             return profile
             
         except Exception as e:
@@ -101,14 +114,17 @@ class ProfileService:
             return False
         
         try:
+            print(f"[PROFILE SERVICE] 💾 Saving profile for user {uid[:8]}...")
+            print(f"[PROFILE SERVICE]    {profile_text[:150]}{'...' if len(profile_text) > 150 else ''}")
+            
             resp = self.supabase.table("user_profiles").upsert({
                 "user_id": uid,
                 "profile_text": profile_text,
             }).execute()
             if getattr(resp, "error", None):
-                print(f"[PROFILE SERVICE] Save error: {resp.error}")
+                print(f"[PROFILE SERVICE] ❌ Save error: {resp.error}")
                 return False
-            print(f"[PROFILE SERVICE] Saved profile for user {uid}")
+            print(f"[PROFILE SERVICE] ✅ Profile saved successfully")
             return True
         except Exception as e:
             print(f"[PROFILE SERVICE] save_profile failed: {e}")
@@ -147,7 +163,8 @@ class ProfileService:
             redis_cache = await get_redis_cache()
             cache_key = f"user:{uid}:profile"
             await redis_cache.delete(cache_key)
-            print(f"[PROFILE SERVICE] Saved profile for user {uid} (cache invalidated)")
+            print(f"[PROFILE SERVICE] ✅ Profile saved successfully (cache invalidated)")
+            print(f"[PROFILE SERVICE]    User: {uid[:8]}...")
             
             return True
         except Exception as e:
@@ -172,12 +189,21 @@ class ProfileService:
             return ""
         
         try:
+            print(f"[PROFILE SERVICE] 🔍 Fetching profile for user {uid[:8]}...")
+            
             resp = self.supabase.table("user_profiles").select("profile_text").eq("user_id", uid).execute()
             if getattr(resp, "error", None):
-                print(f"[PROFILE SERVICE] Get error: {resp.error}")
+                print(f"[PROFILE SERVICE] ❌ Fetch error: {resp.error}")
                 return ""
             data = getattr(resp, "data", []) or []
-            return data[0].get("profile_text", "") if data else ""
+            
+            if data:
+                profile = data[0].get("profile_text", "")
+                print(f"[PROFILE SERVICE] ✅ Profile found: {profile[:100]}{'...' if len(profile) > 100 else ''}")
+                return profile
+            else:
+                print(f"[PROFILE SERVICE] ℹ️  No profile found yet")
+                return ""
         except Exception as e:
             print(f"[PROFILE SERVICE] get_profile failed: {e}")
             return ""
@@ -200,29 +226,34 @@ class ProfileService:
             return ""
         
         # Try Redis cache first
+        print(f"[PROFILE SERVICE] 🔍 Fetching profile (async) for user {uid[:8]}...")
         redis_cache = await get_redis_cache()
         cache_key = f"user:{uid}:profile"
         cached_profile = await redis_cache.get(cache_key)
         
         if cached_profile is not None:
-            print(f"[PROFILE SERVICE] Cache hit for user {uid}")
+            print(f"[PROFILE SERVICE] ✅ Cache hit - profile found in Redis")
+            print(f"[PROFILE SERVICE]    {cached_profile[:100]}{'...' if len(cached_profile) > 100 else ''}")
             return cached_profile
         
         # Cache miss - fetch from Supabase
+        print(f"[PROFILE SERVICE] ℹ️  Cache miss - fetching from database...")
         try:
             resp = await asyncio.to_thread(
                 lambda: self.supabase.table("user_profiles").select("profile_text").eq("user_id", uid).execute()
             )
             if getattr(resp, "error", None):
-                print(f"[PROFILE SERVICE] Get error: {resp.error}")
+                print(f"[PROFILE SERVICE] ❌ Fetch error: {resp.error}")
                 return ""
             data = getattr(resp, "data", []) or []
             if data:
                 profile = data[0].get("profile_text", "") or ""
                 # Cache for 1 hour
                 await redis_cache.set(cache_key, profile, ttl=3600)
-                print(f"[PROFILE SERVICE] Cached profile for user {uid}")
+                print(f"[PROFILE SERVICE] ✅ Profile fetched from DB and cached")
+                print(f"[PROFILE SERVICE]    {profile[:100]}{'...' if len(profile) > 100 else ''}")
                 return profile
+            print(f"[PROFILE SERVICE] ℹ️  No profile found in database yet")
             return ""
         except Exception as e:
             print(f"[PROFILE SERVICE] get_profile_async failed: {e}")

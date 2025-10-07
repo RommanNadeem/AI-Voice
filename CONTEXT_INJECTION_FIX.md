@@ -16,10 +16,11 @@ The `get_enhanced_instructions()` method existed but was only called once during
 
 The fix implements **automatic context injection for every message** by:
 
-1. **Making instructions dynamic** - Converting the `instructions` property from static to dynamic
-2. **Hook into message flow** - Using `on_user_turn_completed()` to refresh context before each AI response
-3. **Caching for performance** - Caching enhanced instructions to avoid repeated database queries
-4. **Comprehensive logging** - Adding detailed logging to track when context is injected
+1. **Using the correct LiveKit hook** - `on_agent_turn_started()` is called automatically before every AI response
+2. **Cache invalidation** - Context cache is properly invalidated after user input
+3. **Pre-loading RAG memories** - Memories are loaded from database BEFORE the first message
+4. **Comprehensive logging** - All context operations are logged with emojis for easy debugging
+5. **Multi-layer caching** - Session → Redis → Database for optimal performance
 
 ## Implementation Details
 
@@ -37,24 +38,50 @@ self.update_instructions(enhanced)
 
 This is the **correct way** to inject context - using the official LiveKit API rather than trying to override the property.
 
-### 2. Context Refresh on Every User Turn
+### 2. Using the Official LiveKit Hook
 
 ```python
-async def on_user_turn_completed(self, turn_ctx, new_message):
-    """Called after each user message"""
-    # ... existing background processing ...
+async def on_agent_turn_started(self):
+    """
+    OFFICIAL LIVEKIT HOOK: Called automatically before every agent response.
+    """
+    user_id = get_current_user_id()
+    if not user_id:
+        return
     
-    # CRITICAL: Refresh context for next AI response
+    # Get enhanced instructions with fresh context
     enhanced = await self.get_enhanced_instructions()
     
-    # Update agent instructions with context
+    # Update instructions before LLM processes the message
     self.update_instructions(enhanced)
 ```
 
-**Key Hook Point**: `on_user_turn_completed()` is called by LiveKit after each user message. We use this to:
-1. Fetch fresh context from the database/cache
-2. Format and inject context into instructions
-3. Call `update_instructions()` to apply the enhanced instructions for the next AI response
+**Key Hook Point**: `on_agent_turn_started()` is the **correct LiveKit lifecycle hook** called automatically before every AI response. This ensures:
+1. Context is fresh before EVERY AI response (not just the first one)
+2. Profile, memories, and state are up-to-date
+3. Cache is properly used and invalidated
+4. All context changes are logged for debugging
+
+### 3. Cache Invalidation After User Input
+
+```python
+async def on_user_turn_completed(self, turn_ctx, new_message):
+    """Called after user completes their turn"""
+    user_text = new_message.text_content or ""
+    
+    # Update RAG conversation context
+    rag_service.update_conversation_context(user_text)
+    
+    # CRITICAL: Invalidate cache after user input
+    await self._invalidate_context_cache(user_id)
+    
+    # Fire-and-forget background processing
+    asyncio.create_task(self._process_with_rag_background(user_text))
+```
+
+**Separation of Concerns**:
+- `on_user_turn_completed()` - Handles cache invalidation and background processing
+- `on_agent_turn_started()` - Handles context refresh before AI response
 
 ### 3. Enhanced Context Injection Method
 
@@ -74,21 +101,37 @@ async def get_enhanced_instructions(self) -> str:
     self._cached_enhanced_instructions = context_text + "\n\n" + self._base_instructions
 ```
 
-### 4. Initial Greeting with Context
-
-For the initial greeting, we also use `update_instructions()`:
+### 4. RAG Memories Loaded Before First Message
 
 ```python
-# Get context and prepare enhanced instructions
-enhanced_base = await assistant.get_enhanced_instructions()
-final_instructions = enhanced_base + "\n\n" + greeting_strategy + "\n\n" + stage_guidance
+# CRITICAL: Wait for RAG memories to load BEFORE first message
+print("[RAG] Loading memories from database...")
+rag_task = asyncio.create_task(rag_service.load_from_database(supabase, limit=500))
+onboarding_task = asyncio.create_task(onboarding_service.initialize_user_from_onboarding(user_id))
+
+# Wait for both to complete
+await asyncio.gather(rag_task, onboarding_task, return_exceptions=True)
+
+print("[RAG] ✓ Memories loaded and indexed before first message")
+```
+
+**Key Change**: Previously, RAG was loaded in the background and might not be ready for the first message. Now we **await** the loading to ensure memories are available from the start.
+
+### 5. Initial Greeting with Auto-Context
+
+```python
+# Prepare base instructions with greeting strategy
+final_instructions = assistant._base_instructions + "\n\n" + first_message_instructions + "\n\n" + stage_guidance
 
 # Update the agent's instructions
 assistant.update_instructions(final_instructions)
 
-# Generate greeting - uses the updated instructions
+# Generate greeting
+# on_agent_turn_started() will be called AUTOMATICALLY before LLM inference
 await session.generate_reply()
 ```
+
+**Important**: We no longer manually call context refresh before the greeting. The `on_agent_turn_started()` hook handles this automatically.
 
 ## Logging & Verification
 

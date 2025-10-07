@@ -42,7 +42,7 @@ class ConversationContextService:
         # Layer 1: In-memory session cache (fastest)
         self._session_cache: Dict[str, Any] = {}
         self._cache_timestamps: Dict[str, float] = {}
-        self._cache_ttl = 300  # 5 minutes for session cache
+        self._cache_ttl = 900  # 15 minutes for session cache (increased from 5 min)
         
         # Statistics
         self._session_hits = 0
@@ -116,13 +116,13 @@ class ConversationContextService:
     async def _fetch_from_database(self, user_id: str) -> Dict[str, Any]:
         """
         Fetch all context from database using parallel batched queries.
-        Optimized for minimal latency.
+        OPTIMIZED: Prioritizes critical data and uses timeouts.
         """
         if not self.supabase:
             return self._get_empty_context()
         
         try:
-            # Use parallel execution for all queries
+            # OPTIMIZATION: Use parallel execution with timeout for faster failures
             tasks = [
                 self._fetch_user_profile(user_id),
                 self._fetch_conversation_state(user_id),
@@ -132,7 +132,11 @@ class ConversationContextService:
                 self._fetch_user_name(user_id),  # Fetch name specifically
             ]
             
-            results = await asyncio.gather(*tasks, return_exceptions=True)
+            # Add timeout to prevent slow queries from blocking
+            results = await asyncio.wait_for(
+                asyncio.gather(*tasks, return_exceptions=True),
+                timeout=2.0  # Max 2 seconds for all queries
+            )
             
             # Unpack results
             profile = results[0] if not isinstance(results[0], Exception) else ""
@@ -151,7 +155,13 @@ class ConversationContextService:
                 "user_name": user_name,  # Add name separately
                 "fetched_at": datetime.utcnow().isoformat(),
             }
-            
+        except asyncio.TimeoutError:
+            print(f"[CONTEXT] ⚠️  Database fetch timeout (>2s), returning cached or empty")
+            # Try to return stale cache if available
+            if cache_key in self._session_cache:
+                print(f"[CONTEXT] Using stale cache due to timeout")
+                return self._session_cache[cache_key]
+            return self._get_empty_context()
         except Exception as e:
             print(f"[CONTEXT] Error fetching context: {e}")
             return self._get_empty_context()
@@ -162,9 +172,11 @@ class ConversationContextService:
         Checks multiple possible keys: name, user_name, full_name.
         """
         try:
+            print(f"[CONTEXT SERVICE] 🔍 Fetching user's first name for {user_id[:8]}...")
+            
             result = await asyncio.to_thread(
                 lambda: self.supabase.table("memory")
-                .select("value")
+                .select("value, key")
                 .eq("user_id", user_id)
                 .or_("key.eq.name,key.eq.user_name,key.eq.full_name,key.ilike.%name%")
                 .order("created_at", desc=True)
@@ -172,10 +184,16 @@ class ConversationContextService:
                 .execute()
             )
             if result.data:
-                return result.data[0].get("value", None)
+                name = result.data[0].get("value", None)
+                key = result.data[0].get("key", "unknown")
+                if name:
+                    print(f"[CONTEXT SERVICE] ✅ User's name found: '{name}' (from key: {key})")
+                    return name
+            
+            print(f"[CONTEXT SERVICE] ℹ️  User's name not found yet")
             return None
         except Exception as e:
-            print(f"[CONTEXT] Name fetch error: {e}")
+            print(f"[CONTEXT SERVICE] ❌ Name fetch error: {e}")
             return None
     
     async def _fetch_user_profile(self, user_id: str) -> str:
@@ -368,7 +386,10 @@ class ConversationContextService:
         # USER'S NAME - TOP PRIORITY (if available)
         user_name = context.get("user_name")
         if user_name:
+            print(f"[CONTEXT FORMAT] 👤 Injecting user's name into context: '{user_name}'")
             parts.append(f"## User's Name\n**{user_name}**\n")
+        else:
+            print(f"[CONTEXT FORMAT] ℹ️  No user name available for context injection")
         
         # Extract critical info first (gender, key preferences)
         memories = context.get("recent_memories", [])

@@ -41,11 +41,15 @@ class MemoryService:
                 "key": key,
                 "value": value,
             }
+            print(f"[MEMORY SERVICE] 💾 Saving memory: [{category}] {key}")
+            print(f"[MEMORY SERVICE]    Value: {value[:100]}{'...' if len(value) > 100 else ''}")
+            print(f"[MEMORY SERVICE]    User: {uid[:8]}...")
+            
             resp = self.supabase.table("memory").upsert(memory_data).execute()
             if getattr(resp, "error", None):
-                print(f"[MEMORY SERVICE] Save error: {resp.error}")
+                print(f"[MEMORY SERVICE] ❌ Save error: {resp.error}")
                 return False
-            print(f"[MEMORY SERVICE] Saved [{category}] {key}")
+            print(f"[MEMORY SERVICE] ✅ Saved successfully: [{category}] {key}")
             return True
         except Exception as e:
             print(f"[MEMORY SERVICE] save_memory failed: {e}")
@@ -71,16 +75,26 @@ class MemoryService:
             return None
         
         try:
+            print(f"[MEMORY SERVICE] 🔍 Fetching memory: [{category}] {key}")
+            print(f"[MEMORY SERVICE]    User: {uid[:8]}...")
+            
             resp = self.supabase.table("memory").select("value") \
                             .eq("user_id", uid) \
                             .eq("category", category) \
                             .eq("key", key) \
                             .execute()
             if getattr(resp, "error", None):
-                print(f"[MEMORY SERVICE] Get error: {resp.error}")
+                print(f"[MEMORY SERVICE] ❌ Fetch error: {resp.error}")
                 return None
             data = getattr(resp, "data", []) or []
-            return data[0].get("value") if data else None
+            
+            if data:
+                value = data[0].get("value")
+                print(f"[MEMORY SERVICE] ✅ Found: {value[:100]}{'...' if len(value) > 100 else ''}")
+                return value
+            else:
+                print(f"[MEMORY SERVICE] ℹ️  Not found: [{category}] {key}")
+                return None
         except Exception as e:
             print(f"[MEMORY SERVICE] get_memory failed: {e}")
             return None
@@ -105,13 +119,18 @@ class MemoryService:
             return []
         
         try:
+            print(f"[MEMORY SERVICE] 🔍 Fetching memories by category: [{category}] (limit: {limit})")
+            print(f"[MEMORY SERVICE]    User: {uid[:8]}...")
+            
             resp = self.supabase.table("memory").select("*") \
                             .eq("user_id", uid) \
                             .eq("category", category) \
                             .order("created_at", desc=True) \
                             .limit(limit) \
                             .execute()
-            return getattr(resp, "data", []) or []
+            data = getattr(resp, "data", []) or []
+            print(f"[MEMORY SERVICE] ✅ Found {len(data)} memories in category [{category}]")
+            return data
         except Exception as e:
             print(f"[MEMORY SERVICE] get_memories_by_category failed: {e}")
             return []
