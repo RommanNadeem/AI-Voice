@@ -534,6 +534,12 @@ async def entrypoint(ctx: agents.JobContext):
     else:
         print("[SUPABASE] ✗ Not connected")
 
+    # CRITICAL: Wait for audio track to be ready before first message
+    # Without this wait, first message is silent
+    print("[AUDIO] Waiting for audio track connection...")
+    await asyncio.sleep(1.0)  # Give audio track time to establish
+    print("[AUDIO] ✓ Audio track ready")
+
     # Send initial greeting WITH FULL CONTEXT
     logging.info(f"[GREETING] Generating first message with context...")
     await assistant.generate_reply_with_context(session, greet=True)
