@@ -1041,15 +1041,15 @@ Example: "Assalam-o-alaikum! Aap kaise hain?"
     logging.info(f"[GREETING] 🚀 Generating first message (lightweight mode)...")
     logging.info(f"[GREETING] Instructions length: {len(full_instructions)} chars")
     
-    # CRITICAL: Use session.say() to speak first, not generate_reply()
-    # generate_reply() expects user input first (listening mode)
-    # say() allows agent to speak proactively
+    # Generate first message using generate_reply() with instructions parameter
+    # This is the proper LiveKit way to make agent speak first
     try:
-        # Create a simple prompt to trigger the greeting
-        greeting_prompt = "Start the conversation with a warm Urdu greeting as instructed."
+        logging.info(f"[GREETING] Calling generate_reply with greeting instructions...")
         
-        logging.info(f"[GREETING] Triggering agent to speak first...")
-        await session.say(greeting_prompt, allow_interruptions=True)
+        # Use generate_reply with instructions to make agent speak first
+        await session.generate_reply(
+            instructions="Start the conversation with a warm, welcoming greeting in Urdu as specified in your instructions."
+        )
         
         logging.info(f"[GREETING] ✓ First message sent!")
         logging.info(f"[BACKGROUND] Session now ready for user input")
