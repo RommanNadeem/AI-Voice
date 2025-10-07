@@ -998,65 +998,45 @@ async def entrypoint(ctx: agents.JobContext):
     else:
         print("[SUPABASE] ✗ Not connected; running without persistence")
 
-    # OPTIMIZED: Simple first message with minimal context (name + last conversation only)
-    logging.info(f"[GREETING] 🚀 Generating FAST first message (simple greeting)...")
+    # OPTIMIZED: Simple first message with minimal context
+    logging.info(f"[GREETING] 🚀 Generating first message...")
     
-    # Get simple greeting instructions (name + last conversation only)
-    conversation_service = ConversationService(supabase)
+    # Prepare extra context (name, last conversation, etc.)
+    extra_context = ""
+    
+    # Get user's name if available
     try:
-        first_message_instructions = await asyncio.wait_for(
-            conversation_service.get_simple_greeting_instructions(
-                user_id=user_id,
-                assistant_instructions=assistant._base_instructions
-            ),
-            timeout=1.5  # Max 1.5 seconds for greeting preparation
-        )
-        logging.info(f"[GREETING] ✓ Simple greeting prepared")
-    except asyncio.TimeoutError:
-        logging.warning(f"[GREETING] ⚠️  Timeout, using fallback greeting")
-        first_message_instructions = """
-
-## First Message - Simple Greeting
-Start with a warm, welcoming greeting in Urdu. Keep it simple and friendly.
-
-Example: "Assalam-o-alaikum! Aaj aap kaise hain?"
-
-"""
-    except Exception as e:
-        logging.error(f"[GREETING] ❌ Error: {e}")
-        first_message_instructions = """
-
-## First Message - Fallback
-Start with a simple greeting in Urdu.
-
-Example: "Assalam-o-alaikum! Aap kaise hain?"
-
-"""
-    
-    # Update the agent's instructions: BASE + GREETING
-    # CRITICAL: Must include base instructions or AI has no personality/rules!
-    full_instructions = assistant._base_instructions + "\n\n" + first_message_instructions
-    assistant.update_instructions(full_instructions)
-    
-    logging.info(f"[GREETING] 🚀 Generating first message (lightweight mode)...")
-    logging.info(f"[GREETING] Instructions length: {len(full_instructions)} chars")
-    
-    # Generate first message using generate_reply() with instructions parameter
-    # This is the proper LiveKit way to make agent speak first
-    try:
-        logging.info(f"[GREETING] Calling generate_reply with greeting instructions...")
+        conversation_context_service = ConversationContextService(supabase)
+        context_data = await conversation_context_service.get_context(user_id)
         
-        # Use generate_reply with instructions to make agent speak first
+        if context_data.get("user_name"):
+            extra_context += f"User's name: {context_data['user_name']}\n"
+        
+        # Add last conversation info if recent
+        last_conv = context_data.get("last_conversation", {})
+        if last_conv.get("has_history"):
+            hours = last_conv.get("time_since_last_hours", 999)
+            if hours < 24:
+                extra_context += f"Last talked {hours:.1f} hours ago\n"
+        
+        logging.info(f"[GREETING] Extra context prepared: {len(extra_context)} chars")
+    except Exception as e:
+        logging.warning(f"[GREETING] Could not fetch context: {e}")
+    
+    # Generate first message using LiveKit pattern
+    try:
+        logging.info(f"[GREETING] Calling generate_reply with greeting mode...")
+        
+        # Use generate_reply with instructions - clean LiveKit pattern
         await session.generate_reply(
-            instructions="Start the conversation with a warm, welcoming greeting in Urdu as specified in your instructions."
+            instructions=f"Greet the user warmly in Urdu.\n\n{extra_context}"
         )
         
         logging.info(f"[GREETING] ✓ First message sent!")
         logging.info(f"[BACKGROUND] Session now ready for user input")
-        logging.info(f"[BACKGROUND] Full context will be available for next message")
     except Exception as e:
         logging.error(f"[GREETING] ❌ FAILED to generate first message: {e}", exc_info=True)
-        print(f"[GREETING] ❌ CRITICAL ERROR generating first message: {e}")
+        print(f"[GREETING] ❌ CRITICAL ERROR: {e}")
         raise
 
 
