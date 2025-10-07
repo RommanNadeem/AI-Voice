@@ -12,7 +12,7 @@ from typing import Optional
 from contextlib import asynccontextmanager
 
 from supabase import create_client, Client
-from livekit import agents
+from livekit import agents, rtc
 from livekit.agents import AgentSession, Agent, RoomInputOptions, RunContext, function_tool
 from livekit.plugins import openai as lk_openai
 from livekit.plugins import silero
@@ -985,7 +985,8 @@ async def entrypoint(ctx: agents.JobContext):
         # Check if participant has published an audio track
         if participant.track_publications:
             for track_sid, publication in participant.track_publications.items():
-                if publication.kind.name == "KIND_AUDIO" and publication.subscribed:
+                # publication.kind is an integer enum value
+                if publication.kind == rtc.TrackKind.KIND_AUDIO and publication.subscribed:
                     audio_track_ready = True
                     print(f"[AUDIO] ✓ Audio track subscribed: {track_sid}")
                     break
