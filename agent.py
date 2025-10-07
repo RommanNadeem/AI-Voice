@@ -919,8 +919,9 @@ async def entrypoint(ctx: agents.JobContext):
     )
 
     print("[SESSION INIT] Starting LiveKit session…")
+    # Start session - this will begin in listening mode by default
     await session.start(room=ctx.room, agent=assistant)
-    print("[SESSION INIT] ✓ Session started")
+    print("[SESSION INIT] ✓ Session started (currently in listening mode)")
 
     # Wait for participant
     expected_identity = None
@@ -1040,10 +1041,18 @@ Example: "Assalam-o-alaikum! Aap kaise hain?"
     logging.info(f"[GREETING] 🚀 Generating first message (lightweight mode)...")
     logging.info(f"[GREETING] Instructions length: {len(full_instructions)} chars")
     
-    # Generate the greeting
+    # CRITICAL: Use session.say() to speak first, not generate_reply()
+    # generate_reply() expects user input first (listening mode)
+    # say() allows agent to speak proactively
     try:
-        await session.generate_reply()
+        # Create a simple prompt to trigger the greeting
+        greeting_prompt = "Start the conversation with a warm Urdu greeting as instructed."
+        
+        logging.info(f"[GREETING] Triggering agent to speak first...")
+        await session.say(greeting_prompt, allow_interruptions=True)
+        
         logging.info(f"[GREETING] ✓ First message sent!")
+        logging.info(f"[BACKGROUND] Session now ready for user input")
         logging.info(f"[BACKGROUND] Full context will be available for next message")
     except Exception as e:
         logging.error(f"[GREETING] ❌ FAILED to generate first message: {e}", exc_info=True)
