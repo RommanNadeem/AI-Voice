@@ -740,7 +740,11 @@ async def entrypoint(ctx: agents.JobContext):
     """
     LiveKit agent entrypoint - simplified pattern
     """
-    print(f"[ENTRYPOINT] Starting session for room: {ctx.room.name}")
+    print("=" * 80)
+    print(f"[ENTRYPOINT] 🚀 NEW JOB RECEIVED")
+    print(f"[ENTRYPOINT] Room: {ctx.room.name}")
+    print(f"[ENTRYPOINT] Job ID: {ctx.job.id if ctx.job else 'N/A'}")
+    print("=" * 80)
 
     # Initialize infrastructure
     try:
