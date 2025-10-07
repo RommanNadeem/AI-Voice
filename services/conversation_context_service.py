@@ -217,7 +217,7 @@ class ConversationContextService:
         try:
             result = await asyncio.to_thread(
                 lambda: self.supabase.table("conversation_state")
-                .select("stage, trust_score, last_updated")
+                .select("stage, trust_score, updated_at")
                 .eq("user_id", user_id)
                 .execute()
             )
@@ -475,7 +475,7 @@ class ConversationContextService:
         return {
             "stage": "ORIENTATION",
             "trust_score": 5.0,
-            "last_updated": datetime.utcnow().isoformat(),
+            "updated_at": datetime.utcnow().isoformat(),
         }
     
     def _get_hit_rate(self) -> float:

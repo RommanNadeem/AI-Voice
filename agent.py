@@ -609,11 +609,27 @@ async def entrypoint(ctx: agents.JobContext):
         print(f"[RAG] Warning: {e}")
         print(f"[DEBUG][RAG] ❌ Load exception: {type(e).__name__}: {str(e)}")
     
-    # Load remaining memories in background (no offset support, so load all 500)
+    # Load remaining memories with a reasonable timeout
     # Note: This will re-load the first 50, but FAISS will deduplicate
-    print(f"[DEBUG][RAG] Starting background task to load 500 memories...")
-    asyncio.create_task(rag_service.load_from_database(supabase, limit=500))
-    print(f"[RAG] 🔄 Loading all 500 memories in background (includes top 50)")
+    print(f"[DEBUG][RAG] Loading all 500 memories (with 5s timeout)...")
+    try:
+        await asyncio.wait_for(
+            rag_service.load_from_database(supabase, limit=500),
+            timeout=5.0  # 5 seconds should be enough
+        )
+        rag_system = rag_service.get_rag_system()
+        if rag_system:
+            print(f"[RAG] ✅ Loaded {len(rag_system.memories)} total memories")
+            print(f"[DEBUG][RAG] FAISS index size after full load: {rag_system.index.ntotal}")
+        else:
+            print(f"[DEBUG][RAG] ⚠️ RAG system is None after loading!")
+    except asyncio.TimeoutError:
+        print(f"[RAG] ⚠️ Full load timeout (>5s), will complete in background")
+        # Continue loading in background if timeout
+        asyncio.create_task(rag_service.load_from_database(supabase, limit=500))
+    except Exception as e:
+        print(f"[RAG] ⚠️ Load error: {e}")
+        print(f"[DEBUG][RAG] ❌ Full load exception: {type(e).__name__}: {str(e)}")
 
     # Prefetch user data
     try:
