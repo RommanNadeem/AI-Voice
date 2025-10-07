@@ -129,6 +129,7 @@ class ConversationContextService:
                 self._fetch_recent_memories(user_id),
                 self._fetch_onboarding_data(user_id),
                 self._fetch_last_conversation(user_id),
+                self._fetch_user_name(user_id),  # Fetch name specifically
             ]
             
             results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -139,6 +140,7 @@ class ConversationContextService:
             memories = results[2] if not isinstance(results[2], Exception) else []
             onboarding = results[3] if not isinstance(results[3], Exception) else {}
             last_conv = results[4] if not isinstance(results[4], Exception) else {}
+            user_name = results[5] if not isinstance(results[5], Exception) else None
             
             return {
                 "user_profile": profile,
@@ -146,12 +148,35 @@ class ConversationContextService:
                 "recent_memories": memories,
                 "onboarding_data": onboarding,
                 "last_conversation": last_conv,
+                "user_name": user_name,  # Add name separately
                 "fetched_at": datetime.utcnow().isoformat(),
             }
             
         except Exception as e:
             print(f"[CONTEXT] Error fetching context: {e}")
             return self._get_empty_context()
+    
+    async def _fetch_user_name(self, user_id: str) -> Optional[str]:
+        """
+        Fetch user's name from memory.
+        Checks multiple possible keys: name, user_name, full_name.
+        """
+        try:
+            result = await asyncio.to_thread(
+                lambda: self.supabase.table("memory")
+                .select("value")
+                .eq("user_id", user_id)
+                .or_("key.eq.name,key.eq.user_name,key.eq.full_name,key.ilike.%name%")
+                .order("created_at", desc=True)
+                .limit(1)
+                .execute()
+            )
+            if result.data:
+                return result.data[0].get("value", None)
+            return None
+        except Exception as e:
+            print(f"[CONTEXT] Name fetch error: {e}")
+            return None
     
     async def _fetch_user_profile(self, user_id: str) -> str:
         """Fetch user profile"""
@@ -186,9 +211,24 @@ class ConversationContextService:
             return self._get_default_state()
     
     async def _fetch_recent_memories(self, user_id: str, limit: int = 10) -> List[Dict]:
-        """Fetch recent important memories"""
+        """
+        Fetch recent important memories with priority for critical info.
+        Prioritizes: name, preferences, goals, then recent memories.
+        """
         try:
-            result = await asyncio.to_thread(
+            # First, get critical memories (name, preferences)
+            critical_result = await asyncio.to_thread(
+                lambda: self.supabase.table("memory")
+                .select("category, key, value, created_at")
+                .eq("user_id", user_id)
+                .in_("category", ["FACT", "PREFERENCE", "PRESENTATION"])
+                .order("created_at", desc=True)
+                .limit(5)
+                .execute()
+            )
+            
+            # Then get recent memories
+            recent_result = await asyncio.to_thread(
                 lambda: self.supabase.table("memory")
                 .select("category, key, value, created_at")
                 .eq("user_id", user_id)
@@ -196,7 +236,28 @@ class ConversationContextService:
                 .limit(limit)
                 .execute()
             )
-            return result.data or []
+            
+            # Combine and deduplicate
+            critical_memories = critical_result.data or []
+            recent_memories = recent_result.data or []
+            
+            # Create a dict to deduplicate by key
+            memory_dict = {}
+            
+            # Add critical memories first (higher priority)
+            for mem in critical_memories:
+                key = f"{mem['category']}:{mem['key']}"
+                memory_dict[key] = mem
+            
+            # Add recent memories
+            for mem in recent_memories:
+                key = f"{mem['category']}:{mem['key']}"
+                if key not in memory_dict:
+                    memory_dict[key] = mem
+            
+            # Return as list, limit to specified amount
+            return list(memory_dict.values())[:limit]
+            
         except Exception as e:
             print(f"[CONTEXT] Memories fetch error: {e}")
             return []
@@ -300,12 +361,47 @@ class ConversationContextService:
         """
         Format context into a string that can be injected into assistant instructions.
         This is automatically included in every AI response.
+        Prioritizes critical info like name, then recent context.
         """
         parts = []
+        
+        # USER'S NAME - TOP PRIORITY (if available)
+        user_name = context.get("user_name")
+        if user_name:
+            parts.append(f"## User's Name\n**{user_name}**\n")
+        
+        # Extract critical info first (gender, key preferences)
+        memories = context.get("recent_memories", [])
+        critical_info = []
+        other_memories = []
+        
+        for m in memories:
+            # Check if this is critical info (gender, key facts, preferences)
+            key_lower = m.get('key', '').lower()
+            category = m.get('category', '')
+            value = m.get('value', '')
+            
+            # Skip name (already shown above)
+            if 'name' in key_lower:
+                continue
+                
+            if ('gender' in key_lower or 
+                category in ['FACT', 'PRESENTATION'] and len(value) < 100):
+                critical_info.append(m)
+            else:
+                other_memories.append(m)
         
         # User Profile
         if context.get("user_profile"):
             parts.append(f"## User Profile\n{context['user_profile']}\n")
+        
+        # Critical Info (gender, key facts) - ALWAYS show full value
+        if critical_info:
+            critical_text = "\n".join([
+                f"- {m['key']}: {m['value']}"  # Full value, no truncation
+                for m in critical_info[:5]
+            ])
+            parts.append(f"## Key Information\n{critical_text}\n")
         
         # Conversation State
         state = context.get("conversation_state", {})
@@ -314,12 +410,11 @@ class ConversationContextService:
             trust = state.get("trust_score", 5.0)
             parts.append(f"## Current Stage\nStage: {stage} | Trust Level: {trust:.1f}/10\n")
         
-        # Recent Memories (top 5)
-        memories = context.get("recent_memories", [])
-        if memories:
+        # Recent Memories (other context, can be truncated)
+        if other_memories:
             memory_text = "\n".join([
-                f"- {m['category']}: {m['value'][:100]}"
-                for m in memories[:5]
+                f"- {m['category']}: {m['value'][:150]}"  # Increased from 100 to 150
+                for m in other_memories[:5]
             ])
             parts.append(f"## Recent Context\n{memory_text}\n")
         
@@ -350,6 +445,7 @@ class ConversationContextService:
             "recent_memories": [],
             "onboarding_data": {},
             "last_conversation": {"has_history": False},
+            "user_name": None,
             "fetched_at": datetime.utcnow().isoformat(),
         }
     
