@@ -49,8 +49,13 @@ from infrastructure.database_batcher import get_db_batcher, get_db_batcher_sync,
 # Logging Configuration
 # ---------------------------
 logging.basicConfig(level=logging.INFO)
-for noisy in ("httpx", "httpcore", "hpack", "urllib3"):
+# Suppress noisy libraries and audio data logging
+for noisy in ("httpx", "httpcore", "hpack", "urllib3", "openai", "httpx._client", "httpcore.http11", "httpcore.connection"):
     logging.getLogger(noisy).setLevel(logging.WARNING)
+
+# Suppress OpenAI HTTP client verbose logging (prevents binary audio in console)
+logging.getLogger("openai._base_client").setLevel(logging.ERROR)
+logging.getLogger("httpx").setLevel(logging.ERROR)
 
 # ---------------------------
 # Supabase Client Setup
