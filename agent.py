@@ -207,8 +207,7 @@ At the same time, you gently help the user reflect on themselves and learn more 
 
 To keep conversations alive, natural, and engaging, follow these principles:
 
-- **React like a person** Start with a short emotional beat. When felt appropriate.
-  Emotion first, logic second.  
+- **React like a person** Start with a short emotional beat. When felt appropriate. Emotion first, logic second.  
 
 - **Add a Point of View** Share tiny opinions, playful teasing, or mild contradictions. Keep it safe but spicy.  
 
@@ -478,6 +477,19 @@ For every message you generate:
         Generate reply with STRONG context emphasis.
         SKIPS RAG - queries memory table directly by categories.
         """
+        # Check if session is running before proceeding
+        if not hasattr(session, '_started') or not session._started:
+            print(f"[DEBUG][SESSION] ⚠️ Session not started yet, waiting...")
+            # Wait a bit for session to be ready
+            for i in range(10):  # Try for up to 2 seconds
+                await asyncio.sleep(0.2)
+                if hasattr(session, '_started') and session._started:
+                    print(f"[DEBUG][SESSION] ✓ Session ready after {(i+1)*0.2}s")
+                    break
+            else:
+                print(f"[DEBUG][SESSION] ❌ Session still not ready after 2s - aborting")
+                return
+        
         user_id = get_current_user_id()
 
         print(f"[DEBUG][USER_ID] generate_reply_with_context - user_id: {user_id[:8] if user_id else 'NONE'}")
@@ -485,7 +497,10 @@ For every message you generate:
 
         if not user_id:
             print(f"[DEBUG][USER_ID] ⚠️  No user_id available for context building!")
-            await session.generate_reply(instructions=self._base_instructions)
+            try:
+                await session.generate_reply(instructions=self._base_instructions)
+            except Exception as e:
+                print(f"[DEBUG][SESSION] ❌ Failed to generate reply: {e}")
             return
 
         try:
@@ -653,7 +668,14 @@ For every message you generate:
             print(f"[DEBUG][CONTEXT] ❌ Exception: {type(e).__name__}: {str(e)}")
             import traceback
             print(f"[DEBUG][CONTEXT] Traceback: {traceback.format_exc()}")
-            await session.generate_reply(instructions=self._base_instructions)
+            # Don't try to generate reply if session isn't running
+            if "isn't running" not in str(e):
+                try:
+                    await session.generate_reply(instructions=self._base_instructions)
+                except Exception as fallback_error:
+                    print(f"[DEBUG][CONTEXT] ❌ Fallback also failed: {fallback_error}")
+            else:
+                print(f"[DEBUG][CONTEXT] ⚠️ Session not running - skipping reply generation")
 
     async def on_user_turn_completed(self, turn_ctx, new_message):
         """Save user input to memory and update profile (background)"""
@@ -800,6 +822,10 @@ async def entrypoint(ctx: agents.JobContext):
         agent=assistant
     )
     print("[SESSION INIT] ✓ Session started and ready to listen")
+    
+    # CRITICAL: Wait a moment for session to fully initialize
+    await asyncio.sleep(0.5)
+    print("[SESSION INIT] ✓ Session initialization delay complete")
 
     # Resolve to UUID
     user_id = extract_uuid_from_identity(participant.identity)
