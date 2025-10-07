@@ -259,6 +259,33 @@ class ProfileService:
             print(f"[PROFILE SERVICE] get_profile_async failed: {e}")
             return ""
     
+    async def get_display_name_async(self, user_id: str) -> Optional[str]:
+        """
+        Get user's display name from profile (async version).
+        
+        Args:
+            user_id: User ID (explicit, required)
+            
+        Returns:
+            Display name or None
+        """
+        if not user_id:
+            return None
+        
+        try:
+            resp = await asyncio.to_thread(
+                lambda: self.supabase.table("user_profiles").select("display_name")
+                    .eq("user_id", user_id)
+                    .execute()
+            )
+            if getattr(resp, "error", None):
+                return None
+            data = getattr(resp, "data", []) or []
+            return data[0].get("display_name") if data else None
+        except Exception as e:
+            print(f"[PROFILE SERVICE] get_display_name_async failed: {e}")
+            return None
+    
     async def detect_gender_from_name(self, name: str, user_id: Optional[str] = None) -> Dict[str, str]:
         """
         Detect likely gender from user's name using OpenAI.

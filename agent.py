@@ -199,7 +199,7 @@ Your main goal is "to be like a close, platonic female urdu speaking friend, use
 
 ### Tool Usage
 - **`storeInMemory(category, key, value)`** — for specific facts/preferences with known keys.
-- **`retrieveFromMemory(query)`** — retrieve a specific memory by exact category and key.  
+- **`retrieveFromMemory(category, key)`** — retrieve a specific memory by exact category and key.  
 - **`searchMemories(query, limit)`** — POWERFUL semantic search across ALL memories.
 - **`createUserProfile(profile_input)`** — create or update a comprehensive user profile.
 - **`getUserProfile()`** — get the current user profile information.
@@ -376,6 +376,21 @@ Your main goal is "to be like a close, platonic female urdu speaking friend, use
             if context_data and not isinstance(context_data, Exception):
                 user_name = context_data.get("user_name")
                 print(f"[DEBUG][CONTEXT] User name from context: '{user_name}'")
+            
+            # Robust name fallback - always try to know the user
+            if not user_name:
+                try:
+                    user_name = await self.profile_service.get_display_name_async(user_id)
+                except Exception:
+                    user_name = None
+            
+            if not user_name:
+                try:
+                    user_name = await self.memory_service.get_value_async(
+                        user_id=user_id, category="FACT", key="name"
+                    )
+                except Exception:
+                    user_name = None
 
             if isinstance(profile, Exception) or not profile:
                 profile = None
@@ -403,15 +418,13 @@ Your main goal is "to be like a close, platonic female urdu speaking friend, use
             if memories_by_category:
                 for category, values in memories_by_category.items():
                     if values:
-                        mem_list = "\n".join([f"    • {v[:150]}" for v in values[:3]])
+                        mem_list = "\n".join([f"    • {(v or '')[:150]}" for v in values[:3]])
                         mem_sections.append(f"  {category}:\n{mem_list}")
 
-            categorized_mems = "\n\n".join(mem_sections) if mem_sections else "  (No memories stored yet)"
+            categorized_mems = "\n\n".join(mem_sections) if mem_sections else "  (No prior memories retrieved)"
 
             context_block = f"""
-    ╔═══════════════════════════════════════════════════════════════════╗
-    ║       🔴 CRITICAL: YOU MUST USE THIS EXISTING INFORMATION        ║
-    ╚═══════════════════════════════════════════════════════════════════╝
+    🔴 CRITICAL: YOU MUST USE THIS EXISTING INFORMATION
 
     👤 USER'S NAME: {user_name if user_name else "NOT YET KNOWN - ASK NATURALLY"}
        ⚠️  {'ALWAYS address them as: ' + user_name if user_name else 'Must ask for their name in conversation'}
@@ -421,8 +434,6 @@ Your main goal is "to be like a close, platonic female urdu speaking friend, use
 
     🧠 WHAT YOU ALREADY KNOW ABOUT {'THIS USER' if not user_name else user_name.upper()}:
     {categorized_mems}
-
-    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
     ⚠️  MANDATORY RULES FOR USING THIS CONTEXT:
     ✅ USE their name when greeting or responding (if known)
@@ -437,6 +448,13 @@ Your main goal is "to be like a close, platonic female urdu speaking friend, use
 
 
             base = self._base_instructions
+            
+            # Precompute callout_2 to avoid multiline expression in f-string
+            callout_2 = (
+                "Reference something specific from their profile or memories above"
+                if (profile or memories_by_category) else
+                "Start building rapport - ask about them naturally"
+            )
 
             if greet:
                 full_instructions = f"""{base}
@@ -447,10 +465,7 @@ Your main goal is "to be like a close, platonic female urdu speaking friend, use
 
     REQUIREMENTS:
     1. {'Use their name: ' + user_name if user_name else 'Greet warmly (name not yet known)'}
-    2. {
-    'Reference something specific from their profile or memories above' if (profile or memories_by_category) 
-    else 'Start building rapport - ask about them naturally'
-    }
+    2. {callout_2}
     3. Keep it warm, natural, and personal
     4. Use simple spoken Urdu (2 short sentences)
 
@@ -541,8 +556,8 @@ Your main goal is "to be like a close, platonic female urdu speaking friend, use
                 )
                 logging.info(f"[RAG] ✅ Indexed")
             
-            # Update profile
-            existing_profile = await asyncio.to_thread(self.profile_service.get_profile)
+            # Update profile - use async method with explicit user_id
+            existing_profile = await self.profile_service.get_profile_async(user_id)
             
             # Skip trivial inputs
             if len(user_text.strip()) > 15:
@@ -553,7 +568,7 @@ Your main goal is "to be like a close, platonic female urdu speaking friend, use
                 )
                 
                 if generated_profile and generated_profile != existing_profile:
-                    await self.profile_service.save_profile_async(generated_profile)
+                    await self.profile_service.save_profile_async(generated_profile, user_id)
                     logging.info(f"[PROFILE] ✅ Updated")
             
             logging.info(f"[BACKGROUND] ✅ Complete")
@@ -655,7 +670,7 @@ async def entrypoint(ctx: agents.JobContext):
         print(f"[DEBUG][RAG] Loading top 50 memories from database...")
         await asyncio.wait_for(
             rag_service.load_from_database(supabase, limit=50),
-            timeout=1.0
+            timeout=3.0
         )
         print(f"[RAG] ✓ Loaded top 50 memories")
         
@@ -668,7 +683,7 @@ async def entrypoint(ctx: agents.JobContext):
             print(f"[DEBUG][RAG] ❌ RAG system is None after loading!")
             
     except asyncio.TimeoutError:
-        print(f"[RAG] ⚠️  Timeout loading memories (>1s)")
+        print(f"[RAG] ⚠️  Timeout loading memories (>3s)")
         print(f"[DEBUG][RAG] ❌ Load timeout - RAG may be empty!")
     except Exception as e:
         print(f"[RAG] Warning: {e}")

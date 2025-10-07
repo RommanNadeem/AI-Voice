@@ -167,4 +167,36 @@ class MemoryService:
         except Exception as e:
             print(f"[MEMORY SERVICE] delete_memory failed: {e}")
             return False
+    
+    async def get_value_async(self, user_id: str, category: str, key: str) -> Optional[str]:
+        """
+        Get a specific memory value by category and key (async version).
+        
+        Args:
+            user_id: User ID (explicit, required)
+            category: Memory category
+            key: Memory key
+            
+        Returns:
+            Memory value or None
+        """
+        if not user_id:
+            return None
+        
+        try:
+            import asyncio
+            resp = await asyncio.to_thread(
+                lambda: self.supabase.table("memory").select("value")
+                    .eq("user_id", user_id)
+                    .eq("category", category)
+                    .eq("key", key)
+                    .execute()
+            )
+            if getattr(resp, "error", None):
+                return None
+            data = getattr(resp, "data", []) or []
+            return data[0].get("value") if data else None
+        except Exception as e:
+            print(f"[MEMORY SERVICE] get_value_async failed: {e}")
+            return None
 
