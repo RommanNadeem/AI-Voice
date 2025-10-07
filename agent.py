@@ -842,6 +842,11 @@ async def entrypoint(ctx: agents.JobContext):
     except Exception as e:
         print(f"[ENTRYPOINT] Warning: Database batcher initialization failed: {e}")
 
+    # CRITICAL: Connect to the room first
+    print("[ENTRYPOINT] Connecting to LiveKit room...")
+    await ctx.connect()
+    print("[ENTRYPOINT] ✓ Connected to room")
+
     # Initialize media + agent
     tts = TTS(voice_id="17", output_format="MP3_22050_32")
     assistant = Assistant()
@@ -1008,6 +1013,25 @@ async def entrypoint(ctx: agents.JobContext):
     
     await assistant.generate_reply_with_context(session, greet=True)
     logging.info(f"[GREETING] ✓ First message sent!")
+    
+    # CRITICAL: Keep the entrypoint alive while session is active
+    # The session runs in the background handling user interactions
+    # We need to wait until the participant disconnects
+    print("[ENTRYPOINT] 🎧 Agent is now listening and ready for conversation...")
+    print("[ENTRYPOINT] Waiting for session to complete...")
+    
+    try:
+        # Wait for the session to complete (when user disconnects)
+        await session.wait_for_completion()
+        print("[ENTRYPOINT] ✓ Session completed normally")
+    except Exception as e:
+        print(f"[ENTRYPOINT] ⚠️ Session ended with exception: {e}")
+    finally:
+        # Cleanup
+        print("[ENTRYPOINT] 🧹 Cleaning up resources...")
+        if hasattr(assistant, 'cleanup'):
+            await assistant.cleanup()
+        print("[ENTRYPOINT] ✓ Entrypoint finished")
 
 
 async def shutdown_handler():
