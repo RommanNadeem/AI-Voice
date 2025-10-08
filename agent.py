@@ -972,8 +972,40 @@ async def entrypoint(ctx: agents.JobContext):
     await ctx.connect()
     print("[ENTRYPOINT] ✓ Connected to room")
 
-    # Initialize media + agent
-    tts = TTS(voice_id="v_8eelc901", output_format="MP3_22050_32")
+    # Initialize media + agent with enhanced debugging
+    print("[TTS] 🎤 Initializing TTS with voice: v_8eelc901")
+    
+    # Check TTS environment variables
+    uplift_api_key = os.environ.get("UPLIFTAI_API_KEY")
+    uplift_base_url = os.environ.get("UPLIFTAI_BASE_URL", "wss://api.upliftai.org")
+    
+    print(f"[TTS] Environment check:")
+    print(f"[TTS] - UPLIFTAI_API_KEY: {'✓ Set' if uplift_api_key else '❌ Missing'}")
+    print(f"[TTS] - UPLIFTAI_BASE_URL: {uplift_base_url}")
+    
+    if not uplift_api_key:
+        print("[TTS] ⚠️ WARNING: UPLIFTAI_API_KEY not set! TTS will fail!")
+        print("[TTS] 💡 Set UPLIFTAI_API_KEY environment variable")
+    
+    try:
+        tts = TTS(voice_id="v_8eelc901", output_format="MP3_22050_32")
+        print("[TTS] ✓ TTS instance created successfully")
+    except Exception as e:
+        print(f"[TTS] ❌ TTS initialization failed: {e}")
+        print("[TTS] 🔄 Attempting fallback TTS configuration...")
+        # Fallback with explicit parameters
+        try:
+            tts = TTS(
+                voice_id="v_8eelc901", 
+                output_format="MP3_22050_32",
+                base_url=uplift_base_url,
+                api_key=uplift_api_key
+            )
+            print("[TTS] ✓ Fallback TTS created successfully")
+        except Exception as e2:
+            print(f"[TTS] ❌ Fallback TTS also failed: {e2}")
+            raise e2
+    
     assistant = Assistant()
     
     # Set room reference for state broadcasting
@@ -1098,35 +1130,68 @@ async def entrypoint(ctx: agents.JobContext):
         print("[SUPABASE] ✗ Not connected")
 
     # CRITICAL: Wait for audio track to be ready before first message
-    # Without this wait, first message is silent
-    print("[AUDIO] Waiting for participant audio track to be ready...")
+    # Enhanced audio track detection with better debugging
+    print("[AUDIO] 🎧 Waiting for participant audio track to be ready...")
+    print(f"[AUDIO] Participant: {participant.identity} (sid: {participant.sid})")
+    print(f"[AUDIO] Track publications count: {len(participant.track_publications)}")
+    
+    # List all track publications for debugging
+    for track_sid, publication in participant.track_publications.items():
+        print(f"[AUDIO] Track {track_sid}: kind={publication.kind}, subscribed={publication.subscribed}")
     
     # Wait for participant's audio track to be published and subscribed
-    max_wait = 5.0  # 5 seconds max
+    max_wait = 8.0  # Increased from 5s to 8s for Railway
     start_time = time.time()
     audio_track_ready = False
+    audio_track_sid = None
     
     while time.time() - start_time < max_wait:
         # Check if participant has published an audio track
         if participant.track_publications:
             for track_sid, publication in participant.track_publications.items():
                 # publication.kind is an integer enum value
-                if publication.kind == rtc.TrackKind.KIND_AUDIO and publication.subscribed:
-                    audio_track_ready = True
-                    print(f"[AUDIO] ✓ Audio track subscribed: {track_sid}")
-                    break
+                if publication.kind == rtc.TrackKind.KIND_AUDIO:
+                    print(f"[AUDIO] Found audio track {track_sid}, subscribed: {publication.subscribed}")
+                    if publication.subscribed:
+                        audio_track_ready = True
+                        audio_track_sid = track_sid
+                        print(f"[AUDIO] ✓ Audio track subscribed: {track_sid}")
+                        break
         
         if audio_track_ready:
             break
         
-        await asyncio.sleep(0.2)
+        elapsed = time.time() - start_time
+        print(f"[AUDIO] Still waiting for audio track... ({elapsed:.1f}s/{max_wait}s)")
+        await asyncio.sleep(0.3)  # Increased from 0.2s to 0.3s
     
     if not audio_track_ready:
-        print("[AUDIO] ⚠️  Audio track not fully ready, but proceeding...")
+        print("[AUDIO] ⚠️ Audio track not fully ready after timeout")
+        print("[AUDIO] 🔄 Proceeding anyway - audio might still work")
+        # Try to find any audio track, even if not subscribed
+        for track_sid, publication in participant.track_publications.items():
+            if publication.kind == rtc.TrackKind.KIND_AUDIO:
+                print(f"[AUDIO] Found unsubscribed audio track: {track_sid}")
+                break
     else:
-        # Give extra 500ms for WebRTC negotiation to stabilize
+        # Give extra time for WebRTC negotiation to stabilize
+        print(f"[AUDIO] ✓ Audio track ready: {audio_track_sid}")
+        await asyncio.sleep(0.8)  # Increased from 0.5s to 0.8s for Railway
+        print("[AUDIO] ✓ WebRTC negotiation stabilized")
+
+    # Test TTS connection before first message
+    print("[TTS] 🧪 Testing TTS connection...")
+    try:
+        # Test TTS connection with a simple message
+        test_queue = await tts.synthesize("test")
+        print("[TTS] ✓ TTS connection test initiated")
+        
+        # Wait briefly for test to complete
         await asyncio.sleep(0.5)
-        print("[AUDIO] ✓ Audio track fully ready")
+        print("[TTS] ✓ TTS connection test completed")
+    except Exception as e:
+        print(f"[TTS] ❌ TTS connection test failed: {e}")
+        print("[TTS] ⚠️ Proceeding anyway - TTS might still work for actual messages")
 
     # Send initial greeting WITH FULL CONTEXT
     logging.info(f"[GREETING] Generating first message with context...")
