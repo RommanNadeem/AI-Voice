@@ -1028,28 +1028,21 @@ async def entrypoint(ctx: agents.JobContext):
         ),
     )
 
-    # Wait for participant FIRST before starting session
+    # LiveKit Best Practice: Start session FIRST, then wait for participant
+    # The session handles participant events automatically
+    print("[SESSION INIT] Starting LiveKit session...")
+    session.start(ctx.room, agent=assistant)
+    print("[SESSION INIT] ✓ Session started, waiting for participant...")
+    
+    # Wait for participant to join using event-based approach
     print("[ENTRYPOINT] Waiting for participant to join...")
     participant = await wait_for_participant(ctx.room, timeout_s=20)
     if not participant:
-        print("[ENTRYPOINT] No participant joined within timeout")
+        print("[ENTRYPOINT] ⚠️ No participant joined within timeout")
+        print("[ENTRYPOINT] Exiting gracefully...")
         return
 
-    print(f"[ENTRYPOINT] Participant joined: sid={participant.sid}, identity={participant.identity}")
-    
-    # Start the session with the agent
-    # NOTE: In production, each user should have their own room (1:1 conversation)
-    # This ensures participants don't hear each other
-    print("[SESSION INIT] Starting LiveKit session with participant...")
-    await session.start(
-        room=ctx.room, 
-        agent=assistant
-    )
-    print("[SESSION INIT] ✓ Session started and ready to listen")
-    
-    # CRITICAL: Wait a moment for session to fully initialize
-    await asyncio.sleep(0.5)
-    print("[SESSION INIT] ✓ Session initialization delay complete")
+    print(f"[ENTRYPOINT] ✓ Participant joined: sid={participant.sid}, identity={participant.identity}")
 
     # Resolve to UUID
     user_id = extract_uuid_from_identity(participant.identity)
@@ -1129,55 +1122,25 @@ async def entrypoint(ctx: agents.JobContext):
     else:
         print("[SUPABASE] ✗ Not connected")
 
-    # CRITICAL: Wait for audio track to be ready before first message
-    # Enhanced audio track detection with better debugging
-    print("[AUDIO] 🎧 Waiting for participant audio track to be ready...")
+    # LiveKit Best Practice: Let the session handle audio tracks automatically
+    # The AgentSession subscribes to tracks and manages VAD/STT automatically
+    print("[AUDIO] 🎧 Waiting for audio track readiness...")
     print(f"[AUDIO] Participant: {participant.identity} (sid: {participant.sid})")
-    print(f"[AUDIO] Track publications count: {len(participant.track_publications)}")
     
-    # List all track publications for debugging
-    for track_sid, publication in participant.track_publications.items():
-        print(f"[AUDIO] Track {track_sid}: kind={publication.kind}, subscribed={publication.subscribed}")
+    # Brief delay for WebRTC negotiation - LiveKit handles the rest
+    # This is much simpler than manual polling
+    await asyncio.sleep(1.0)
     
-    # Wait for participant's audio track to be published and subscribed
-    max_wait = 8.0  # Increased from 5s to 8s for Railway
-    start_time = time.time()
-    audio_track_ready = False
-    audio_track_sid = None
-    
-    while time.time() - start_time < max_wait:
-        # Check if participant has published an audio track
-        if participant.track_publications:
-            for track_sid, publication in participant.track_publications.items():
-                # publication.kind is an integer enum value
-                if publication.kind == rtc.TrackKind.KIND_AUDIO:
-                    print(f"[AUDIO] Found audio track {track_sid}, subscribed: {publication.subscribed}")
-                    if publication.subscribed:
-                        audio_track_ready = True
-                        audio_track_sid = track_sid
-                        print(f"[AUDIO] ✓ Audio track subscribed: {track_sid}")
-                        break
-        
-        if audio_track_ready:
-            break
-        
-        elapsed = time.time() - start_time
-        print(f"[AUDIO] Still waiting for audio track... ({elapsed:.1f}s/{max_wait}s)")
-        await asyncio.sleep(0.3)  # Increased from 0.2s to 0.3s
-    
-    if not audio_track_ready:
-        print("[AUDIO] ⚠️ Audio track not fully ready after timeout")
-        print("[AUDIO] 🔄 Proceeding anyway - audio might still work")
-        # Try to find any audio track, even if not subscribed
+    # Log track publications for debugging
+    if participant.track_publications:
+        print(f"[AUDIO] Track publications count: {len(participant.track_publications)}")
         for track_sid, publication in participant.track_publications.items():
-            if publication.kind == rtc.TrackKind.KIND_AUDIO:
-                print(f"[AUDIO] Found unsubscribed audio track: {track_sid}")
-                break
+            track_type = "AUDIO" if publication.kind == rtc.TrackKind.KIND_AUDIO else "VIDEO" if publication.kind == rtc.TrackKind.KIND_VIDEO else "OTHER"
+            print(f"[AUDIO] - {track_type} track {track_sid}: subscribed={publication.subscribed}")
     else:
-        # Give extra time for WebRTC negotiation to stabilize
-        print(f"[AUDIO] ✓ Audio track ready: {audio_track_sid}")
-        await asyncio.sleep(0.8)  # Increased from 0.5s to 0.8s for Railway
-        print("[AUDIO] ✓ WebRTC negotiation stabilized")
+        print("[AUDIO] No track publications yet - LiveKit will subscribe automatically")
+    
+    print("[AUDIO] ✓ Audio track handling delegated to LiveKit session")
 
     # Test TTS connection before first message
     print("[TTS] 🧪 Testing TTS connection...")
@@ -1205,40 +1168,59 @@ async def entrypoint(ctx: agents.JobContext):
     await assistant.generate_reply_with_context(session, greet=True)
     logging.info(f"[GREETING] ✓ First message sent!")
     
-    # CRITICAL: Keep the entrypoint alive while session is active
-    # The session runs in the background handling user interactions
-    # We need to wait until the participant disconnects
+    # LiveKit Best Practice: Use event-based disconnection detection
+    # Set up disconnection event handler
     print("[ENTRYPOINT] 🎧 Agent is now listening and ready for conversation...")
-    print("[ENTRYPOINT] Waiting for participant to disconnect...")
+    print("[ENTRYPOINT] Setting up event handlers...")
+    
+    # Create an event to signal when participant disconnects
+    disconnect_event = asyncio.Event()
+    
+    def on_participant_disconnected(participant_obj: rtc.RemoteParticipant):
+        """Handle participant disconnection"""
+        if participant_obj.sid == participant.sid:
+            print(f"[ENTRYPOINT] 📴 Participant {participant.identity} disconnected (event)")
+            disconnect_event.set()
+    
+    # Register the event handler
+    ctx.room.on("participant_disconnected", on_participant_disconnected)
+    print("[ENTRYPOINT] ✓ Event handlers registered")
     
     try:
-        # Wait until the participant disconnects
-        # This is a simple polling loop since LiveKit doesn't have wait_for_completion
-        while True:
-            # Check if participant is still connected
-            if participant not in ctx.room.remote_participants.values():
-                print("[ENTRYPOINT] ✓ Participant disconnected")
-                break
-            
-            # Check if room is still active
-            if ctx.room.connection_state == rtc.ConnectionState.CONN_DISCONNECTED:
-                print("[ENTRYPOINT] ✓ Room disconnected")
-                break
-                
-            # Sleep briefly to avoid busy waiting
-            await asyncio.sleep(1.0)
-            
-        print("[ENTRYPOINT] ✓ Session completed normally")
+        print("[ENTRYPOINT] Waiting for participant to disconnect...")
+        
+        # Wait for either:
+        # 1. Participant disconnection event
+        # 2. Room disconnection
+        # 3. Timeout (safety net)
+        await asyncio.wait_for(disconnect_event.wait(), timeout=3600)  # 1 hour max
+        print("[ENTRYPOINT] ✓ Session completed normally (participant disconnected)")
+        
+    except asyncio.TimeoutError:
+        print("[ENTRYPOINT] ⚠️ Session timeout reached (1 hour)")
+        
     except Exception as e:
         print(f"[ENTRYPOINT] ⚠️ Session ended with exception: {e}")
+        
     finally:
         # Cleanup
         print("[ENTRYPOINT] 🧹 Cleaning up resources...")
+        
+        # Unregister event handler
+        try:
+            ctx.room.off("participant_disconnected", on_participant_disconnected)
+            print("[ENTRYPOINT] ✓ Event handlers unregistered")
+        except Exception:
+            pass
+        
+        # Cleanup assistant resources
         if hasattr(assistant, 'cleanup'):
             try:
                 await assistant.cleanup()
+                print("[ENTRYPOINT] ✓ Assistant cleanup completed")
             except Exception as cleanup_error:
-                print(f"[ENTRYPOINT] ⚠️  Cleanup error: {cleanup_error}")
+                print(f"[ENTRYPOINT] ⚠️ Cleanup error: {cleanup_error}")
+        
         print("[ENTRYPOINT] ✓ Entrypoint finished")
 
 
