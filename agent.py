@@ -878,19 +878,33 @@ For every message you generate:
             
             logging.info(f"[BACKGROUND] Processing: {user_text[:50] if len(user_text) > 50 else user_text}...")
             
-            # Categorize for RAG metadata (but don't auto-save to memory table)
+            # Categorize for RAG metadata
             category = await asyncio.to_thread(categorize_user_input, user_text, self.memory_service)
             ts_ms = int(time.time() * 1000)
             
-            # ✅ Index in RAG for semantic search (without storing in memory table)
-            # LLM will use storeInMemory() tool with consistent keys when needed
+            # ✅ Index in RAG for semantic search
             if self.rag_service:
                 self.rag_service.add_memory_background(
                     text=user_text,
                     category=category,
                     metadata={"timestamp": ts_ms}
                 )
-                logging.info(f"[RAG] ✅ Indexed for search (memory storage handled by LLM tools)")
+                logging.info(f"[RAG] ✅ Indexed for search")
+            
+            # 🔥 CRITICAL FIX: Auto-save memories to database
+            # The LLM was NOT calling storeInMemory() tool, so memories were lost
+            try:
+                # Use a simple timestamp-based key for conversation memories
+                memory_key = f"conv_{ts_ms}"
+                await self.memory_service.store_memory_async(
+                    category=category,
+                    key=memory_key,
+                    value=user_text,
+                    user_id=user_id
+                )
+                logging.info(f"[MEMORY] ✅ Auto-saved to database: [{category}] {user_text[:50]}...")
+            except Exception as e:
+                logging.error(f"[MEMORY] ❌ Auto-save failed: {e}")
             
             # Update profile - use async method with explicit user_id
             existing_profile = await self.profile_service.get_profile_async(user_id)

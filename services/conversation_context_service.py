@@ -168,29 +168,27 @@ class ConversationContextService:
     
     async def _fetch_user_name(self, user_id: str) -> Optional[str]:
         """
-        Fetch user's name from memory.
-        Checks multiple possible keys: name, user_name, full_name.
+        Fetch user's name ONLY from onboarding_details table.
+        🔥 FIX: Always use onboarding table as the source of truth for names.
         """
         try:
-            print(f"[CONTEXT SERVICE] 🔍 Fetching user's first name for {user_id[:8]}...")
+            print(f"[CONTEXT SERVICE] 🔍 Fetching user's name from onboarding_details for {user_id[:8]}...")
             
-            result = await asyncio.to_thread(
-                lambda: self.supabase.table("memory")
-                .select("value, key")
+            # 🔥 ALWAYS use onboarding_details table for names
+            onboarding_result = await asyncio.to_thread(
+                lambda: self.supabase.table("onboarding_details")
+                .select("full_name")
                 .eq("user_id", user_id)
-                .or_("key.eq.name,key.eq.user_name,key.eq.full_name,key.ilike.%name%")
-                .order("created_at", desc=True)
                 .limit(1)
                 .execute()
             )
-            if result.data:
-                name = result.data[0].get("value", None)
-                key = result.data[0].get("key", "unknown")
+            if onboarding_result.data:
+                name = onboarding_result.data[0].get("full_name", None)
                 if name:
-                    print(f"[CONTEXT SERVICE] ✅ User's name found: '{name}' (from key: {key})")
+                    print(f"[CONTEXT SERVICE] ✅ User's name found in onboarding_details: '{name}'")
                     return name
             
-            print(f"[CONTEXT SERVICE] ℹ️  User's name not found yet")
+            print(f"[CONTEXT SERVICE] ℹ️  User's name not found in onboarding_details")
             return None
         except Exception as e:
             print(f"[CONTEXT SERVICE] ❌ Name fetch error: {e}")
