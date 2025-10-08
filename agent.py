@@ -1044,10 +1044,9 @@ async def entrypoint(ctx: agents.JobContext):
 
     print(f"[ENTRYPOINT] ✓ Participant joined: sid={participant.sid}, identity={participant.identity}")
     
-    # CRITICAL: Wait for session to fully connect with participant
-    # This ensures the session is ready to send audio
-    await asyncio.sleep(1.0)
-    print("[SESSION INIT] ✓ Session fully connected with participant")
+    # OPTIMIZATION: Reduced delay for faster first message
+    await asyncio.sleep(0.3)  # Reduced from 1.0s to 0.3s
+    print("[SESSION INIT] ✓ Session connected")
 
     # Resolve to UUID
     user_id = extract_uuid_from_identity(participant.identity)
@@ -1070,107 +1069,77 @@ async def entrypoint(ctx: agents.JobContext):
     except Exception as e:
         print(f"[PROFILE] ⚠️ Failed to ensure profile: {e}")
     
-    # Initialize RAG for this user
+    # OPTIMIZATION: Initialize RAG but load in background (non-blocking)
     print(f"[RAG] Initializing for user {user_id[:8]}...")
-    print(f"[DEBUG][RAG] Creating RAGService instance...")
     rag_service = RAGService(user_id)
-    assistant.rag_service = rag_service  # Set RAG service on assistant instance
-    print(f"[DEBUG][RAG] ✅ RAG service attached to assistant")
+    assistant.rag_service = rag_service
+    print(f"[RAG] ✅ RAG service attached (will load in background)")
     
-    # DEBUG: Check if RAG system already exists (persistence check)
-    from rag_system import user_rag_systems
-    if user_id in user_rag_systems:
-        existing_rag = user_rag_systems[user_id]
-        print(f"[DEBUG][RAG] ♻️  FOUND EXISTING RAG for user {user_id[:8]} with {len(existing_rag.memories)} memories")
-    else:
-        print(f"[DEBUG][RAG] 🆕 NO EXISTING RAG - Creating new instance for user {user_id[:8]}")
+    # Load RAG and prefetch data in parallel background tasks
+    # This allows the first greeting to happen immediately
+    async def load_rag_background():
+        """Load RAG memories in background"""
+        try:
+            print(f"[RAG_BG] Loading memories in background...")
+            await asyncio.wait_for(
+                rag_service.load_from_database(supabase, limit=500),
+                timeout=10.0
+            )
+            rag_system = rag_service.get_rag_system()
+            if rag_system:
+                print(f"[RAG_BG] ✅ Loaded {len(rag_system.memories)} memories in background")
+        except Exception as e:
+            print(f"[RAG_BG] ⚠️ Background load failed: {e}")
     
-    # Load memories with proper error handling and no race conditions
-    # Strategy: Load all 500 at once instead of two separate loads
-    try:
-        print(f"[DEBUG][RAG] Loading up to 500 memories from database...")
-        await asyncio.wait_for(
-            rag_service.load_from_database(supabase, limit=500),
-            timeout=8.0  # Longer timeout for single load
-        )
-        
-        # Verify memories were loaded
-        rag_system = rag_service.get_rag_system()
-        if rag_system:
-            print(f"[RAG] ✅ Loaded {len(rag_system.memories)} memories")
-            print(f"[DEBUG][RAG] FAISS index size: {rag_system.index.ntotal}")
-        else:
-            print(f"[DEBUG][RAG] ⚠️ RAG system is None after loading!")
-            
-    except asyncio.TimeoutError:
-        print(f"[RAG] ⚠️ Timeout loading memories (>8s) - using partial load")
-        # If timeout, at least try to get some memories in background
-        # Track this background task
-        bg_task = asyncio.create_task(rag_service.load_from_database(supabase, limit=100))
-        # Don't wait for it, but log when it completes
-        bg_task.add_done_callback(lambda t: print(f"[RAG] Background load completed") if not t.exception() else print(f"[RAG] Background load failed: {t.exception()}"))
-    except Exception as e:
-        print(f"[RAG] ⚠️ Load error: {e}")
-        print(f"[DEBUG][RAG] ❌ Exception: {type(e).__name__}: {str(e)}")
-        # Don't fail the entire entrypoint, continue without RAG
-
-    # Prefetch user data
-    try:
-        batcher = await get_db_batcher(supabase)
-        prefetch_data = await batcher.prefetch_user_data(user_id)
-        print(f"[BATCH] ✓ Prefetched {prefetch_data.get('memory_count', 0)} memories")
-    except Exception as e:
-        print(f"[BATCH] Warning: Prefetch failed: {e}")
+    async def prefetch_background():
+        """Prefetch user data in background"""
+        try:
+            batcher = await get_db_batcher(supabase)
+            prefetch_data = await batcher.prefetch_user_data(user_id)
+            print(f"[BATCH_BG] ✅ Prefetched {prefetch_data.get('memory_count', 0)} memories in background")
+        except Exception as e:
+            print(f"[BATCH_BG] ⚠️ Prefetch failed: {e}")
+    
+    # Start background tasks (don't wait for them)
+    asyncio.create_task(load_rag_background())
+    asyncio.create_task(prefetch_background())
+    print("[OPTIMIZATION] ⚡ RAG and prefetch loading in background (non-blocking)")
 
     if supabase:
         print("[SUPABASE] ✓ Connected")
     else:
         print("[SUPABASE] ✗ Not connected")
 
-    # LiveKit Best Practice: Let the session handle audio tracks automatically
-    # The AgentSession subscribes to tracks and manages VAD/STT automatically
-    print("[AUDIO] 🎧 Waiting for audio track readiness...")
-    print(f"[AUDIO] Participant: {participant.identity} (sid: {participant.sid})")
-    
-    # Brief delay for WebRTC negotiation - LiveKit handles the rest
-    # This is much simpler than manual polling
-    await asyncio.sleep(1.0)
-    
-    # Log track publications for debugging
-    if participant.track_publications:
-        print(f"[AUDIO] Track publications count: {len(participant.track_publications)}")
-        for track_sid, publication in participant.track_publications.items():
-            track_type = "AUDIO" if publication.kind == rtc.TrackKind.KIND_AUDIO else "VIDEO" if publication.kind == rtc.TrackKind.KIND_VIDEO else "OTHER"
-            print(f"[AUDIO] - {track_type} track {track_sid}: subscribed={publication.subscribed}")
-    else:
-        print("[AUDIO] No track publications yet - LiveKit will subscribe automatically")
-    
-    print("[AUDIO] ✓ Audio track handling delegated to LiveKit session")
+    # OPTIMIZATION: Minimal audio wait - LiveKit handles track subscription
+    print("[AUDIO] ⚡ Quick audio setup (LiveKit manages tracks)")
+    await asyncio.sleep(0.3)  # Reduced from 1.5s total to 0.3s
+    print("[AUDIO] ✓ Ready for first message")
 
-    # Brief delay for audio pipeline to be fully ready
-    print("[SESSION] Waiting for audio pipeline to stabilize...")
-    await asyncio.sleep(0.5)
-    print("[SESSION] ✓ Audio pipeline ready")
-
-    # Send initial greeting WITH FULL CONTEXT
-    logging.info(f"[GREETING] Generating first message with context...")
-    print(f"[DEBUG][GREETING] About to generate first message...")
-    print(f"[DEBUG][USER_ID] Current user_id before greeting: {get_current_user_id()}")
-    print(f"[DEBUG][RAG] RAG service exists: {assistant.rag_service is not None}")
-    if assistant.rag_service:
-        rag_stats = assistant.rag_service.get_stats()
-        print(f"[DEBUG][RAG] RAG stats before greeting: {rag_stats}")
+    # ULTRA-FAST INITIAL GREETING (without tools or complex context)
+    # This gets audio to user ASAP, then background tasks continue
+    print("[GREETING] ⚡ Generating ultra-fast minimal greeting...")
     
     try:
-        await assistant.generate_reply_with_context(session, greet=True)
-        logging.info(f"[GREETING] ✓ First message generated and sent!")
-        print("[GREETING] ✓ Waiting for TTS to complete...")
-        await asyncio.sleep(1.0)  # Give TTS time to stream
-        print("[GREETING] ✓ First message delivery complete!")
+        # Minimal greeting that avoids tool calls and complex processing
+        minimal_greeting = """
+You are a warm, empathetic AI companion speaking in Urdu.
+
+Task: Greet the user warmly in 1-2 short sentences in Urdu.
+- Be friendly and welcoming
+- Keep it brief and natural
+- DO NOT call any tools
+- DO NOT ask for information
+- Just say hello warmly
+
+Example: "السلام علیکم! میں آپ کی AI companion ہوں۔ کیسے ہیں آپ؟"
+"""
+        await session.generate_reply(instructions=minimal_greeting)
+        print("[GREETING] ✅ Fast greeting sent!")
+        
     except Exception as e:
-        print(f"[GREETING] ❌ Failed to send first message: {e}")
-        import traceback
-        print(f"[GREETING] Traceback: {traceback.format_exc()}")
+        print(f"[GREETING] ❌ Fast greeting failed: {e}, trying full context...")
+        # Fallback to full context greeting
+        await assistant.generate_reply_with_context(session, greet=True)
     
     # LiveKit Best Practice: Use event-based disconnection detection
     # Set up disconnection event handler
