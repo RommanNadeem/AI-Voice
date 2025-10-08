@@ -251,7 +251,7 @@ To keep conversations alive, natural, and engaging, follow these principles:
 
 - **Meta-Awareness (light)** Occasionally comment on the conversation itself to make it co-created.  
   (e.g., “Arrey, hum kitna ghoom phir ke baatein kar rahe hain, mazay ki baat hai na?”)  
-
+ 
 
 ---
 
@@ -266,7 +266,7 @@ To keep conversations alive, natural, and engaging, follow these principles:
 - `getUserProfile()` → View stored user profile info.  
 - **`getCompleteUserInfo()`** → **[USE THIS]** When user asks "what do you know about me?" or "what have you learned?" - retrieves EVERYTHING (profile + all memories + state).
 - `detectGenderFromName(name)` → Detect gender for correct pronoun use.  
-- `getUserState()` / `updateUserState(stage, trust_score)` → Track or update conversation stage & trust.
+- `getUserState()` / `updateUserState(stage, trust_score)` → Track or update conversation stage & trust.  
 
 ### Memory Key Standards:
 - **ENGLISH KEYS ONLY**: All keys must be in English (e.g., `favorite_food`, `sister_name`, `hobby`). Never use Urdu or other languages for keys.
@@ -709,7 +709,7 @@ For every message you generate:
 
             print(f"[DEBUG][MEMORY] Querying memory table by categories (OPTIMIZED BATCH)...")
             categories = ['FACT', 'GOAL', 'INTEREST', 'EXPERIENCE', 'PREFERENCE', 'RELATIONSHIP', 'PLAN', 'OPINION']
-            
+
             # 🚀 OPTIMIZATION: Single batched query instead of 8 sequential queries
             # Reduces query time from ~800ms to ~150ms (80% improvement)
             try:
@@ -728,13 +728,13 @@ For every message you generate:
                 print(f"[DEBUG][MEMORY] Error in batch fetch: {e}, falling back to sequential")
                 # Fallback to old method if batch fails
                 memories_by_category = {}
-                for category in categories:
-                    try:
-                        mems = self.memory_service.get_memories_by_category(category, limit=3, user_id=user_id)
-                        if mems:
-                            memories_by_category[category] = [m['value'] for m in mems]
-                    except Exception as e:
-                        print(f"[DEBUG][MEMORY] Error fetching {category}: {e}")
+            for category in categories:
+                try:
+                    mems = self.memory_service.get_memories_by_category(category, limit=3, user_id=user_id)
+                    if mems:
+                        memories_by_category[category] = [m['value'] for m in mems]
+                except Exception as e:
+                    print(f"[DEBUG][MEMORY] Error fetching {category}: {e}")
 
             print(f"[DEBUG][MEMORY] Categories with data: {list(memories_by_category.keys())}")
             print(f"[DEBUG][MEMORY] Total categories: {len(memories_by_category)}")
@@ -1011,11 +1011,36 @@ async def entrypoint(ctx: agents.JobContext):
     # Set room reference for state broadcasting
     assistant.set_room(ctx.room)
     
+    # BEST PRACTICE: Wait for participant FIRST (more reliable)
+    # This ensures participant is in room before session initialization
+    print("[ENTRYPOINT] Waiting for participant to join...")
+    participant = await wait_for_participant(ctx.room, timeout_s=20)
+    if not participant:
+        print("[ENTRYPOINT] ⚠️ No participant joined within timeout")
+        print("[ENTRYPOINT] Exiting gracefully...")
+        return
+
+    print(f"[ENTRYPOINT] ✓ Participant joined: sid={participant.sid}, identity={participant.identity}")
+    
     # Configure LLM with increased timeout for context-heavy prompts
     llm = lk_openai.LLM(
         model="gpt-4o-mini",
         temperature=0.8,  # More creative responses
     )
+    
+    # Pre-warm TTS connection in background (non-blocking)
+    print("[TTS] 🔥 Pre-warming TTS connection...")
+    async def warm_tts():
+        try:
+            # Trigger TTS connection early to avoid lazy init delay
+            test_stream = tts.stream()
+            await test_stream.aclose()
+            print("[TTS] ✅ TTS connection pre-warmed")
+        except Exception as e:
+            print(f"[TTS] ⚠️ Pre-warm failed (will retry on actual use): {e}")
+    
+    # Start TTS warm-up in background
+    asyncio.create_task(warm_tts())
     
     session = AgentSession(
         stt=lk_openai.STT(model="gpt-4o-transcribe", language="ur"),
@@ -1028,25 +1053,18 @@ async def entrypoint(ctx: agents.JobContext):
         ),
     )
 
-    # LiveKit Best Practice: Start session FIRST, then wait for participant
-    # The session handles participant events automatically
+    # Start session with RoomInputOptions (best practice)
     print("[SESSION INIT] Starting LiveKit session...")
-    await session.start(room=ctx.room, agent=assistant)
+    await session.start(
+        room=ctx.room, 
+        agent=assistant,
+        room_input_options=RoomInputOptions()
+    )
     print("[SESSION INIT] ✓ Session started and initialized")
     
-    # Wait for participant to join using event-based approach
-    print("[ENTRYPOINT] Waiting for participant to join...")
-    participant = await wait_for_participant(ctx.room, timeout_s=20)
-    if not participant:
-        print("[ENTRYPOINT] ⚠️ No participant joined within timeout")
-        print("[ENTRYPOINT] Exiting gracefully...")
-        return
-
-    print(f"[ENTRYPOINT] ✓ Participant joined: sid={participant.sid}, identity={participant.identity}")
-    
-    # OPTIMIZATION: Reduced delay for faster first message
-    await asyncio.sleep(0.3)  # Reduced from 1.0s to 0.3s
-    print("[SESSION INIT] ✓ Session connected")
+    # Wait for session to fully initialize
+    await asyncio.sleep(0.5)
+    print("[SESSION INIT] ✓ Session initialization complete")
 
     # Resolve to UUID
     user_id = extract_uuid_from_identity(participant.identity)
@@ -1110,10 +1128,49 @@ async def entrypoint(ctx: agents.JobContext):
     else:
         print("[SUPABASE] ✗ Not connected")
 
-    # OPTIMIZATION: Minimal audio wait - LiveKit handles track subscription
-    print("[AUDIO] ⚡ Quick audio setup (LiveKit manages tracks)")
-    await asyncio.sleep(0.3)  # Reduced from 1.5s total to 0.3s
-    print("[AUDIO] ✓ Ready for first message")
+    # BEST PRACTICE: Verify audio track subscription before first message
+    # This prevents the "sometimes stuck on listening" issue
+    print("[AUDIO] 🎧 Waiting for audio track subscription...")
+    print(f"[AUDIO] Participant: {participant.identity} (sid: {participant.sid})")
+    
+    audio_subscribed = False
+    audio_track_sid = None
+    max_wait = 5.0  # Reasonable timeout
+    start_time = time.time()
+    
+    while time.time() - start_time < max_wait:
+        # Check if participant has subscribed audio track
+        if participant.track_publications:
+            for track_sid, publication in participant.track_publications.items():
+                if publication.kind == rtc.TrackKind.KIND_AUDIO:
+                    print(f"[AUDIO] Found audio track {track_sid}, subscribed: {publication.subscribed}")
+                    if publication.subscribed:
+                        audio_subscribed = True
+                        audio_track_sid = track_sid
+                        elapsed = time.time() - start_time
+                        print(f"[AUDIO] ✅ Audio track subscribed after {elapsed:.2f}s: {track_sid}")
+                        break
+        
+        if audio_subscribed:
+            break
+        
+        # Check progress
+        elapsed = time.time() - start_time
+        if elapsed > 1.0 and elapsed % 1.0 < 0.2:  # Log every second
+            print(f"[AUDIO] Still waiting... ({elapsed:.1f}s/{max_wait}s)")
+        
+        await asyncio.sleep(0.2)
+    
+    if not audio_subscribed:
+        print(f"[AUDIO] ⚠️ Audio track not subscribed after {max_wait}s timeout")
+        print("[AUDIO] 🔄 Attempting to proceed with additional delay...")
+        # Give extra time as fallback
+        await asyncio.sleep(2.0)
+        print("[AUDIO] ⚠️ Proceeding without subscription confirmation")
+    else:
+        # WebRTC stabilization delay after subscription confirmed
+        await asyncio.sleep(0.5)
+        print("[AUDIO] ✅ WebRTC connection stabilized and ready")
 
     # ULTRA-FAST INITIAL GREETING (without tools or complex context)
     # This gets audio to user ASAP, then background tasks continue
@@ -1139,7 +1196,7 @@ Example: "السلام علیکم! میں آپ کی AI companion ہوں۔ کیس
     except Exception as e:
         print(f"[GREETING] ❌ Fast greeting failed: {e}, trying full context...")
         # Fallback to full context greeting
-        await assistant.generate_reply_with_context(session, greet=True)
+    await assistant.generate_reply_with_context(session, greet=True)
     
     # LiveKit Best Practice: Use event-based disconnection detection
     # Set up disconnection event handler
