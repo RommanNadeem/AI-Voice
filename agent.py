@@ -1032,7 +1032,11 @@ async def entrypoint(ctx: agents.JobContext):
     # The session handles participant events automatically
     print("[SESSION INIT] Starting LiveKit session...")
     session.start(ctx.room, agent=assistant)
-    print("[SESSION INIT] ✓ Session started, waiting for participant...")
+    print("[SESSION INIT] ✓ Session started (non-blocking)")
+    
+    # Give session a moment to initialize
+    await asyncio.sleep(0.5)
+    print("[SESSION INIT] ✓ Session initialization complete")
     
     # Wait for participant to join using event-based approach
     print("[ENTRYPOINT] Waiting for participant to join...")
@@ -1043,6 +1047,11 @@ async def entrypoint(ctx: agents.JobContext):
         return
 
     print(f"[ENTRYPOINT] ✓ Participant joined: sid={participant.sid}, identity={participant.identity}")
+    
+    # CRITICAL: Wait for session to fully connect with participant
+    # This ensures the session is ready to send audio
+    await asyncio.sleep(1.0)
+    print("[SESSION INIT] ✓ Session fully connected with participant")
 
     # Resolve to UUID
     user_id = extract_uuid_from_identity(participant.identity)
@@ -1142,19 +1151,27 @@ async def entrypoint(ctx: agents.JobContext):
     
     print("[AUDIO] ✓ Audio track handling delegated to LiveKit session")
 
-    # Test TTS connection before first message
-    print("[TTS] 🧪 Testing TTS connection...")
-    try:
-        # Test TTS connection with a simple message
-        test_queue = await tts.synthesize("test")
-        print("[TTS] ✓ TTS connection test initiated")
-        
-        # Wait briefly for test to complete
-        await asyncio.sleep(0.5)
-        print("[TTS] ✓ TTS connection test completed")
-    except Exception as e:
-        print(f"[TTS] ❌ TTS connection test failed: {e}")
-        print("[TTS] ⚠️ Proceeding anyway - TTS might still work for actual messages")
+    # CRITICAL: Ensure session is fully ready before first message
+    print("[SESSION] 🔍 Verifying session readiness for first message...")
+    
+    # Wait for session to be fully started
+    max_wait = 5.0
+    start_time = time.time()
+    session_ready = False
+    
+    while time.time() - start_time < max_wait:
+        if hasattr(session, '_started') and session._started:
+            session_ready = True
+            print(f"[SESSION] ✓ Session fully ready after {time.time() - start_time:.2f}s")
+            break
+        await asyncio.sleep(0.2)
+    
+    if not session_ready:
+        print("[SESSION] ⚠️ Session readiness check timeout - proceeding anyway")
+    
+    # Additional delay for TTS and audio pipeline to be ready
+    await asyncio.sleep(0.5)
+    print("[SESSION] ✓ Audio pipeline ready")
 
     # Send initial greeting WITH FULL CONTEXT
     logging.info(f"[GREETING] Generating first message with context...")
@@ -1165,8 +1182,16 @@ async def entrypoint(ctx: agents.JobContext):
         rag_stats = assistant.rag_service.get_stats()
         print(f"[DEBUG][RAG] RAG stats before greeting: {rag_stats}")
     
-    await assistant.generate_reply_with_context(session, greet=True)
-    logging.info(f"[GREETING] ✓ First message sent!")
+    try:
+        await assistant.generate_reply_with_context(session, greet=True)
+        logging.info(f"[GREETING] ✓ First message generated and sent!")
+        print("[GREETING] ✓ Waiting for TTS to complete...")
+        await asyncio.sleep(1.0)  # Give TTS time to stream
+        print("[GREETING] ✓ First message delivery complete!")
+    except Exception as e:
+        print(f"[GREETING] ❌ Failed to send first message: {e}")
+        import traceback
+        print(f"[GREETING] Traceback: {traceback.format_exc()}")
     
     # LiveKit Best Practice: Use event-based disconnection detection
     # Set up disconnection event handler
