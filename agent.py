@@ -1031,7 +1031,7 @@ async def entrypoint(ctx: agents.JobContext):
     # LiveKit Best Practice: Start session FIRST, then wait for participant
     # The session handles participant events automatically
     print("[SESSION INIT] Starting LiveKit session...")
-    await session.start(ctx.room, assistant)
+    await session.start(room=ctx.room, agent=assistant)
     print("[SESSION INIT] ✓ Session started and initialized")
     
     # Wait for participant to join using event-based approach
