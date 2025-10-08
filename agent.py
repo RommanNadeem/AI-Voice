@@ -1186,20 +1186,25 @@ def start_health_check_server():
         return web.Response(text="OK\n", status=200)
     
     async def run_server():
-        app = web.Application()
-        app.router.add_get('/health', health)
-        app.router.add_get('/', health)
-        
-        runner = web.AppRunner(app)
-        await runner.setup()
-        site = web.TCPSite(runner, '0.0.0.0', 8080)
-        await site.start()
-        print("[HEALTH] ✓ HTTP health check server running on port 8080")
-        print("[HEALTH] Endpoints: GET / and GET /health")
-        
-        # Keep server running indefinitely
-        while True:
-            await asyncio.sleep(3600)
+        try:
+            app = web.Application()
+            app.router.add_get('/health', health)
+            app.router.add_get('/', health)
+            
+            runner = web.AppRunner(app)
+            await runner.setup()
+            site = web.TCPSite(runner, '0.0.0.0', 8080)
+            await site.start()
+            print("[HEALTH] ✓ HTTP health check server running on port 8080")
+            print("[HEALTH] Endpoints: GET / and GET /health")
+            print("[HEALTH] 🎯 Server is ready to receive health checks")
+            
+            # Keep server running indefinitely
+            while True:
+                await asyncio.sleep(3600)
+        except Exception as e:
+            print(f"[HEALTH] ❌ Server startup error: {e}")
+            raise
     
     # Run server in background thread
     def thread_target():
@@ -1244,12 +1249,14 @@ if __name__ == "__main__":
     print("="*80)
     
     # Start health check HTTP server for Railway/platform health checks
+    print("[MAIN] 🏥 Starting health check server...")
     start_health_check_server()
     
     # Give health server a moment to start
-    time.sleep(0.5)
+    time.sleep(1.0)  # Increased from 0.5s to 1.0s
     
-    print("[MAIN] Starting LiveKit agent worker...")
+    print("[MAIN] ✅ Health check server should be running")
+    print("[MAIN] 🚀 Starting LiveKit agent worker...")
     agents.cli.run_app(agents.WorkerOptions(
         entrypoint_fnc=entrypoint,
         initialize_process_timeout=60,
