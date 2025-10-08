@@ -1031,12 +1031,8 @@ async def entrypoint(ctx: agents.JobContext):
     # LiveKit Best Practice: Start session FIRST, then wait for participant
     # The session handles participant events automatically
     print("[SESSION INIT] Starting LiveKit session...")
-    session.start(ctx.room, agent=assistant)
-    print("[SESSION INIT] ✓ Session started (non-blocking)")
-    
-    # Give session a moment to initialize
-    await asyncio.sleep(0.5)
-    print("[SESSION INIT] ✓ Session initialization complete")
+    await session.start(ctx.room, agent=assistant)
+    print("[SESSION INIT] ✓ Session started and initialized")
     
     # Wait for participant to join using event-based approach
     print("[ENTRYPOINT] Waiting for participant to join...")
@@ -1151,25 +1147,8 @@ async def entrypoint(ctx: agents.JobContext):
     
     print("[AUDIO] ✓ Audio track handling delegated to LiveKit session")
 
-    # CRITICAL: Ensure session is fully ready before first message
-    print("[SESSION] 🔍 Verifying session readiness for first message...")
-    
-    # Wait for session to be fully started
-    max_wait = 5.0
-    start_time = time.time()
-    session_ready = False
-    
-    while time.time() - start_time < max_wait:
-        if hasattr(session, '_started') and session._started:
-            session_ready = True
-            print(f"[SESSION] ✓ Session fully ready after {time.time() - start_time:.2f}s")
-            break
-        await asyncio.sleep(0.2)
-    
-    if not session_ready:
-        print("[SESSION] ⚠️ Session readiness check timeout - proceeding anyway")
-    
-    # Additional delay for TTS and audio pipeline to be ready
+    # Brief delay for audio pipeline to be fully ready
+    print("[SESSION] Waiting for audio pipeline to stabilize...")
     await asyncio.sleep(0.5)
     print("[SESSION] ✓ Audio pipeline ready")
 
