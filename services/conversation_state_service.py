@@ -84,6 +84,11 @@ class ConversationStateService:
                     "last_updated": data[0].get("updated_at"),
                     "metadata": data[0].get("metadata", {}),
                     "stage_history": data[0].get("stage_history", []),
+                    "last_summary": data[0].get("last_summary"),
+                    "last_topics": data[0].get("last_topics", []),
+                    "last_user_message": data[0].get("last_user_message"),
+                    "last_assistant_message": data[0].get("last_assistant_message"),
+                    "last_conversation_at": data[0].get("last_conversation_at"),
                 }
                 
                 # Cache for 5 minutes
@@ -104,7 +109,9 @@ class ConversationStateService:
         stage: Optional[str] = None,
         trust_score: Optional[float] = None,
         metadata: Optional[Dict] = None,
-        user_id: Optional[str] = None
+        user_id: Optional[str] = None,
+        last_user_message: Optional[str] = None,
+        last_assistant_message: Optional[str] = None
     ) -> bool:
         """
         Update conversation state for user.
@@ -114,6 +121,8 @@ class ConversationStateService:
             trust_score: New trust score (0-10)
             metadata: Additional metadata to store
             user_id: Optional user ID (uses current user if not provided)
+            last_user_message: Last message from user
+            last_assistant_message: Last message from assistant
             
         Returns:
             True if successful, False otherwise
@@ -142,7 +151,14 @@ class ConversationStateService:
                 "trust_score": trust_score if trust_score is not None else current_state["trust_score"],
                 "metadata": metadata or current_state.get("metadata", {}),
                 "updated_at": datetime.utcnow().isoformat(),
+                "last_conversation_at": datetime.utcnow().isoformat(),
             }
+            
+            # Add last messages if provided
+            if last_user_message is not None:
+                update_data["last_user_message"] = last_user_message
+            if last_assistant_message is not None:
+                update_data["last_assistant_message"] = last_assistant_message
             
             # Track stage history
             stage_history = current_state.get("stage_history", [])
@@ -533,6 +549,177 @@ Respond in JSON:
         
         return guidance.get(stage, guidance["ORIENTATION"])
     
+    async def generate_conversation_summary(
+        self, 
+        user_message: str, 
+        assistant_message: str, 
+        user_id: Optional[str] = None
+    ) -> str:
+        """
+        Generate a brief summary of the conversation exchange.
+        
+        Args:
+            user_message: User's message
+            assistant_message: Assistant's response
+            user_id: Optional user ID
+            
+        Returns:
+            Brief conversation summary
+        """
+        try:
+            # Get OpenAI client for summary generation
+            pool = get_connection_pool()
+            if not pool:
+                return "Summary unavailable"
+                
+            openai_client = pool.get_openai_client()
+            if not openai_client:
+                return "Summary unavailable"
+            
+            # Create a concise summary prompt
+            prompt = f"""Create a brief 1-2 sentence summary of this conversation exchange in English:
+
+User: {user_message}
+Assistant: {assistant_message}
+
+Focus on the main topic or sentiment. Keep it concise and factual."""
+            
+            response = openai_client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=100,
+                temperature=0.3
+            )
+            
+            summary = response.choices[0].message.content.strip()
+            print(f"[STATE SERVICE] Generated conversation summary: {summary[:50]}...")
+            return summary
+            
+        except Exception as e:
+            print(f"[STATE SERVICE] Summary generation failed: {e}")
+            return "Summary unavailable"
+    
+    async def extract_conversation_topics(
+        self, 
+        user_message: str, 
+        assistant_message: str, 
+        user_id: Optional[str] = None
+    ) -> list:
+        """
+        Extract key topics from the conversation exchange.
+        
+        Args:
+            user_message: User's message
+            assistant_message: Assistant's response
+            user_id: Optional user ID
+            
+        Returns:
+            List of topic strings
+        """
+        try:
+            # Get OpenAI client for topic extraction
+            pool = get_connection_pool()
+            if not pool:
+                return []
+                
+            openai_client = pool.get_openai_client()
+            if not openai_client:
+                return []
+            
+            # Create topic extraction prompt
+            prompt = f"""Extract 2-3 key topics from this conversation exchange. Return as a JSON array of strings:
+
+User: {user_message}
+Assistant: {assistant_message}
+
+Example: ["work", "family", "hobbies"]
+Focus on main subjects discussed."""
+            
+            response = openai_client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=100,
+                temperature=0.2
+            )
+            
+            topics_text = response.choices[0].message.content.strip()
+            
+            # Try to parse as JSON
+            try:
+                topics = json.loads(topics_text)
+                if isinstance(topics, list):
+                    print(f"[STATE SERVICE] Extracted topics: {topics}")
+                    return topics
+                else:
+                    return [topics_text]
+            except json.JSONDecodeError:
+                # If JSON parsing fails, split by comma
+                topics = [t.strip() for t in topics_text.split(',')]
+                print(f"[STATE SERVICE] Extracted topics (fallback): {topics}")
+                return topics
+            
+        except Exception as e:
+            print(f"[STATE SERVICE] Topic extraction failed: {e}")
+            return []
+    
+    async def update_conversation_context(
+        self,
+        user_message: str,
+        assistant_message: str,
+        user_id: Optional[str] = None
+    ) -> bool:
+        """
+        Update conversation context with last messages, summary, and topics.
+        This runs in background to avoid blocking the main conversation flow.
+        
+        Args:
+            user_message: User's message
+            assistant_message: Assistant's response
+            user_id: Optional user ID
+            
+        Returns:
+            True if successful
+        """
+        uid = user_id or get_current_user_id()
+        if not uid:
+            return False
+        
+        try:
+            # Generate summary and topics in parallel
+            summary_task = self.generate_conversation_summary(user_message, assistant_message, uid)
+            topics_task = self.extract_conversation_topics(user_message, assistant_message, uid)
+            
+            summary, topics = await asyncio.gather(summary_task, topics_task)
+            
+            # Update state with all the new information
+            update_data = {
+                "last_user_message": user_message,
+                "last_assistant_message": assistant_message,
+                "last_conversation_at": datetime.utcnow().isoformat(),
+                "last_summary": summary,
+                "last_topics": topics
+            }
+            
+            # Update in database
+            resp = await asyncio.to_thread(
+                lambda: self.supabase.table("conversation_state")
+                .update(update_data)
+                .eq("user_id", uid)
+                .execute()
+            )
+            
+            error = getattr(resp, "error", None)
+            if error:
+                print(f"[STATE SERVICE] Context update failed: {error}")
+                return False
+            
+            print(f"[STATE SERVICE] ✅ Updated conversation context with summary and {len(topics)} topics")
+            return True
+            
+        except Exception as e:
+            print(f"[STATE SERVICE] Context update failed: {e}")
+            return False
+    
     def _default_state(self) -> Dict:
         """Return default conversation state"""
         return {
@@ -540,6 +727,11 @@ Respond in JSON:
             "trust_score": DEFAULT_TRUST_SCORE,
             "last_updated": None,
             "metadata": {},
-            "stage_history": []
+            "stage_history": [],
+            "last_summary": None,
+            "last_topics": [],
+            "last_user_message": None,
+            "last_assistant_message": None,
+            "last_conversation_at": None
         }
 

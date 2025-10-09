@@ -11,6 +11,7 @@ import asyncio
 import threading
 from typing import Optional
 from contextlib import asynccontextmanager
+from datetime import datetime
 from aiohttp import web
 
 from supabase import create_client, Client
@@ -834,6 +835,9 @@ For every message you generate:
 
             categorized_mems = "\n".join(mem_sections) if mem_sections else "  (No prior memories)"
 
+            # Get last conversation context
+            last_conversation_context = self._get_last_conversation_context(conversation_state)
+            
             # Compact context block (reduce prompt size to prevent timeouts)
             context_block = f"""
     🎯 QUICK CONTEXT (for reference - NOT complete):
@@ -845,6 +849,8 @@ For every message you generate:
 
     Recent Memories (sample only):
     {categorized_mems}
+
+    {f"Last Conversation Context:\n{last_conversation_context}" if last_conversation_context else ""}
 
     Rules:
     ✅ Use their name and reference memories naturally
@@ -949,8 +955,59 @@ For every message you generate:
             await asyncio.gather(*self._background_tasks, return_exceptions=True)
             print(f"[CLEANUP] ✓ All background tasks completed")
     
-    async def _process_background(self, user_text: str):
-        """Background processing - index in RAG and update profile (LLM handles memory storage via tools)"""
+    def _get_last_conversation_context(self, conversation_state: dict) -> str:
+        """
+        Get last conversation context for first response generation.
+        
+        Args:
+            conversation_state: Current conversation state with last_ fields
+            
+        Returns:
+            Formatted string with last conversation context
+        """
+        if not conversation_state:
+            return ""
+        
+        context_parts = []
+        
+        # Add last conversation timestamp
+        if conversation_state.get("last_conversation_at"):
+            try:
+                from datetime import datetime
+                last_time = datetime.fromisoformat(conversation_state["last_conversation_at"].replace('Z', '+00:00'))
+                time_diff = datetime.now(last_time.tzinfo) - last_time
+                
+                if time_diff.days > 0:
+                    context_parts.append(f"آخری بات چیت {time_diff.days} دن پہلے ہوئی تھی")
+                elif time_diff.seconds > 3600:
+                    hours = time_diff.seconds // 3600
+                    context_parts.append(f"آخری بات چیت {hours} گھنٹے پہلے ہوئی تھی")
+                elif time_diff.seconds > 60:
+                    minutes = time_diff.seconds // 60
+                    context_parts.append(f"آخری بات چیت {minutes} منٹ پہلے ہوئی تھی")
+                else:
+                    context_parts.append("آپ نے ابھی بات چیت کی تھی")
+            except:
+                pass
+        
+        # Add last summary
+        if conversation_state.get("last_summary"):
+            summary = conversation_state["last_summary"]
+            if len(summary) > 100:
+                summary = summary[:100] + "..."
+            context_parts.append(f"آخری بات چیت کا خلاصہ: {summary}")
+        
+        # Add last topics
+        if conversation_state.get("last_topics") and len(conversation_state["last_topics"]) > 0:
+            topics = ", ".join(conversation_state["last_topics"][:3])  # Limit to 3 topics
+            context_parts.append(f"آخری موضوعات: {topics}")
+        
+        if context_parts:
+            return "\n".join(context_parts)
+        return ""
+    
+    async def _process_background(self, user_text: str, assistant_response: str = None):
+        """Background processing - index in RAG, update profile, and track conversation context (LLM handles memory storage via tools)"""
         try:
             user_id = get_current_user_id()
             if not user_id:
@@ -989,6 +1046,28 @@ For every message you generate:
                 if generated_profile and generated_profile != existing_profile:
                     await self.profile_service.save_profile_async(generated_profile, user_id)
                     logging.info(f"[PROFILE] ✅ Updated")
+            
+            # Update conversation context (last messages, summary, topics) if we have assistant response
+            if assistant_response:
+                try:
+                    await self.conversation_state_service.update_conversation_context(
+                        user_message=user_text,
+                        assistant_message=assistant_response,
+                        user_id=user_id
+                    )
+                except Exception as e:
+                    print(f"[BACKGROUND] Conversation context update failed: {e}")
+            
+            # For now, we'll update conversation context in a separate background task
+            # that captures the user message and updates last_conversation_at
+            try:
+                await self.conversation_state_service.update_state(
+                    last_user_message=user_text,
+                    last_conversation_at=datetime.utcnow().isoformat(),
+                    user_id=user_id
+                )
+            except Exception as e:
+                print(f"[BACKGROUND] Last conversation update failed: {e}")
             
             # Update conversation state automatically
             try:
