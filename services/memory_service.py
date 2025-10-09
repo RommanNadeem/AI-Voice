@@ -226,6 +226,45 @@ class MemoryService:
             print(f"[MEMORY SERVICE] ❌ Batch fetch error: {e}")
             return {cat: [] for cat in categories}
     
+    async def store_memory_async(self, category: str, key: str, value: str, user_id: str) -> bool:
+        """
+        Save memory to Supabase (async version).
+        
+        Args:
+            category: Memory category (FACT, GOAL, INTEREST, etc.)
+            key: Memory key
+            value: Memory value
+            user_id: User ID (explicit, required)
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        if not user_id:
+            return False
+        
+        try:
+            import asyncio
+            memory_data = {
+                "user_id": user_id,
+                "category": category,
+                "key": key,
+                "value": value,
+            }
+            
+            resp = await asyncio.to_thread(
+                lambda: self.supabase.table("memory").upsert(memory_data).execute()
+            )
+            
+            if getattr(resp, "error", None):
+                print(f"[MEMORY SERVICE] ❌ Save error: {resp.error}")
+                return False
+            
+            print(f"[MEMORY SERVICE] ✅ Saved async: [{category}] {key}")
+            return True
+        except Exception as e:
+            print(f"[MEMORY SERVICE] store_memory_async failed: {e}")
+            return False
+    
     async def get_value_async(self, user_id: str, category: str, key: str) -> Optional[str]:
         """
         Get a specific memory value by category and key (async version).

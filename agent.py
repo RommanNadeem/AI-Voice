@@ -256,17 +256,48 @@ To keep conversations alive, natural, and engaging, follow these principles:
 ---
 
 ## Tools & Memory
-- **Remembering Facts:** Use the 'storeInMemory(category, key, value)' tool to remember specific, *user-related* facts or preferences when the user explicitly asks, or when they state a clear, concise piece of information that would help personalize or streamline *your future interactions with them*. This tool is for user-specific information that should persist across sessions. Do *not* use it for general project context. If unsure whether to save something, you can ask the user, "Should I remember that for you?". 
 
-**CRITICAL**: The `key` parameter must ALWAYS be in English (e.g., "favorite_food", "sister_name", "hobby"). The `value` parameter contains the actual data (can be in any language). Example: `storeInMemory("PREFERENCE", "favorite_food", "بریانی")` - key is English, value is Urdu.
+**YOU HAVE POWERFUL TOOLS - USE THEM ACTIVELY!**
 
-- **Recalling Memories:** Use the 'retrieveFromMemory(category, key)' tool to recall facts, preferences, or other information the user has previously shared. Use this to avoid asking the user to repeat themselves, to personalize your responses, or to reference past interactions in a natural, friendly way. If you can't find a relevant memory, continue the conversation as normal without drawing attention to it.
-- `searchMemories(query, limit)` → Semantic search across all memories.  
-- `createUserProfile(profile_input)` → Build or update the user profile.  
-- `getUserProfile()` → View stored user profile info.  
-- **`getCompleteUserInfo()`** → **[USE THIS]** When user asks "what do you know about me?" or "what have you learned?" - retrieves EVERYTHING (profile + all memories + state).
-- `detectGenderFromName(name)` → Detect gender for correct pronoun use.  
-- `getUserState()` / `updateUserState(stage, trust_score)` → Track or update conversation stage & trust.  
+### When to Use storeInMemory:
+✅ **DO call it** when user shares:
+- Personal facts: name, age, location, family, occupation
+- Preferences: favorite anything, likes/dislikes  
+- Goals: what they want to achieve
+- Experiences: important events, stories they share
+- Relationships: people in their life
+- Plans: future intentions
+
+❌ **DON'T** store generic greetings or trivial chat
+
+**Format:** `storeInMemory(category, key, value)`
+- **category**: FACT, GOAL, INTEREST, EXPERIENCE, PREFERENCE, RELATIONSHIP, PLAN, OPINION
+- **key**: MUST be English (e.g., "favorite_food", "sister_name", "hobby")  
+- **value**: Can be any language (e.g., "بریانی")
+
+**Example:** User says "میری پسندیدہ کھانا بریانی ہے" → Call `storeInMemory("PREFERENCE", "favorite_food", "بریانی")`
+
+### When to Use retrieveFromMemory:
+- Before asking about something you might already know
+- To personalize responses with remembered facts
+- When user references past conversations
+
+### When to Use searchMemories:
+- User asks "do you remember when I told you about...?"
+- You need to find something but don't know the exact key
+- User says "what do you know about my work?" (search "work")
+
+### When to Use getCompleteUserInfo:
+**MUST call this when user asks:**
+- "What do you know about me?"
+- "What have you learned?"
+- "Tell me what you remember"
+- Any variation of "what do you know?"
+
+### Other Tools:
+- `getUserProfile()` → Get detailed user profile summary
+- `detectGenderFromName(name)` → When user shares their name, detect gender for pronouns
+- `getUserState()` / `updateUserState()` → Track conversation progression  
 
 ### Memory Key Standards:
 - **ENGLISH KEYS ONLY**: All keys must be in English (e.g., `favorite_food`, `sister_name`, `hobby`). Never use Urdu or other languages for keys.
@@ -351,7 +382,14 @@ For every message you generate:
 
     @function_tool()
     async def storeInMemory(self, context: RunContext, category: str, key: str, value: str):
-        """Save a memory item"""
+        """
+        Store user information for future reference. Use when user shares important facts, preferences, goals, or experiences.
+        
+        Categories: FACT, GOAL, INTEREST, EXPERIENCE, PREFERENCE, RELATIONSHIP, PLAN, OPINION
+        Key must be in English (e.g., 'favorite_food', 'sister_name'). Value can be any language.
+        
+        Example: storeInMemory('PREFERENCE', 'favorite_food', 'بریانی')
+        """
         print(f"[TOOL] 💾 storeInMemory called: [{category}] {key}")
         print(f"[TOOL]    Value: {value[:100]}{'...' if len(value) > 100 else ''}")
         success = self.memory_service.save_memory(category, key, value)
@@ -363,7 +401,11 @@ For every message you generate:
 
     @function_tool()
     async def retrieveFromMemory(self, context: RunContext, category: str, key: str):
-        """Get a memory item"""
+        """
+        Recall previously stored user information. Use to personalize responses and avoid asking repeated questions.
+        
+        Returns the stored value or empty string if not found.
+        """
         print(f"[TOOL] 🔍 retrieveFromMemory called: [{category}] {key}")
         memory = self.memory_service.get_memory(category, key)
         if memory:
@@ -504,7 +546,16 @@ For every message you generate:
     
     @function_tool()
     async def searchMemories(self, context: RunContext, query: str, limit: int = 5):
-        """Search memories semantically using Advanced RAG"""
+        """
+        Search all memories semantically to find relevant past conversations and information.
+        
+        Use when you need to recall something but don't know the exact category/key, or when user asks 
+        'what do you know about X?' or references past discussions.
+        
+        Args:
+            query: What you're looking for (in any language)
+            limit: Max results (default 5)
+        """
         print(f"[TOOL] 🔍 searchMemories called: query='{query}', limit={limit}")
         user_id = get_current_user_id()
         
@@ -891,8 +942,9 @@ For every message you generate:
                 )
                 logging.info(f"[RAG] ✅ Indexed for search")
             
-            # 🔥 CRITICAL FIX: Auto-save memories to database
-            # The LLM was NOT calling storeInMemory() tool, so memories were lost
+            # 🔄 BACKUP: Auto-save memories to database
+            # This runs as backup in case LLM doesn't call storeInMemory() tool
+            # Note: With improved tool descriptions and prompt, LLM should now call tools actively
             try:
                 # Use a simple timestamp-based key for conversation memories
                 memory_key = f"conv_{ts_ms}"
@@ -1065,12 +1117,16 @@ async def entrypoint(ctx: agents.JobContext):
 
     # Start session with RoomInputOptions (best practice)
     print("[SESSION INIT] Starting LiveKit session...")
+    print("[TOOLS] 🔧 Function tools will be auto-discovered from @function_tool() decorators")
+    print("[TOOLS] 📋 Expected: storeInMemory, retrieveFromMemory, searchMemories, getCompleteUserInfo, etc.")
+    
     await session.start(
         room=ctx.room, 
         agent=assistant,
         room_input_options=RoomInputOptions()
     )
     print("[SESSION INIT] ✓ Session started and initialized")
+    print("[TOOLS] ✅ Tools are now registered and available to LLM")
     
     # Wait for session to fully initialize
     await asyncio.sleep(0.5)
