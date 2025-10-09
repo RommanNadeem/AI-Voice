@@ -774,18 +774,27 @@ async def entrypoint(ctx: agents.JobContext):
             print(f"[EVENT] participant_connected error: {e}")
 
     @room.on("participant_disconnected")
-    async def _on_participant_disconnected(p):
+    def _on_participant_disconnected(p):
         try:
             print("[EVENT] participant_disconnected -> cleaning up")
             clear_current_user_id()
-            try:
-                await tts.aclose()
-            except Exception as te:
-                print(f"[EVENT] TTS close error: {te}")
+
+            async def _cleanup():
+                try:
+                    await tts.aclose()
+                except Exception as te:
+                    print(f"[EVENT] TTS close error: {te}")
+
+            asyncio.create_task(_cleanup())
+
             if not room.remote_participants:
                 ctx.shutdown(reason="All participants left")
         except Exception as e:
             print(f"[EVENT] participant_disconnected error: {e}")
+
+    # Mark handlers as accessed to satisfy static analyzers
+    _ = _on_participant_connected
+    _ = _on_participant_disconnected
 
     async def _on_shutdown():
         try:
