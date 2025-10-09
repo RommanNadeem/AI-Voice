@@ -15,7 +15,7 @@ from aiohttp import web
 
 from supabase import create_client, Client
 from livekit import agents, rtc
-from livekit.agents import AgentSession, Agent, RoomInputOptions, RunContext, function_tool
+from livekit.agents import AgentSession, Agent, RoomInputOptions, RunContext, function_tool, ChatContext
 from livekit.plugins import openai as lk_openai
 from livekit.plugins import silero
 from uplift_tts import TTS
@@ -170,7 +170,7 @@ def categorize_user_input(user_text: str, memory_service: MemoryService) -> str:
 # Assistant Agent - Simplified Pattern
 # ---------------------------
 class Assistant(Agent):
-    def __init__(self):
+    def __init__(self, chat_ctx: Optional[ChatContext] = None):
         # Track background tasks to prevent memory leaks
         self._background_tasks = set()
         
@@ -305,7 +305,8 @@ For every message you generate:
 
 """
         
-        super().__init__(instructions=self._base_instructions)
+        # CRITICAL: Pass chat_ctx to parent Agent class for initial context
+        super().__init__(instructions=self._base_instructions, chat_ctx=chat_ctx)
         
         # Initialize services
         self.memory_service = MemoryService(supabase)
@@ -316,6 +317,16 @@ For every message you generate:
         self.conversation_state_service = ConversationStateService(supabase)
         self.onboarding_service = OnboardingService(supabase)
         self.rag_service = None  # Set per-user in entrypoint
+        
+        # DEBUG: Log registered function tools
+        print("[AGENT INIT] Checking registered function tools...")
+        import inspect
+        tool_count = 0
+        for name, method in inspect.getmembers(self, predicate=inspect.ismethod):
+            if hasattr(method, '__wrapped__') or 'function_tool' in str(type(method)):
+                print(f"[AGENT INIT]   ✓ Function tool found: {name}")
+                tool_count += 1
+        print(f"[AGENT INIT] ✅ Total function tools registered: {tool_count}")
     
     def set_room(self, room):
         """Set the room reference for state broadcasting"""
@@ -351,19 +362,63 @@ For every message you generate:
 
     @function_tool()
     async def storeInMemory(self, context: RunContext, category: str, key: str, value: str):
-        """Save a memory item"""
+        """
+        Store user information persistently in memory for future conversations.
+        
+        Use this when the user shares important personal information that should be remembered.
+        Examples: preferences, goals, facts about their life, relationships, etc.
+        
+        Args:
+            category: Memory category - must be one of: FACT, GOAL, INTEREST, EXPERIENCE, 
+                      PREFERENCE, PLAN, RELATIONSHIP, OPINION
+            key: Unique identifier in English (snake_case) - e.g., "favorite_food", "sister_name"
+            value: The actual data to remember (can be in any language, including Urdu)
+        
+        Returns:
+            Success status and confirmation message
+        """
         print(f"[TOOL] 💾 storeInMemory called: [{category}] {key}")
         print(f"[TOOL]    Value: {value[:100]}{'...' if len(value) > 100 else ''}")
+        
+        # STEP 1: Save to database
         success = self.memory_service.save_memory(category, key, value)
+        
         if success:
-            print(f"[TOOL] ✅ Memory stored successfully")
+            print(f"[TOOL] ✅ Memory stored to database")
+            
+            # STEP 2: Also add to RAG for immediate searchability
+            if self.rag_service:
+                try:
+                    await self.rag_service.add_memory_async(
+                        text=value,
+                        category=category,
+                        metadata={"key": key, "explicit_save": True, "important": True}
+                    )
+                    print(f"[TOOL] ✅ Memory indexed in RAG")
+                except Exception as e:
+                    print(f"[TOOL] ⚠️ RAG indexing failed (non-critical): {e}")
         else:
             print(f"[TOOL] ❌ Memory storage failed")
-        return {"success": success, "message": f"Memory [{category}] {key} saved" if success else "Failed to save memory"}
+        
+        return {
+            "success": success, 
+            "message": f"Memory [{category}] {key} saved and indexed" if success else "Failed to save memory"
+        }
 
     @function_tool()
     async def retrieveFromMemory(self, context: RunContext, category: str, key: str):
-        """Get a memory item"""
+        """
+        Retrieve a specific memory item by category and key.
+        
+        Use this when you need to recall a specific piece of information you previously stored.
+        
+        Args:
+            category: Memory category (FACT, GOAL, INTEREST, etc.)
+            key: The exact key used when storing (e.g., "favorite_food")
+        
+        Returns:
+            The stored value or empty string if not found
+        """
         print(f"[TOOL] 🔍 retrieveFromMemory called: [{category}] {key}")
         memory = self.memory_service.get_memory(category, key)
         if memory:
@@ -422,8 +477,16 @@ For every message you generate:
     @function_tool()
     async def getCompleteUserInfo(self, context: RunContext):
         """
-        Get EVERYTHING we know about the user - profile, memories, state, etc.
-        Use this when user asks: 'what do you know about me?', 'what have you learned?', etc.
+        Retrieve ALL available information about the user in one call.
+        
+        Use this ONLY when the user explicitly asks what you know about them,
+        or requests a summary of their profile.
+        
+        DO NOT call this on every message - it's expensive and unnecessary.
+        Only use when specifically asked "what do you know about me?" or similar.
+        
+        Returns:
+            Complete user profile, all memories by category, conversation state, and trust score
         """
         print(f"[TOOL] 📋 getCompleteUserInfo called - retrieving ALL user data")
         user_id = get_current_user_id()
@@ -504,7 +567,19 @@ For every message you generate:
     
     @function_tool()
     async def searchMemories(self, context: RunContext, query: str, limit: int = 5):
-        """Search memories semantically using Advanced RAG"""
+        """
+        Search through stored memories semantically to find relevant information.
+        
+        Use this to recall what you know about the user when it's relevant to the conversation.
+        This performs semantic search, so you can use natural language queries.
+        
+        Args:
+            query: Natural language search query (e.g., "user's favorite foods", "family members")
+            limit: Maximum number of memories to return (default: 5, max: 20)
+        
+        Returns:
+            List of relevant memories with similarity scores
+        """
         print(f"[TOOL] 🔍 searchMemories called: query='{query}', limit={limit}")
         user_id = get_current_user_id()
         
@@ -1002,11 +1077,6 @@ async def entrypoint(ctx: agents.JobContext):
             print(f"[TTS] ❌ Fallback TTS also failed: {e2}")
             raise e2
     
-    assistant = Assistant()
-    
-    # Set room reference for state broadcasting
-    assistant.set_room(ctx.room)
-    
     # BEST PRACTICE: Wait for participant FIRST (more reliable)
     # This ensures participant is in room before session initialization
     print("[ENTRYPOINT] Waiting for participant to join...")
@@ -1017,6 +1087,74 @@ async def entrypoint(ctx: agents.JobContext):
         return
 
     print(f"[ENTRYPOINT] ✓ Participant joined: sid={participant.sid}, identity={participant.identity}")
+    
+    # Extract user_id early to load context
+    user_id = extract_uuid_from_identity(participant.identity)
+    
+    # STEP 1: Create initial ChatContext
+    initial_ctx = ChatContext()
+    
+    # STEP 2: Load user context BEFORE creating assistant (if we have valid user_id)
+    if user_id:
+        set_current_user_id(user_id)
+        print(f"[DEBUG][USER_ID] ✅ Set current user_id to: {user_id}")
+        
+        try:
+            # Ensure user profile exists
+            user_service = UserService(supabase)
+            await asyncio.to_thread(user_service.ensure_profile_exists, user_id)
+            print("[PROFILE] ✓ User profile ensured")
+            
+            # Load profile and memories for initial context
+            print("[CONTEXT] Loading user data for initial context...")
+            profile_service = ProfileService(supabase)
+            memory_service = MemoryService(supabase)
+            
+            # Load profile
+            profile = await asyncio.to_thread(profile_service.get_profile, user_id)
+            
+            # Load recent memories from key categories
+            categories = ['FACT', 'GOAL', 'INTEREST', 'PREFERENCE', 'RELATIONSHIP']
+            recent_memories = memory_service.get_memories_by_categories_batch(
+                categories=categories,
+                limit_per_category=3,
+                user_id=user_id
+            )
+            
+            # Build initial context message
+            context_parts = []
+            
+            if profile and len(profile.strip()) > 0:
+                context_parts.append(f"User profile: {profile[:300]}...")
+                print(f"[CONTEXT]   ✓ Profile loaded ({len(profile)} chars)")
+            
+            for category, mems in recent_memories.items():
+                if mems:
+                    mem_values = [m['value'] for m in mems[:3]]
+                    context_parts.append(f"{category}: {', '.join(mem_values)}")
+                    print(f"[CONTEXT]   ✓ {category}: {len(mems)} memories")
+            
+            if context_parts:
+                # Add as assistant message (internal context, not shown to user)
+                initial_ctx.add_message(
+                    role="assistant",
+                    content="[Internal context - User information loaded]\n" + "\n".join(context_parts)
+                )
+                print(f"[CONTEXT] ✅ Loaded {len(context_parts)} context items into ChatContext")
+            else:
+                print("[CONTEXT] ℹ️  No existing user data found, starting fresh")
+                
+        except Exception as e:
+            print(f"[CONTEXT] ⚠️ Failed to load initial context: {e}")
+            print("[CONTEXT] Continuing with empty context")
+    else:
+        print("[CONTEXT] No valid user_id, creating assistant with empty context")
+    
+    # STEP 3: Create assistant WITH context
+    assistant = Assistant(chat_ctx=initial_ctx)
+    
+    # Set room reference for state broadcasting
+    assistant.set_room(ctx.room)
     
     # Configure LLM with increased timeout for context-heavy prompts
     llm = lk_openai.LLM(
@@ -1062,28 +1200,17 @@ async def entrypoint(ctx: agents.JobContext):
     await asyncio.sleep(0.5)
     print("[SESSION INIT] ✓ Session initialization complete")
 
-    # Resolve to UUID
-    user_id = extract_uuid_from_identity(participant.identity)
+    # Check if we have a valid user (already extracted and set earlier)
     if not user_id:
-        print("[ENTRYPOINT] Participant identity could not be parsed as UUID")
-        print("[ENTRYPOINT] Sending generic greeting without user context...")
+        print("[ENTRYPOINT] No valid user_id - sending generic greeting...")
         await assistant.generate_reply_with_context(session, greet=True)
         return
-
-    # Set current user
-    set_current_user_id(user_id)
-    print(f"[DEBUG][USER_ID] ✅ Set current user_id to: {user_id}")
+    
+    # User_id already set earlier, just verify
+    print(f"[SESSION] 👤 User ID: {user_id[:8]}...")
     print(f"[DEBUG][USER_ID] Verification - get_current_user_id(): {get_current_user_id()}")
     
-    # Ensure user profile exists
-    try:
-        user_service = UserService(supabase)
-        await asyncio.to_thread(user_service.ensure_profile_exists, user_id)
-        print("[PROFILE] ✓ User profile ensured")
-    except Exception as e:
-        print(f"[PROFILE] ⚠️ Failed to ensure profile: {e}")
-    
-    # OPTIMIZATION: Initialize RAG but load in background (non-blocking)
+    # OPTIMIZATION: Initialize RAG and load in background (non-blocking)
     print(f"[RAG] Initializing for user {user_id[:8]}...")
     rag_service = RAGService(user_id)
     assistant.rag_service = rag_service
