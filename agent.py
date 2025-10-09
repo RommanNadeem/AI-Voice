@@ -1411,7 +1411,7 @@ Example: "السلام علیکم! میں آپ کی AI companion ہوں۔ کیس
     except Exception as e:
         print(f"[GREETING] ❌ Fast greeting failed: {e}, trying full context...")
         # Fallback to full context greeting
-    await assistant.generate_reply_with_context(session, greet=True)
+        await assistant.generate_reply_with_context(session, greet=True)
     
     # LiveKit Best Practice: Use event-based disconnection detection
     # Set up disconnection event handler
