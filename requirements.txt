@@ -13,12 +13,10 @@ hiredis>=2.2.0
 # Environment and configuration
 python-dotenv>=1.0.0
 
-# LiveKit voice agent framework
-livekit-agents>=0.4.0
-livekit-plugins-openai>=0.4.0
-livekit-plugins-silero>=0.4.0
+# LiveKit voice agent framework (using latest stable version)
+livekit-agents>=1.2.14
+livekit-plugins-openai>=0.6.0
+livekit-plugins-silero>=0.6.0
 livekit-plugins-noise-cancellation>=0.2.0
-
-livekit-agents>=1.2.0
 python-socketio>=5.0.0
 loguru>=0.7.0

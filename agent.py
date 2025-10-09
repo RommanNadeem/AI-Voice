@@ -15,7 +15,7 @@ from aiohttp import web
 
 from supabase import create_client, Client
 from livekit import agents, rtc
-from livekit.agents import AgentSession, Agent, RoomInputOptions, RunContext, function_tool
+from livekit.agents import AgentSession, Agent, RoomInputOptions, RunContext, function_tool, ChatContext
 from livekit.plugins import openai as lk_openai
 from livekit.plugins import silero
 from uplift_tts import TTS
@@ -170,7 +170,7 @@ def categorize_user_input(user_text: str, memory_service: MemoryService) -> str:
 # Assistant Agent - Simplified Pattern
 # ---------------------------
 class Assistant(Agent):
-    def __init__(self):
+    def __init__(self, chat_ctx: Optional[ChatContext] = None):
         # Track background tasks to prevent memory leaks
         self._background_tasks = set()
         
@@ -256,48 +256,17 @@ To keep conversations alive, natural, and engaging, follow these principles:
 ---
 
 ## Tools & Memory
+- **Remembering Facts:** Use the 'storeInMemory(category, key, value)' tool to remember specific, *user-related* facts or preferences when the user explicitly asks, or when they state a clear, concise piece of information that would help personalize or streamline *your future interactions with them*. This tool is for user-specific information that should persist across sessions. Do *not* use it for general project context. If unsure whether to save something, you can ask the user, "Should I remember that for you?". 
 
-**YOU HAVE POWERFUL TOOLS - USE THEM ACTIVELY!**
+**CRITICAL**: The `key` parameter must ALWAYS be in English (e.g., "favorite_food", "sister_name", "hobby"). The `value` parameter contains the actual data (can be in any language). Example: `storeInMemory("PREFERENCE", "favorite_food", "بریانی")` - key is English, value is Urdu.
 
-### When to Use storeInMemory:
-✅ **DO call it** when user shares:
-- Personal facts: name, age, location, family, occupation
-- Preferences: favorite anything, likes/dislikes  
-- Goals: what they want to achieve
-- Experiences: important events, stories they share
-- Relationships: people in their life
-- Plans: future intentions
-
-❌ **DON'T** store generic greetings or trivial chat
-
-**Format:** `storeInMemory(category, key, value)`
-- **category**: FACT, GOAL, INTEREST, EXPERIENCE, PREFERENCE, RELATIONSHIP, PLAN, OPINION
-- **key**: MUST be English (e.g., "favorite_food", "sister_name", "hobby")  
-- **value**: Can be any language (e.g., "بریانی")
-
-**Example:** User says "میری پسندیدہ کھانا بریانی ہے" → Call `storeInMemory("PREFERENCE", "favorite_food", "بریانی")`
-
-### When to Use retrieveFromMemory:
-- Before asking about something you might already know
-- To personalize responses with remembered facts
-- When user references past conversations
-
-### When to Use searchMemories:
-- User asks "do you remember when I told you about...?"
-- You need to find something but don't know the exact key
-- User says "what do you know about my work?" (search "work")
-
-### When to Use getCompleteUserInfo:
-**MUST call this when user asks:**
-- "What do you know about me?"
-- "What have you learned?"
-- "Tell me what you remember"
-- Any variation of "what do you know?"
-
-### Other Tools:
-- `getUserProfile()` → Get detailed user profile summary
-- `detectGenderFromName(name)` → When user shares their name, detect gender for pronouns
-- `getUserState()` / `updateUserState()` → Track conversation progression  
+- **Recalling Memories:** Use the 'retrieveFromMemory(category, key)' tool to recall facts, preferences, or other information the user has previously shared. Use this to avoid asking the user to repeat themselves, to personalize your responses, or to reference past interactions in a natural, friendly way. If you can't find a relevant memory, continue the conversation as normal without drawing attention to it.
+- `searchMemories(query, limit)` → Semantic search across all memories.  
+- `createUserProfile(profile_input)` → Build or update the user profile.  
+- `getUserProfile()` → View stored user profile info.  
+- **`getCompleteUserInfo()`** → **[USE THIS]** When user asks "what do you know about me?" or "what have you learned?" - retrieves EVERYTHING (profile + all memories + state).
+- `detectGenderFromName(name)` → Detect gender for correct pronoun use.  
+- `getUserState()` / `updateUserState(stage, trust_score)` → Track or update conversation stage & trust.  
 
 ### Memory Key Standards:
 - **ENGLISH KEYS ONLY**: All keys must be in English (e.g., `favorite_food`, `sister_name`, `hobby`). Never use Urdu or other languages for keys.
@@ -331,12 +300,13 @@ For every message you generate:
 1. Start with a short emotional beat.  
 2. Add one line of value (tiny opinion, reflection nudge, micro-story, or playful tease).  
 3. End with **one open-ended question** — sometimes casual, sometimes reflective.
-4. Make sure your response is in easy "Urdu".
+4. Make sure your response is in easy and casual "Urdu".
 
 
 """
         
-        super().__init__(instructions=self._base_instructions)
+        # CRITICAL: Pass chat_ctx to parent Agent class for initial context
+        super().__init__(instructions=self._base_instructions, chat_ctx=chat_ctx)
         
         # Initialize services
         self.memory_service = MemoryService(supabase)
@@ -347,6 +317,24 @@ For every message you generate:
         self.conversation_state_service = ConversationStateService(supabase)
         self.onboarding_service = OnboardingService(supabase)
         self.rag_service = None  # Set per-user in entrypoint
+        
+        # DEBUG: Log registered function tools (safely)
+        print("[AGENT INIT] Checking registered function tools...")
+        tool_count = 0
+        try:
+            # Manually check known function tool methods to avoid property access issues
+            tool_names = [
+                'storeInMemory', 'retrieveFromMemory', 'searchMemories',
+                'getCompleteUserInfo', 'getUserProfile', 'createUserProfile',
+                'detectGenderFromName', 'getUserState', 'updateUserState'
+            ]
+            for name in tool_names:
+                if hasattr(self, name):
+                    print(f"[AGENT INIT]   ✓ Function tool found: {name}")
+                    tool_count += 1
+            print(f"[AGENT INIT] ✅ Total function tools registered: {tool_count}")
+        except Exception as e:
+            print(f"[AGENT INIT] ⚠️ Tool verification skipped: {e}")
     
     def set_room(self, room):
         """Set the room reference for state broadcasting"""
@@ -383,28 +371,61 @@ For every message you generate:
     @function_tool()
     async def storeInMemory(self, context: RunContext, category: str, key: str, value: str):
         """
-        Store user information for future reference. Use when user shares important facts, preferences, goals, or experiences.
+        Store user information persistently in memory for future conversations.
         
-        Categories: FACT, GOAL, INTEREST, EXPERIENCE, PREFERENCE, RELATIONSHIP, PLAN, OPINION
-        Key must be in English (e.g., 'favorite_food', 'sister_name'). Value can be any language.
+        Use this when the user shares important personal information that should be remembered.
+        Examples: preferences, goals, facts about their life, relationships, etc.
         
-        Example: storeInMemory('PREFERENCE', 'favorite_food', 'بریانی')
+        Args:
+            category: Memory category - must be one of: FACT, GOAL, INTEREST, EXPERIENCE, 
+                      PREFERENCE, PLAN, RELATIONSHIP, OPINION
+            key: Unique identifier in English (snake_case) - e.g., "favorite_food", "sister_name"
+            value: The actual data to remember (can be in any language, including Urdu)
+        
+        Returns:
+            Success status and confirmation message
         """
         print(f"[TOOL] 💾 storeInMemory called: [{category}] {key}")
         print(f"[TOOL]    Value: {value[:100]}{'...' if len(value) > 100 else ''}")
+        
+        # STEP 1: Save to database
         success = self.memory_service.save_memory(category, key, value)
+        
         if success:
-            print(f"[TOOL] ✅ Memory stored successfully")
+            print(f"[TOOL] ✅ Memory stored to database")
+            
+            # STEP 2: Also add to RAG for immediate searchability
+            if self.rag_service:
+                try:
+                    await self.rag_service.add_memory_async(
+                        text=value,
+                        category=category,
+                        metadata={"key": key, "explicit_save": True, "important": True}
+                    )
+                    print(f"[TOOL] ✅ Memory indexed in RAG")
+                except Exception as e:
+                    print(f"[TOOL] ⚠️ RAG indexing failed (non-critical): {e}")
         else:
             print(f"[TOOL] ❌ Memory storage failed")
-        return {"success": success, "message": f"Memory [{category}] {key} saved" if success else "Failed to save memory"}
+        
+        return {
+            "success": success, 
+            "message": f"Memory [{category}] {key} saved and indexed" if success else "Failed to save memory"
+        }
 
     @function_tool()
     async def retrieveFromMemory(self, context: RunContext, category: str, key: str):
         """
-        Recall previously stored user information. Use to personalize responses and avoid asking repeated questions.
+        Retrieve a specific memory item by category and key.
         
-        Returns the stored value or empty string if not found.
+        Use this when you need to recall a specific piece of information you previously stored.
+        
+        Args:
+            category: Memory category (FACT, GOAL, INTEREST, etc.)
+            key: The exact key used when storing (e.g., "favorite_food")
+        
+        Returns:
+            The stored value or empty string if not found
         """
         print(f"[TOOL] 🔍 retrieveFromMemory called: [{category}] {key}")
         memory = self.memory_service.get_memory(category, key)
@@ -464,8 +485,16 @@ For every message you generate:
     @function_tool()
     async def getCompleteUserInfo(self, context: RunContext):
         """
-        Get EVERYTHING we know about the user - profile, memories, state, etc.
-        Use this when user asks: 'what do you know about me?', 'what have you learned?', etc.
+        Retrieve ALL available information about the user in one call.
+        
+        Use this ONLY when the user explicitly asks what you know about them,
+        or requests a summary of their profile.
+        
+        DO NOT call this on every message - it's expensive and unnecessary.
+        Only use when specifically asked "what do you know about me?" or similar.
+        
+        Returns:
+            Complete user profile, all memories by category, conversation state, and trust score
         """
         print(f"[TOOL] 📋 getCompleteUserInfo called - retrieving ALL user data")
         user_id = get_current_user_id()
@@ -547,14 +576,17 @@ For every message you generate:
     @function_tool()
     async def searchMemories(self, context: RunContext, query: str, limit: int = 5):
         """
-        Search all memories semantically to find relevant past conversations and information.
+        Search through stored memories semantically to find relevant information.
         
-        Use when you need to recall something but don't know the exact category/key, or when user asks 
-        'what do you know about X?' or references past discussions.
+        Use this to recall what you know about the user when it's relevant to the conversation.
+        This performs semantic search, so you can use natural language queries.
         
         Args:
-            query: What you're looking for (in any language)
-            limit: Max results (default 5)
+            query: Natural language search query (e.g., "user's favorite foods", "family members")
+            limit: Maximum number of memories to return (default: 5, max: 20)
+        
+        Returns:
+            List of relevant memories with similarity scores
         """
         print(f"[TOOL] 🔍 searchMemories called: query='{query}', limit={limit}")
         user_id = get_current_user_id()
@@ -929,34 +961,19 @@ For every message you generate:
             
             logging.info(f"[BACKGROUND] Processing: {user_text[:50] if len(user_text) > 50 else user_text}...")
             
-            # Categorize for RAG metadata
+            # Categorize for RAG metadata (but don't auto-save to memory table)
             category = await asyncio.to_thread(categorize_user_input, user_text, self.memory_service)
             ts_ms = int(time.time() * 1000)
             
-            # ✅ Index in RAG for semantic search
+            # ✅ Index in RAG for semantic search (without storing in memory table)
+            # LLM will use storeInMemory() tool with consistent keys when needed
             if self.rag_service:
                 self.rag_service.add_memory_background(
                     text=user_text,
                     category=category,
                     metadata={"timestamp": ts_ms}
                 )
-                logging.info(f"[RAG] ✅ Indexed for search")
-            
-            # 🔄 BACKUP: Auto-save memories to database
-            # This runs as backup in case LLM doesn't call storeInMemory() tool
-            # Note: With improved tool descriptions and prompt, LLM should now call tools actively
-            try:
-                # Use a simple timestamp-based key for conversation memories
-                memory_key = f"conv_{ts_ms}"
-                await self.memory_service.store_memory_async(
-                    category=category,
-                    key=memory_key,
-                    value=user_text,
-                    user_id=user_id
-                )
-                logging.info(f"[MEMORY] ✅ Auto-saved to database: [{category}] {user_text[:50]}...")
-            except Exception as e:
-                logging.error(f"[MEMORY] ❌ Auto-save failed: {e}")
+                logging.info(f"[RAG] ✅ Indexed for search (memory storage handled by LLM tools)")
             
             # Update profile - use async method with explicit user_id
             existing_profile = await self.profile_service.get_profile_async(user_id)
@@ -1029,13 +1046,10 @@ async def entrypoint(ctx: agents.JobContext):
     except Exception as e:
         print(f"[ENTRYPOINT] Warning: Database batcher initialization failed: {e}")
 
-    # LiveKit Best Practice: Connect with AUDIO_ONLY auto-subscribe
-    # This optimizes for voice-only one-to-one conversations
-    # Ref: https://docs.livekit.io/agents/quickstart/
+    # CRITICAL: Connect to the room first
     print("[ENTRYPOINT] Connecting to LiveKit room...")
-    await ctx.connect(auto_subscribe=agents.AutoSubscribe.AUDIO_ONLY)
-    print("[ENTRYPOINT] ✓ Connected to room (auto-subscribe: AUDIO_ONLY)")
-    print("[ENTRYPOINT] 🎯 Room configured for one-to-one voice conversation")
+    await ctx.connect()
+    print("[ENTRYPOINT] ✓ Connected to room")
 
     # Initialize media + agent with enhanced debugging
     print("[TTS] 🎤 Initializing TTS with voice: v_8eelc901")
@@ -1071,11 +1085,6 @@ async def entrypoint(ctx: agents.JobContext):
             print(f"[TTS] ❌ Fallback TTS also failed: {e2}")
             raise e2
     
-    assistant = Assistant()
-    
-    # Set room reference for state broadcasting
-    assistant.set_room(ctx.room)
-    
     # BEST PRACTICE: Wait for participant FIRST (more reliable)
     # This ensures participant is in room before session initialization
     print("[ENTRYPOINT] Waiting for participant to join...")
@@ -1087,17 +1096,73 @@ async def entrypoint(ctx: agents.JobContext):
 
     print(f"[ENTRYPOINT] ✓ Participant joined: sid={participant.sid}, identity={participant.identity}")
     
-    # LiveKit Best Practice: Dedicated rooms for each session (one-to-one)
-    # Each user should have their own unique room for isolated conversations
-    # Ref: https://docs.livekit.io/agents/quickstart/
-    remote_participants = list(ctx.room.remote_participants.values())
-    if len(remote_participants) > 1:
-        print(f"[ENTRYPOINT] ⚠️ WARNING: Multiple participants detected ({len(remote_participants)})")
-        print(f"[ENTRYPOINT] 🔒 Best Practice Violation: This room should have ONE user only")
-        print(f"[ENTRYPOINT] ✓ Processing only first participant: {participant.identity}")
-        print(f"[ENTRYPOINT] 💡 Recommendation: Create unique room per user session")
-        # The AgentSession will only process the first participant
-        # Additional participants are ignored
+    # Extract user_id early to load context
+    user_id = extract_uuid_from_identity(participant.identity)
+    
+    # STEP 1: Create initial ChatContext
+    initial_ctx = ChatContext()
+    
+    # STEP 2: Load user context BEFORE creating assistant (if we have valid user_id)
+    if user_id:
+        set_current_user_id(user_id)
+        print(f"[DEBUG][USER_ID] ✅ Set current user_id to: {user_id}")
+        
+        try:
+            # Ensure user profile exists
+            user_service = UserService(supabase)
+            await asyncio.to_thread(user_service.ensure_profile_exists, user_id)
+            print("[PROFILE] ✓ User profile ensured")
+            
+            # Load profile and memories for initial context
+            print("[CONTEXT] Loading user data for initial context...")
+            profile_service = ProfileService(supabase)
+            memory_service = MemoryService(supabase)
+            
+            # Load profile
+            profile = await asyncio.to_thread(profile_service.get_profile, user_id)
+            
+            # Load recent memories from key categories
+            categories = ['FACT', 'GOAL', 'INTEREST', 'PREFERENCE', 'RELATIONSHIP']
+            recent_memories = memory_service.get_memories_by_categories_batch(
+                categories=categories,
+                limit_per_category=3,
+                user_id=user_id
+            )
+            
+            # Build initial context message
+            context_parts = []
+            
+            if profile and len(profile.strip()) > 0:
+                context_parts.append(f"User profile: {profile[:300]}...")
+                print(f"[CONTEXT]   ✓ Profile loaded ({len(profile)} chars)")
+            
+            for category, mems in recent_memories.items():
+                if mems:
+                    mem_values = [m['value'] for m in mems[:3]]
+                    context_parts.append(f"{category}: {', '.join(mem_values)}")
+                    print(f"[CONTEXT]   ✓ {category}: {len(mems)} memories")
+            
+            if context_parts:
+                # Add as assistant message (internal context, not shown to user)
+                initial_ctx.add_message(
+                    role="assistant",
+                    content="[Internal context - User information loaded]\n" + "\n".join(context_parts)
+                )
+                print(f"[CONTEXT] ✅ Loaded {len(context_parts)} context items into ChatContext")
+            else:
+                print("[CONTEXT] ℹ️  No existing user data found, starting fresh")
+                
+        except Exception as e:
+            print(f"[CONTEXT] ⚠️ Failed to load initial context: {e}")
+            print("[CONTEXT] Continuing with empty context")
+    else:
+        print("[CONTEXT] No valid user_id, creating assistant with empty context")
+    
+    # STEP 3: Create assistant WITH context
+    assistant = Assistant(chat_ctx=initial_ctx)
+    
+    # Set room reference for state broadcasting
+    assistant.set_room(ctx.room)
     
     # Configure LLM with increased timeout for context-heavy prompts
     llm = lk_openai.LLM(
@@ -1130,49 +1195,30 @@ async def entrypoint(ctx: agents.JobContext):
         ),
     )
 
-    # LiveKit Best Practice: Start session with RoomInputOptions
-    # AgentSession automatically binds to the FIRST participant only
-    # Ref: https://docs.livekit.io/agents/quickstart/
+    # Start session with RoomInputOptions (best practice)
     print("[SESSION INIT] Starting LiveKit session...")
-    print("[TOOLS] 🔧 Function tools will be auto-discovered from @function_tool() decorators")
-    print("[TOOLS] 📋 Expected: storeInMemory, retrieveFromMemory, searchMemories, getCompleteUserInfo, etc.")
-    
     await session.start(
         room=ctx.room, 
         agent=assistant,
         room_input_options=RoomInputOptions()
     )
     print("[SESSION INIT] ✓ Session started and initialized")
-    print(f"[SESSION INIT] 🔒 Session bound to participant: {participant.identity}")
-    print("[SESSION INIT] 💡 AgentSession will ONLY process audio from this participant")
-    print("[TOOLS] ✅ Tools are now registered and available to LLM")
     
     # Wait for session to fully initialize
     await asyncio.sleep(0.5)
     print("[SESSION INIT] ✓ Session initialization complete")
 
-    # Resolve to UUID
-    user_id = extract_uuid_from_identity(participant.identity)
+    # Check if we have a valid user (already extracted and set earlier)
     if not user_id:
-        print("[ENTRYPOINT] Participant identity could not be parsed as UUID")
-        print("[ENTRYPOINT] Sending generic greeting without user context...")
+        print("[ENTRYPOINT] No valid user_id - sending generic greeting...")
         await assistant.generate_reply_with_context(session, greet=True)
         return
-
-    # Set current user
-    set_current_user_id(user_id)
-    print(f"[DEBUG][USER_ID] ✅ Set current user_id to: {user_id}")
+    
+    # User_id already set earlier, just verify
+    print(f"[SESSION] 👤 User ID: {user_id[:8]}...")
     print(f"[DEBUG][USER_ID] Verification - get_current_user_id(): {get_current_user_id()}")
     
-    # Ensure user profile exists
-    try:
-        user_service = UserService(supabase)
-        await asyncio.to_thread(user_service.ensure_profile_exists, user_id)
-        print("[PROFILE] ✓ User profile ensured")
-    except Exception as e:
-        print(f"[PROFILE] ⚠️ Failed to ensure profile: {e}")
-    
-    # OPTIMIZATION: Initialize RAG but load in background (non-blocking)
+    # OPTIMIZATION: Initialize RAG and load in background (non-blocking)
     print(f"[RAG] Initializing for user {user_id[:8]}...")
     rag_service = RAGService(user_id)
     assistant.rag_service = rag_service
@@ -1281,7 +1327,7 @@ Example: "السلام علیکم! میں آپ کی AI companion ہوں۔ کیس
     except Exception as e:
         print(f"[GREETING] ❌ Fast greeting failed: {e}, trying full context...")
         # Fallback to full context greeting
-        await assistant.generate_reply_with_context(session, greet=True)
+    await assistant.generate_reply_with_context(session, greet=True)
     
     # LiveKit Best Practice: Use event-based disconnection detection
     # Set up disconnection event handler
