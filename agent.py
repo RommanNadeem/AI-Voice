@@ -841,26 +841,37 @@ For every message you generate:
             # Build context parts separately to avoid f-string issues
             last_context_part = ""
             if last_conversation_context:
-                last_context_part = "Last Conversation Context:" + "\n" + last_conversation_context + "\n"
+                last_context_part = "Last Conversation Context:\n" + last_conversation_context + "\n"
+            
+            # Prepare profile text
+            profile_text = "(Building from conversation)"
+            if profile:
+                profile_text = profile[:400] if len(profile) > 400 else profile
+            
+            # Prepare name text
+            name_text = user_name or "Unknown - ask naturally"
+            
+            # Build rules section separately
+            rules_section = """Rules:
+    ✅ Use their name and reference memories naturally
+    ❌ Don't ask for info already shown above
+    ⚠️  If user asks "what do you know about me?" -> CALL getCompleteUserInfo() tool for full data!"""
             
             # Compact context block (reduce prompt size to prevent timeouts)
             context_block = f"""
     🎯 QUICK CONTEXT (for reference - NOT complete):
 
-    Name: {user_name or "Unknown - ask naturally"}
+    Name: {name_text}
     Stage: {conversation_state['stage']} (Trust: {conversation_state['trust_score']:.1f}/10)
     
-    Profile (partial): {profile[:400] if profile and len(profile) > 400 else profile if profile else "(Building from conversation)"}
+    Profile (partial): {profile_text}
 
     Recent Memories (sample only):
     {categorized_mems}
 
     {last_context_part}
 
-    Rules:
-    ✅ Use their name and reference memories naturally
-    ❌ Don't ask for info already shown above
-    ⚠️  If user asks "what do you know about me?" → CALL getCompleteUserInfo() tool for full data!
+    {rules_section}
     """
 
 
@@ -928,19 +939,34 @@ For every message you generate:
                 print(f"[DEBUG][CONTEXT] ⚠️ Session not running - skipping reply generation")
 
     async def on_agent_speech_started(self, turn_ctx):
-        """Called when agent starts speaking (TTS playback begins)"""
+        """
+        LiveKit Callback: Called when agent starts speaking (TTS playback begins)
+        Best Practice: Update UI state to show agent is speaking
+        """
         logging.info(f"[AGENT] Started speaking")
         await self.broadcast_state("speaking")
     
     async def on_agent_speech_committed(self, turn_ctx):
-        """Called when agent finishes generating and committing speech to the output"""
+        """
+        LiveKit Callback: Called when agent finishes generating and committing speech
+        Best Practice: Transition back to listening after speech is committed
+        """
         logging.info(f"[AGENT] Speech committed - transitioning to listening")
-        # Agent has finished speaking (TTS is queued/starting)
-        # We can now transition to listening state
         await self.broadcast_state("listening")
     
+    async def on_user_speech_started(self, turn_ctx):
+        """
+        LiveKit Callback: Called when user starts speaking (VAD detected speech)
+        Best Practice: Update UI to show user is speaking (stops "listening" animation)
+        """
+        logging.info(f"[USER] Started speaking")
+        # Note: We don't broadcast state here to avoid flickering on short utterances
+    
     async def on_user_turn_completed(self, turn_ctx, new_message):
-        """Save user input to memory and update profile (background)"""
+        """
+        LiveKit Callback: Save user input to memory and update profile (background)
+        Best Practice: Non-blocking background processing for zero latency
+        """
         user_text = new_message.text_content or ""
         logging.info(f"[USER] {user_text[:80]}")
         print(f"[STATE] 🎤 User finished speaking")
@@ -1268,14 +1294,17 @@ async def entrypoint(ctx: agents.JobContext):
     # Start TTS warm-up in background
     asyncio.create_task(warm_tts())
     
+    # LiveKit Best Practice: Optimize VAD for real-world conditions
+    # Lower activation threshold = more sensitive (might pick up background noise)
+    # Higher activation threshold = less sensitive (might miss quiet speech)
     session = AgentSession(
         stt=lk_openai.STT(model="gpt-4o-transcribe", language="ur"),
         llm=llm,
         tts=tts,
         vad=silero.VAD.load(
-            min_silence_duration=0.5,
-            activation_threshold=0.5,
-            min_speech_duration=0.1,
+            min_silence_duration=0.5,      # Time to wait before considering speech ended
+            activation_threshold=0.6,      # Increased from 0.5 to reduce false triggers
+            min_speech_duration=0.15,      # Increased from 0.1 to ignore brief noise
         ),
     )
 
@@ -1343,57 +1372,19 @@ async def entrypoint(ctx: agents.JobContext):
     else:
         print("[SUPABASE] ✗ Not connected")
 
-    # BEST PRACTICE: Verify audio track subscription before first message
-    # This prevents the "sometimes stuck on listening" issue
-    print("[AUDIO] 🎧 Waiting for audio track subscription...")
-    print(f"[AUDIO] Participant: {participant.identity} (sid: {participant.sid})")
+    # LiveKit Best Practice: AgentSession handles audio subscription automatically
+    # No need to manually wait - the session's VAD will activate when audio is ready
+    print("[AUDIO] ✓ AgentSession managing audio subscription automatically")
     
-    audio_subscribed = False
-    audio_track_sid = None
-    max_wait = 5.0  # Reasonable timeout
-    start_time = time.time()
-    
-    while time.time() - start_time < max_wait:
-        # Check if participant has subscribed audio track
-        if participant.track_publications:
-            for track_sid, publication in participant.track_publications.items():
-                if publication.kind == rtc.TrackKind.KIND_AUDIO:
-                    print(f"[AUDIO] Found audio track {track_sid}, subscribed: {publication.subscribed}")
-                    if publication.subscribed:
-                        audio_subscribed = True
-                        audio_track_sid = track_sid
-                        elapsed = time.time() - start_time
-                        print(f"[AUDIO] ✅ Audio track subscribed after {elapsed:.2f}s: {track_sid}")
-                        break
-        
-        if audio_subscribed:
-            break
-        
-        # Check progress
-        elapsed = time.time() - start_time
-        if elapsed > 1.0 and elapsed % 1.0 < 0.2:  # Log every second
-            print(f"[AUDIO] Still waiting... ({elapsed:.1f}s/{max_wait}s)")
-        
-        await asyncio.sleep(0.2)
-    
-    if not audio_subscribed:
-        print(f"[AUDIO] ⚠️ Audio track not subscribed after {max_wait}s timeout")
-        print("[AUDIO] 🔄 Attempting to proceed with additional delay...")
-        # Give extra time as fallback
-        await asyncio.sleep(2.0)
-        print("[AUDIO] ⚠️ Proceeding without subscription confirmation")
-    else:
-        # WebRTC stabilization delay after subscription confirmed
-        await asyncio.sleep(0.5)
-        print("[AUDIO] ✅ WebRTC connection stabilized and ready")
+    # Brief delay to allow WebRTC connection to stabilize (optional, but helps)
+    await asyncio.sleep(0.5)
 
     # Generate greeting with full context
     print("[GREETING] Generating greeting with full context...")
     await assistant.generate_reply_with_context(session, greet=True)
     print("[GREETING] ✅ Greeting sent!")
     
-    # LiveKit Best Practice: Use event-based disconnection detection
-    # Set up disconnection event handler
+    # LiveKit Best Practice: Use event-based architecture for better state management
     print("[ENTRYPOINT] 🎧 Agent is now listening and ready for conversation...")
     print("[ENTRYPOINT] Setting up event handlers...")
     
@@ -1406,9 +1397,21 @@ async def entrypoint(ctx: agents.JobContext):
             print(f"[ENTRYPOINT] 📴 Participant {participant.identity} disconnected (event)")
             disconnect_event.set()
     
-    # Register the event handler
+    def on_track_subscribed(track: rtc.Track, publication: rtc.TrackPublication, participant_obj: rtc.RemoteParticipant):
+        """Track when audio/video tracks are subscribed - useful for debugging"""
+        if participant_obj.sid == participant.sid:
+            print(f"[TRACK] ✅ Subscribed to {publication.kind.name} track: {publication.sid}")
+    
+    def on_track_unsubscribed(track: rtc.Track, publication: rtc.TrackPublication, participant_obj: rtc.RemoteParticipant):
+        """Track when audio/video tracks are unsubscribed"""
+        if participant_obj.sid == participant.sid:
+            print(f"[TRACK] ❌ Unsubscribed from {publication.kind.name} track: {publication.sid}")
+    
+    # Register all event handlers
     ctx.room.on("participant_disconnected", on_participant_disconnected)
-    print("[ENTRYPOINT] ✓ Event handlers registered")
+    ctx.room.on("track_subscribed", on_track_subscribed)
+    ctx.room.on("track_unsubscribed", on_track_unsubscribed)
+    print("[ENTRYPOINT] ✓ Event handlers registered (disconnect, track_subscribed, track_unsubscribed)")
     
     try:
         print("[ENTRYPOINT] Waiting for participant to disconnect...")
@@ -1430,12 +1433,14 @@ async def entrypoint(ctx: agents.JobContext):
         # Cleanup
         print("[ENTRYPOINT] 🧹 Cleaning up resources...")
         
-        # Unregister event handler
+        # Unregister all event handlers
         try:
             ctx.room.off("participant_disconnected", on_participant_disconnected)
+            ctx.room.off("track_subscribed", on_track_subscribed)
+            ctx.room.off("track_unsubscribed", on_track_unsubscribed)
             print("[ENTRYPOINT] ✓ Event handlers unregistered")
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[ENTRYPOINT] ⚠️ Error unregistering handlers: {e}")
         
         # Cleanup assistant resources
         if hasattr(assistant, 'cleanup'):
