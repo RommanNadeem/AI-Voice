@@ -155,10 +155,10 @@ class ConversationStateService:
                 })
                 update_data["stage_history"] = stage_history
             
-            # Upsert to database
+            # Upsert to database with conflict resolution on user_id
             resp = await asyncio.to_thread(
                 lambda: self.supabase.table("conversation_state")
-                .upsert(update_data)
+                .upsert(update_data, on_conflict="user_id")
                 .execute()
             )
             
