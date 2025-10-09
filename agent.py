@@ -811,22 +811,12 @@ async def entrypoint(ctx: agents.JobContext):
     print(f"[GREETING] Prompting AI to use getUserProfile() for personalized greeting")
     
     # Minimal hint: Tell AI that user has a profile and should call tool
-    first_message_hint = f"""
-{assistant.instructions}
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-FIRST MESSAGE - IMPORTANT:
-
-This user has a profile with their name, occupation, and interests stored.
-Call getUserProfile() to load their information and personalize your greeting naturally.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-"""
+    first_message_hint = f""" {assistant.instructions} """
     
     await session.generate_reply(instructions=first_message_hint)
 
 if __name__ == "__main__":
     agents.cli.run_app(agents.WorkerOptions(
         entrypoint_fnc=entrypoint,
-        initialize_process_timeout=60,
+        initialize_process_timeout=5,
     ))
