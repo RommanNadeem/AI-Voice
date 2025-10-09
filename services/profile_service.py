@@ -51,30 +51,37 @@ class ProfileService:
             client = pool.get_openai_client() if pool else openai.OpenAI(api_key=Config.OPENAI_API_KEY)
             
             prompt = f"""
-            {"Update and enhance" if existing_profile else "Create"} a comprehensive 4-5 line user profile that captures their persona. Focus on:
+            {"Update" if existing_profile else "Create"} a concise 3-4 line user profile that captures ONLY the most essential information about their persona.
             
-            - Interests & Hobbies (what they like, enjoy doing)
-            - Goals & Aspirations (what they want to achieve)
-            - Family & Relationships (important people in their life)
-            - Personality Traits (core characteristics, values, beliefs)
-            - Important Life Details (profession, background, experiences)
+            CRITICAL RULES:
+            1. ONLY include information that is explicitly stated in the user's input - DO NOT infer, assume, or add anything on your own
+            2. DO NOT add information that is not directly verifiable from what the user said
+            3. Focus ONLY on the most important details - skip minor or trivial information
+            4. Be selective - quality over quantity
+            
+            Priority information (only if explicitly mentioned):
+            - Core interests & passions (not casual mentions)
+            - Significant goals or life aspirations
+            - Important relationships or family (key people only)
+            - Defining personality traits or values
+            - Critical life details (profession, major life events)
             
             {"Existing profile: " + existing_profile if existing_profile else ""}
             
             New information: "{user_input}"
             
-            {"Merge the new information with the existing profile, keeping all important details while adding new insights." if existing_profile else "Create a new profile from this information."}
+            {"Carefully merge ONLY the important new information with the existing profile. Keep it concise and factual." if existing_profile else "Create a profile from ONLY the important information provided."}
             
-            Format: Write 4-5 concise, flowing sentences that paint a complete picture of who this person is.
-            Style: Natural, descriptive, like a character summary.
+            Format: Write 3-4 concise sentences with ONLY verified, important facts.
+            Style: Factual and natural - like essential notes about the person.
             
-            Return only the profile text (4-5 sentences). If no meaningful information is found, return "NO_PROFILE_INFO".
+            Return only the profile text (3-4 sentences). If no meaningful information is found, return "NO_PROFILE_INFO".
             """
             
             response = client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[
-                    {"role": "system", "content": f"You are an expert at creating and updating comprehensive user profiles. {'Update and merge' if existing_profile else 'Create'} a 4-5 sentence persona summary that captures the user's complete personality, interests, goals, and important life details."},
+                    {"role": "system", "content": f"You are an expert at creating concise, factual user profiles. {'Update' if existing_profile else 'Create'} a 3-4 sentence profile with ONLY the most important information explicitly provided by the user. Never infer, assume, or add information that wasn't directly stated. Be selective and truthful."},
                     {"role": "user", "content": prompt}
                 ],
                 max_tokens=200,
