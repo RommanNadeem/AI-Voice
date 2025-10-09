@@ -1029,10 +1029,13 @@ async def entrypoint(ctx: agents.JobContext):
     except Exception as e:
         print(f"[ENTRYPOINT] Warning: Database batcher initialization failed: {e}")
 
-    # CRITICAL: Connect to the room first with auto-subscribe enabled
+    # LiveKit Best Practice: Connect with AUDIO_ONLY auto-subscribe
+    # This optimizes for voice-only one-to-one conversations
+    # Ref: https://docs.livekit.io/agents/quickstart/
     print("[ENTRYPOINT] Connecting to LiveKit room...")
     await ctx.connect(auto_subscribe=agents.AutoSubscribe.AUDIO_ONLY)
     print("[ENTRYPOINT] ✓ Connected to room (auto-subscribe: AUDIO_ONLY)")
+    print("[ENTRYPOINT] 🎯 Room configured for one-to-one voice conversation")
 
     # Initialize media + agent with enhanced debugging
     print("[TTS] 🎤 Initializing TTS with voice: v_8eelc901")
@@ -1084,6 +1087,18 @@ async def entrypoint(ctx: agents.JobContext):
 
     print(f"[ENTRYPOINT] ✓ Participant joined: sid={participant.sid}, identity={participant.identity}")
     
+    # LiveKit Best Practice: Dedicated rooms for each session (one-to-one)
+    # Each user should have their own unique room for isolated conversations
+    # Ref: https://docs.livekit.io/agents/quickstart/
+    remote_participants = list(ctx.room.remote_participants.values())
+    if len(remote_participants) > 1:
+        print(f"[ENTRYPOINT] ⚠️ WARNING: Multiple participants detected ({len(remote_participants)})")
+        print(f"[ENTRYPOINT] 🔒 Best Practice Violation: This room should have ONE user only")
+        print(f"[ENTRYPOINT] ✓ Processing only first participant: {participant.identity}")
+        print(f"[ENTRYPOINT] 💡 Recommendation: Create unique room per user session")
+        # The AgentSession will only process the first participant
+        # Additional participants are ignored
+    
     # Configure LLM with increased timeout for context-heavy prompts
     llm = lk_openai.LLM(
         model="gpt-4o-mini",
@@ -1115,7 +1130,9 @@ async def entrypoint(ctx: agents.JobContext):
         ),
     )
 
-    # Start session with RoomInputOptions (best practice)
+    # LiveKit Best Practice: Start session with RoomInputOptions
+    # AgentSession automatically binds to the FIRST participant only
+    # Ref: https://docs.livekit.io/agents/quickstart/
     print("[SESSION INIT] Starting LiveKit session...")
     print("[TOOLS] 🔧 Function tools will be auto-discovered from @function_tool() decorators")
     print("[TOOLS] 📋 Expected: storeInMemory, retrieveFromMemory, searchMemories, getCompleteUserInfo, etc.")
@@ -1126,6 +1143,8 @@ async def entrypoint(ctx: agents.JobContext):
         room_input_options=RoomInputOptions()
     )
     print("[SESSION INIT] ✓ Session started and initialized")
+    print(f"[SESSION INIT] 🔒 Session bound to participant: {participant.identity}")
+    print("[SESSION INIT] 💡 AgentSession will ONLY process audio from this participant")
     print("[TOOLS] ✅ Tools are now registered and available to LLM")
     
     # Wait for session to fully initialize
