@@ -831,12 +831,17 @@ For every message you generate:
                         if values:
                             # Limit to 2 memories per category, 100 chars each
                             mem_list = "\n".join([f"    • {(v or '')[:100]}" for v in values[:2]])
-                            mem_sections.append(f"  {category}:\n{mem_list}")
+                            mem_sections.append(f"  {category}:" + "\n" + mem_list)
 
             categorized_mems = "\n".join(mem_sections) if mem_sections else "  (No prior memories)"
 
             # Get last conversation context
             last_conversation_context = self._get_last_conversation_context(conversation_state)
+            
+            # Build context parts separately to avoid f-string issues
+            last_context_part = ""
+            if last_conversation_context:
+                last_context_part = "Last Conversation Context:" + "\n" + last_conversation_context + "\n"
             
             # Compact context block (reduce prompt size to prevent timeouts)
             context_block = f"""
@@ -850,7 +855,7 @@ For every message you generate:
     Recent Memories (sample only):
     {categorized_mems}
 
-    {f"Last Conversation Context:\n{last_conversation_context}" if last_conversation_context else ""}
+    {last_context_part}
 
     Rules:
     ✅ Use their name and reference memories naturally
