@@ -760,6 +760,40 @@ async def entrypoint(ctx: agents.JobContext):
         ),
     )
 
+    # Register participant lifecycle handlers (event-driven)
+    room = ctx.room
+
+    @room.on("participant_connected")
+    def _on_participant_connected(p):
+        try:
+            uid = extract_uuid_from_identity(getattr(p, "identity", None))
+            if uid:
+                set_current_user_id(uid)
+                print("[EVENT] participant_connected -> user set")
+        except Exception as e:
+            print(f"[EVENT] participant_connected error: {e}")
+
+    @room.on("participant_disconnected")
+    async def _on_participant_disconnected(p):
+        try:
+            print("[EVENT] participant_disconnected -> cleaning up")
+            clear_current_user_id()
+            try:
+                await tts.aclose()
+            except Exception as te:
+                print(f"[EVENT] TTS close error: {te}")
+            if not room.remote_participants:
+                ctx.shutdown(reason="All participants left")
+        except Exception as e:
+            print(f"[EVENT] participant_disconnected error: {e}")
+
+    async def _on_shutdown():
+        try:
+            await tts.aclose()
+        except Exception:
+            pass
+    ctx.add_shutdown_callback(_on_shutdown)
+
     print("[SESSION INIT] Starting LiveKit session…")
     await session.start(room=ctx.room, agent=assistant, room_input_options=RoomInputOptions())
     print("[SESSION INIT] ✓ Session started")
@@ -820,42 +854,6 @@ async def entrypoint(ctx: agents.JobContext):
     first_message_hint = f""" {assistant.instructions} """
     
     await session.generate_reply(instructions=first_message_hint)
-
-    async def _monitor_reconnects():
-        """
-        Monitor participant presence and handle disconnect/reconnect cycles.
-        - On disconnect: clear user state and close TTS streams.
-        - On reconnect: re-extract UUID and update current user ID.
-        """
-        last_present = True
-        while True:
-            try:
-                identities = [p.identity for p in ctx.room.remote_participants.values()]
-                is_present = any(identities)
-                if last_present and not is_present:
-                    # Participant left
-                    print("[RECONNECT] Participant disconnected; cleaning up TTS and state")
-                    clear_current_user_id()
-                    try:
-                        await tts.aclose()
-                    except Exception as e:
-                        print(f"[RECONNECT] TTS close error: {e}")
-                elif not last_present and is_present:
-                    # Participant rejoined
-                    part = await wait_for_participant(ctx.room, timeout_s=1)
-                    if part and part.identity:
-                        uid = extract_uuid_from_identity(part.identity)
-                        if uid:
-                            set_current_user_id(uid)
-                            print("[RECONNECT] User re-established; continuing session")
-                last_present = is_present
-                await asyncio.sleep(0.5)
-            except Exception as e:
-                print(f"[RECONNECT] Monitor error: {e}")
-                await asyncio.sleep(1.0)
-
-    # Fire-and-forget reconnect monitor
-    asyncio.create_task(_monitor_reconnects())
 
 if __name__ == "__main__":
     agents.cli.run_app(agents.WorkerOptions(
