@@ -45,7 +45,11 @@ class MemoryService:
             print(f"[MEMORY SERVICE]    Value: {value[:100]}{'...' if len(value) > 100 else ''}")
             print(f"[MEMORY SERVICE]    User: {uid[:8]}...")
             
-            resp = self.supabase.table("memory").upsert(memory_data).execute()
+            # Upsert with conflict resolution on unique constraint (user_id, category, key)
+            resp = self.supabase.table("memory").upsert(
+                memory_data,
+                on_conflict="user_id,category,key"
+            ).execute()
             if getattr(resp, "error", None):
                 print(f"[MEMORY SERVICE] ❌ Save error: {resp.error}")
                 return False
