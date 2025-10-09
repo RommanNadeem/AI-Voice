@@ -67,6 +67,12 @@ def get_current_user_id() -> Optional[str]:
     """Get the current user ID"""
     return current_user_id
 
+def clear_current_user_id():
+    """Clear the current user ID (used on disconnect)."""
+    global current_user_id
+    current_user_id = None
+    print("[SESSION] User ID cleared")
+
 def is_valid_uuid(uuid_string: str) -> bool:
     """Check if string is a valid UUID format"""
     try:
@@ -814,6 +820,42 @@ async def entrypoint(ctx: agents.JobContext):
     first_message_hint = f""" {assistant.instructions} """
     
     await session.generate_reply(instructions=first_message_hint)
+
+    async def _monitor_reconnects():
+        """
+        Monitor participant presence and handle disconnect/reconnect cycles.
+        - On disconnect: clear user state and close TTS streams.
+        - On reconnect: re-extract UUID and update current user ID.
+        """
+        last_present = True
+        while True:
+            try:
+                identities = [p.identity for p in ctx.room.remote_participants.values()]
+                is_present = any(identities)
+                if last_present and not is_present:
+                    # Participant left
+                    print("[RECONNECT] Participant disconnected; cleaning up TTS and state")
+                    clear_current_user_id()
+                    try:
+                        await tts.aclose()
+                    except Exception as e:
+                        print(f"[RECONNECT] TTS close error: {e}")
+                elif not last_present and is_present:
+                    # Participant rejoined
+                    part = await wait_for_participant(ctx.room, timeout_s=1)
+                    if part and part.identity:
+                        uid = extract_uuid_from_identity(part.identity)
+                        if uid:
+                            set_current_user_id(uid)
+                            print("[RECONNECT] User re-established; continuing session")
+                last_present = is_present
+                await asyncio.sleep(0.5)
+            except Exception as e:
+                print(f"[RECONNECT] Monitor error: {e}")
+                await asyncio.sleep(1.0)
+
+    # Fire-and-forget reconnect monitor
+    asyncio.create_task(_monitor_reconnects())
 
 if __name__ == "__main__":
     agents.cli.run_app(agents.WorkerOptions(
