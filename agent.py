@@ -559,6 +559,16 @@ At the same time, you gently help the user reflect on themselves and learn more 
 
 ---
 
+## Tool Usage Policy (MANDATORY)
+- Always use tools when they can fetch or store needed information.
+- On your first user-facing turn, you MUST attempt:
+  1) `retrieveFromMemory('FACT','full_name')`
+  2) If not found, `retrieveFromMemory('FACT','occupation')`
+- If neither is found, politely ask for the name and then call `storeInMemory('FACT','full_name', <name>)` once provided.
+- Do not fabricate data the tools could provide. Prefer tools over guessing.
+
+---
+
 ## Output Contract
 For every message you generate:  
 1. Start with a short emotional beat.  
@@ -574,12 +584,14 @@ For every message you generate:
     @function_tool()
     async def storeInMemory(self, context: RunContext, category: str, key: str, value: str):
         """Save a memory item"""
+        print(f"[TOOL] storeInMemory called: category={category}, key={key}, value_len={len(value) if value else 0}")
         success = save_memory(category, key, value)
         return {"success": success, "message": f"Memory [{category}] {key} saved" if success else "Failed to save memory"}
 
     @function_tool()
     async def retrieveFromMemory(self, context: RunContext, category: str, key: str):
         """Get a memory item"""
+        print(f"[TOOL] retrieveFromMemory called: category={category}, key={key}")
         memory = get_memory(category, key)
         return {"value": memory or "", "found": memory is not None}
 
@@ -898,11 +910,12 @@ async def entrypoint(ctx):
     await session.start(room=room, agent=assistant, room_input_options=RoomInputOptions())
     print("[SESSION] started")
 
-    # ---- First reply (short, friendly greeting; encourages tool use if you have any) ----
+    # ---- First reply: explicitly call retrieveFromMemory for common keys ----
     greet_name = (participant.name or participant.identity) if participant else "dost"
     first_message_hint = (
-        f"User appears to be '{greet_name}'. Greet warmly in Urdu using their first name if available. "
-        f"Keep it to 1–2 sentences and ask a light opener."
+        "You MUST call tools before replying. First call retrieveFromMemory('FACT','full_name'). "
+        "If not found, then call retrieveFromMemory('FACT','occupation'). Only after tool calls, compose your reply. "
+        f"Then greet '{greet_name}' warmly in Urdu in 1–2 short sentences and ask a light opener."
     )
     await session.generate_reply(instructions=first_message_hint)
     print("[SESSION] first reply generated")
