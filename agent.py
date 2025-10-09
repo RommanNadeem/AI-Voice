@@ -1029,10 +1029,10 @@ async def entrypoint(ctx: agents.JobContext):
     except Exception as e:
         print(f"[ENTRYPOINT] Warning: Database batcher initialization failed: {e}")
 
-    # CRITICAL: Connect to the room first
+    # CRITICAL: Connect to the room first with auto-subscribe enabled
     print("[ENTRYPOINT] Connecting to LiveKit room...")
-    await ctx.connect()
-    print("[ENTRYPOINT] ✓ Connected to room")
+    await ctx.connect(auto_subscribe=agents.AutoSubscribe.AUDIO_ONLY)
+    print("[ENTRYPOINT] ✓ Connected to room (auto-subscribe: AUDIO_ONLY)")
 
     # Initialize media + agent with enhanced debugging
     print("[TTS] 🎤 Initializing TTS with voice: v_8eelc901")
