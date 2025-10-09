@@ -318,15 +318,23 @@ For every message you generate:
         self.onboarding_service = OnboardingService(supabase)
         self.rag_service = None  # Set per-user in entrypoint
         
-        # DEBUG: Log registered function tools
+        # DEBUG: Log registered function tools (safely)
         print("[AGENT INIT] Checking registered function tools...")
-        import inspect
         tool_count = 0
-        for name, method in inspect.getmembers(self, predicate=inspect.ismethod):
-            if hasattr(method, '__wrapped__') or 'function_tool' in str(type(method)):
-                print(f"[AGENT INIT]   ✓ Function tool found: {name}")
-                tool_count += 1
-        print(f"[AGENT INIT] ✅ Total function tools registered: {tool_count}")
+        try:
+            # Manually check known function tool methods to avoid property access issues
+            tool_names = [
+                'storeInMemory', 'retrieveFromMemory', 'searchMemories',
+                'getCompleteUserInfo', 'getUserProfile', 'createUserProfile',
+                'detectGenderFromName', 'getUserState', 'updateUserState'
+            ]
+            for name in tool_names:
+                if hasattr(self, name):
+                    print(f"[AGENT INIT]   ✓ Function tool found: {name}")
+                    tool_count += 1
+            print(f"[AGENT INIT] ✅ Total function tools registered: {tool_count}")
+        except Exception as e:
+            print(f"[AGENT INIT] ⚠️ Tool verification skipped: {e}")
     
     def set_room(self, room):
         """Set the room reference for state broadcasting"""
