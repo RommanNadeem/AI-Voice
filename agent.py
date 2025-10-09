@@ -1387,31 +1387,10 @@ async def entrypoint(ctx: agents.JobContext):
         await asyncio.sleep(0.5)
         print("[AUDIO] ✅ WebRTC connection stabilized and ready")
 
-    # ULTRA-FAST INITIAL GREETING (without tools or complex context)
-    # This gets audio to user ASAP, then background tasks continue
-    print("[GREETING] ⚡ Generating ultra-fast minimal greeting...")
-    
-    try:
-        # Minimal greeting that avoids tool calls and complex processing
-        minimal_greeting = """
-You are a warm, empathetic AI companion speaking in Urdu.
-
-Task: Greet the user warmly in 1-2 short sentences in Urdu.
-- Be friendly and welcoming
-- Keep it brief and natural
-- DO NOT call any tools
-- DO NOT ask for information
-- Just say hello warmly
-
-Example: "السلام علیکم! میں آپ کی AI companion ہوں۔ کیسے ہیں آپ؟"
-"""
-        await session.generate_reply(instructions=minimal_greeting)
-        print("[GREETING] ✅ Fast greeting sent!")
-        
-    except Exception as e:
-        print(f"[GREETING] ❌ Fast greeting failed: {e}, trying full context...")
-        # Fallback to full context greeting
-        await assistant.generate_reply_with_context(session, greet=True)
+    # Generate greeting with full context
+    print("[GREETING] Generating greeting with full context...")
+    await assistant.generate_reply_with_context(session, greet=True)
+    print("[GREETING] ✅ Greeting sent!")
     
     # LiveKit Best Practice: Use event-based disconnection detection
     # Set up disconnection event handler
