@@ -242,15 +242,30 @@ class RAGMemorySystem:
         try:
             logging.info(f"[RAG] Loading memories from Supabase for user {self.user_id}...")
             
-            # Fetch recent memories
-            result = supabase_client.table("memory")\
-                .select("category, key, value, created_at")\
-                .eq("user_id", self.user_id)\
-                .order("created_at", desc=True)\
-                .limit(limit)\
-                .execute()
+            # Fetch recent memories; try both raw UUID and legacy "user-<uuid>"
+            user_ids_to_try = [self.user_id]
+            if not self.user_id.startswith("user-"):
+                user_ids_to_try.append(f"user-{self.user_id}")
             
-            memories_data = result.data if result.data else []
+            memories_data = []
+            for uid in user_ids_to_try:
+                result = (
+                    supabase_client.table("memory")
+                    .select("category, key, value, created_at")
+                    .eq("user_id", uid)
+                    .order("created_at", desc=True)
+                    .limit(limit)
+                    .execute()
+                )
+                if getattr(result, "error", None):
+                    logging.warning(f"[RAG] Supabase select error for uid={uid}: {result.error}")
+                    continue
+                data = result.data if result.data else []
+                if data:
+                    memories_data.extend(data)
+                if len(memories_data) >= limit:
+                    break
+            
             logging.info(f"[RAG] Loaded {len(memories_data)} memories from database")
             
             # Create embeddings in parallel (batched for efficiency)

@@ -188,11 +188,20 @@ def ensure_profile_exists(user_id: str) -> bool:
         print(f"[PROFILE ERROR] ensure_profile_exists failed: {e}")
         return False
 
+def _normalize_category_key(category: str, key: str):
+    """Normalize category/key to consistent case to avoid mismatches across callers."""
+    norm_category = (category or "").strip().upper()
+    norm_key = (key or "").strip().lower()
+    return norm_category, norm_key
+
 def save_memory(category: str, key: str, value: str) -> bool:
     """Save memory to Supabase"""
     if not can_write_for_current_user():
         return False
     user_id = get_current_user_id()
+
+    # Normalize for consistency going forward
+    category, key = _normalize_category_key(category, key)
 
     # Ensure profile exists before saving memory (foreign key safety)
     if not ensure_profile_exists(user_id):
@@ -241,22 +250,104 @@ def get_memory(category: str, key: str) -> Optional[str]:
     if not can_write_for_current_user():
         return None
     user_id = get_current_user_id()
+    # Build candidate user_ids to handle legacy rows
+    user_ids_to_try = []
+    if user_id:
+        user_ids_to_try.append(user_id)
+        if not user_id.startswith("user-"):
+            user_ids_to_try.append(f"user-{user_id}")
+        else:
+            stripped = extract_uuid_from_identity(user_id)
+            if stripped:
+                user_ids_to_try.append(stripped)
+
+    # Normalize category/key for the primary attempt
+    norm_category, norm_key = _normalize_category_key(category, key)
+
     try:
-        resp = supabase.table("memory").select("value") \
-                        .eq("user_id", user_id) \
-                        .eq("category", category) \
-                        .eq("key", key) \
-                        .execute()
-        if getattr(resp, "error", None):
-            print(f"[SUPABASE ERROR] memory select: {resp.error}")
-            return None
-        data = getattr(resp, "data", []) or []
-        if data:
-            return data[0].get("value")
+        # 1) Try normalized category/key for each candidate user_id
+        for uid in user_ids_to_try or [user_id]:
+            resp = supabase.table("memory").select("value") \
+                            .eq("user_id", uid) \
+                            .eq("category", norm_category) \
+                            .eq("key", norm_key) \
+                            .limit(1) \
+                            .execute()
+            if getattr(resp, "error", None):
+                print(f"[SUPABASE ERROR] memory select (norm) for uid={uid}: {resp.error}")
+                continue
+            data = getattr(resp, "data", []) or []
+            print(f"[MEMORY LOOKUP] uid={uid} [{norm_category}] {norm_key} -> {len(data)} rows")
+            if data:
+                return data[0].get("value")
+
+        # 2) Fallback: try original (non-normalized) category/key for legacy rows
+        for uid in user_ids_to_try or [user_id]:
+            resp2 = supabase.table("memory").select("value") \
+                             .eq("user_id", uid) \
+                             .eq("category", category) \
+                             .eq("key", key) \
+                             .limit(1) \
+                             .execute()
+            if getattr(resp2, "error", None):
+                print(f"[SUPABASE ERROR] memory select (raw) for uid={uid}: {resp2.error}")
+                continue
+            data2 = getattr(resp2, "data", []) or []
+            print(f"[MEMORY LOOKUP] uid={uid} [raw {category}] {key} -> {len(data2)} rows")
+            if data2:
+                return data2[0].get("value")
+
         return None
     except Exception as e:
         print(f"[MEMORY ERROR] Failed to get memory: {e}")
         return None
+
+def get_memories_by_category(category: str, limit: int = 5) -> list:
+    """Get recent memories for the current user by category."""
+    if not can_write_for_current_user():
+        return []
+    user_id = get_current_user_id()
+    norm_category, _ = _normalize_category_key(category, "")
+    try:
+        # Try both raw and legacy user_id formats
+        user_ids_to_try = [user_id]
+        if not user_id.startswith("user-"):
+            user_ids_to_try.append(f"user-{user_id}")
+        else:
+            stripped = extract_uuid_from_identity(user_id)
+            if stripped:
+                user_ids_to_try.append(stripped)
+
+        results: list = []
+        for uid in user_ids_to_try:
+            resp = (
+                supabase.table("memory")
+                .select("category,key,value,created_at")
+                .eq("user_id", uid)
+                .eq("category", norm_category)
+                .order("created_at", desc=True)
+                .limit(limit)
+                .execute()
+            )
+            if getattr(resp, "error", None):
+                print(f"[SUPABASE ERROR] memory select by category for uid={uid}: {resp.error}")
+                continue
+            data = getattr(resp, "data", []) or []
+            if data:
+                results.extend(data)
+            if len(results) >= limit:
+                break
+        return results[:limit]
+    except Exception as e:
+        print(f"[MEMORY ERROR] Failed to list memories: {e}")
+        return []
+
+def get_memories_by_categories_batch(categories: list[str], limit_per_category: int = 3) -> dict:
+    """Get recent memories for multiple categories in one call (simple per-category loop)."""
+    out: dict = {}
+    for cat in categories or []:
+        out[cat] = get_memories_by_category(cat, limit=limit_per_category)
+    return out
 
 def save_user_profile(profile_text: str) -> bool:
     """Save user profile to Supabase"""
@@ -703,6 +794,51 @@ For every message you generate:
                 "cache_hit_rate": f"{stats['cache_hit_rate']:.1%}",
                 "retrievals_performed": stats["retrievals"],
                 "message": f"System has {stats['total_memories']} memories indexed"
+            }
+        except Exception as e:
+            return {"message": f"Error: {e}"}
+
+    @function_tool()
+    async def getCompleteUserInfo(self, context: RunContext):
+        """Return profile, name, and recent memories by category for the active user."""
+        user_id = get_current_user_id()
+        if not user_id:
+            return {"message": "No active user"}
+
+        try:
+            # Profile
+            profile = get_user_profile() or ""
+
+            # Name from memory (FACT/full_name)
+            name = get_memory("FACT", "full_name") or ""
+
+            # Recent memories by category
+            categories = [
+                "FACT",
+                "INTEREST",
+                "GOAL",
+                "RELATIONSHIP",
+                "PREFERENCE",
+                "EXPERIENCE",
+                "PLAN",
+                "OPINION",
+            ]
+            mems_by_cat = get_memories_by_categories_batch(categories, limit_per_category=5)
+
+            # Simplify to values only per category
+            simple = {}
+            for cat, rows in mems_by_cat.items():
+                if rows:
+                    simple[cat] = [r.get("value", "") for r in rows if r.get("value")]
+
+            total = sum(len(v) for v in simple.values())
+
+            return {
+                "user_name": name,
+                "profile": profile,
+                "memories_by_category": simple,
+                "total_memories": total,
+                "message": "Complete user information retrieved",
             }
         except Exception as e:
             return {"message": f"Error: {e}"}
