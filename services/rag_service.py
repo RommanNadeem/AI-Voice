@@ -35,6 +35,11 @@ class RAGService:
         if rag:
             await rag.add_memory_async(text, category, metadata)
     
+    # Backward-compatible alias used by call sites
+    async def add_memory_async(self, text: str, category: str = "GENERAL", metadata: Dict = None):
+        """Compatibility wrapper for older call sites that expect add_memory_async."""
+        await self.add_memory(text, category, metadata)
+    
     def add_memory_background(self, text: str, category: str = "GENERAL", metadata: Dict = None):
         """
         Add memory in background (fire-and-forget, zero latency).
