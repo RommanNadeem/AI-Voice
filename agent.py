@@ -920,12 +920,10 @@ For every message you generate:
                 except Exception as e:
                     print(f"[BACKGROUND] Conversation context update failed: {e}")
             
-            # For now, we'll update conversation context in a separate background task
-            # that captures the user message and updates last_conversation_at
+            # Update conversation state with last user message
             try:
                 await self.conversation_state_service.update_state(
                     last_user_message=user_text,
-                    last_conversation_at=datetime.utcnow().isoformat(),
                     user_id=user_id
                 )
             except Exception as e:
@@ -1252,12 +1250,16 @@ async def entrypoint(ctx: agents.JobContext):
     def on_track_subscribed(track: rtc.Track, publication: rtc.TrackPublication, participant_obj: rtc.RemoteParticipant):
         """Track when audio/video tracks are subscribed - useful for debugging"""
         if participant_obj.sid == participant.sid:
-            print(f"[TRACK] ✅ Subscribed to {publication.kind.name} track: {publication.sid}")
+            # Fix: Convert TrackKind enum to string
+            kind_str = publication.kind.name if hasattr(publication.kind, 'name') else str(publication.kind)
+            print(f"[TRACK] ✅ Subscribed to {kind_str} track: {publication.sid}")
     
     def on_track_unsubscribed(track: rtc.Track, publication: rtc.TrackPublication, participant_obj: rtc.RemoteParticipant):
         """Track when audio/video tracks are unsubscribed"""
         if participant_obj.sid == participant.sid:
-            print(f"[TRACK] ❌ Unsubscribed from {publication.kind.name} track: {publication.sid}")
+            # Fix: Convert TrackKind enum to string
+            kind_str = publication.kind.name if hasattr(publication.kind, 'name') else str(publication.kind)
+            print(f"[TRACK] ❌ Unsubscribed from {kind_str} track: {publication.sid}")
     
     # Register all event handlers
     ctx.room.on("participant_disconnected", on_participant_disconnected)
