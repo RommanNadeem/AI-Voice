@@ -696,7 +696,12 @@ For every message you generate:
         async def _safe_generic_reply(reason: str):
             logging.info(f"[GREETING] Fallback generic reply: {reason}")
             try:
-                await session.generate_reply(instructions=self._base_instructions)
+                minimal_fallback = (
+                    "You are Humraaz, a warm, friendly Urdu-speaking companion.\n"
+                    "Task: Say a brief, warm Urdu greeting (1 sentence only).\n"
+                    "Language: Respond in Urdu only. No English words.\n"
+                )
+                await session.generate_reply(instructions=minimal_fallback)
             except Exception as inner_e:
                 logging.error(f"[GREETING] Fallback reply failed: {inner_e}")
 
