@@ -158,6 +158,7 @@ class ConversationContextService:
         except asyncio.TimeoutError:
             print(f"[CONTEXT] ⚠️  Database fetch timeout (>2s), returning cached or empty")
             # Try to return stale cache if available
+            cache_key = f"context:{user_id}"
             if cache_key in self._session_cache:
                 print(f"[CONTEXT] Using stale cache due to timeout")
                 return self._session_cache[cache_key]
