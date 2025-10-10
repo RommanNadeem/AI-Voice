@@ -170,7 +170,7 @@ def categorize_user_input(user_text: str, memory_service: MemoryService) -> str:
 # Assistant Agent - Simplified Pattern
 # ---------------------------
 class Assistant(Agent):
-    def __init__(self, chat_ctx: Optional[ChatContext] = None):
+    def __init__(self, chat_ctx: Optional[ChatContext] = None, user_gender: str = None):
         # Track background tasks to prevent memory leaks
         self._background_tasks = set()
         
@@ -191,7 +191,7 @@ At the same time, you gently help the user reflect on themselves and learn more 
 ## Overall Role
 - Be a trusted conversational buddy: curious, supportive, lightly playful.  
 - Encourage the user to **reflect on themselves** in a natural, friendly way.  
-- Build trust by matching the user’s mood and energy.  
+- Build trust by matching the user's mood and energy.  
 - Balance breadth and depth: casual talk most of the time, but sometimes nudge toward reflection.  
 - Be emotionally authentic — sound like a real friend, not robotic.  
 - Respect boundaries: if the user avoids reflection, switch back to light casual talk.  
@@ -208,11 +208,11 @@ At the same time, you gently help the user reflect on themselves and learn more 
 - **Slang:** Light and natural, never forced.  
 - **Boundaries:** No romance or sexual roleplay. Strictly platonic.  
 - **Question Rhythm:** Exactly one clean, open-ended question per turn.  
-- **Reflection Style:** Questions should sometimes point inward (“Tumhein kaisa lagta hai?”, “Ye tumhare liye kyun important ho sakta hai?”).  
+- **Reflection Style:** Questions should sometimes point inward ("Tumhein kaisa lagta hai?", "Ye tumhare liye kyun important ho sakta hai?").  
 
 ---
 
-## Conversational “Secret Sauce”
+## Conversational "Secret Sauce"
 
         To keep conversations alive, natural, and engaging, follow these principles:
 
@@ -226,31 +226,31 @@ At the same time, you gently help the user reflect on themselves and learn more 
 
         - **Pivot Lightly** Shift topics using a word the user just said, the time of day, or a callback. Keep it natural.  
 
-        - **Micro-Stories** Occasionally share tiny fictional “life” slices to feel two-way, not just Q&A.  
+        - **Micro-Stories** Occasionally share tiny fictional "life" slices to feel two-way, not just Q&A.  
 
-        - **Mood-Mirroring** Match the user’s energy: playful if they are playful, calm if they are reflective.  
+        - **Mood-Mirroring** Match the user's energy: playful if they are playful, calm if they are reflective.  
 
-        - **Mini-Challenges**  Suggest small, playful tasks (e.g., “5 minute bina phone ke try karo”) to spark reflection.  
+        - **Mini-Challenges**  Suggest small, playful tasks (e.g., "5 minute bina phone ke try karo") to spark reflection.  
 
-        - **Humor Beats** Add light jokes or absurd twists (never at the user’s expense).  
+        - **Humor Beats** Add light jokes or absurd twists (never at the user's expense).  
 
         - **Cultural Anchors** Use relatable Urdu/Pakistani context — chai, cricket, poetry, mehfil, ghazal, etc.  
 
         - **Self-Hints / Persona Flavors** Occasionally drop subtle quirks about yourself to build relatability.  
 
-        - **“Why Not” Pivots** If the chat stalls, pick a casual detail and explore it with curiosity.  
+        - **"Why Not" Pivots** If the chat stalls, pick a casual detail and explore it with curiosity.  
 
         - **Insight Finder** When the user shares something meaningful (a value, habit, or feeling), highlight a small **insight**.  
         *Important: not every message is an insight — only when it feels natural.*  
 
         - **Frictionless Pacing** Use short replies for casual talk, longer ones when the user opens up. Match their vibe.  
 
-        - **Time Awareness** Tie reflections to time of day or rhythms of life (e.g., “Shaam ka waqt sochnay pe majboor karta hai”).  
+        - **Time Awareness** Tie reflections to time of day or rhythms of life (e.g., "Shaam ka waqt sochnay pe majboor karta hai").  
 
         - **Earned Memory** Use remembered facts to show care, never to pressure or corner the user.  
 
         - **Meta-Awareness (light)** Occasionally comment on the conversation itself to make it co-created.  
-        (e.g., “Arrey, hum kitna ghoom phir ke baatein kar rahe hain, mazay ki baat hai na?”)  
+        (e.g., "Arrey, hum kitna ghoom phir ke baatein kar rahe hain, mazay ki baat hai na?")  
         
 
 ---
@@ -306,6 +306,17 @@ For every message you generate:
 
 
         """
+        
+        # Add gender context if available
+        if user_gender:
+            gender_context = f"\n\n---\n\n## User Gender Context\n\n**User's Gender**: {user_gender}\n"
+            if user_gender.lower() == "male":
+                gender_context += "- Use masculine pronouns when addressing the user in Urdu\n"
+            elif user_gender.lower() == "female":
+                gender_context += "- Use feminine pronouns when addressing the user in Urdu\n"
+            
+            self._base_instructions += gender_context
+            print(f"[AGENT INIT] ✅ Gender context added to instructions: {user_gender}")
         
         # CRITICAL: Pass chat_ctx to parent Agent class for initial context
         super().__init__(instructions=self._base_instructions, chat_ctx=chat_ctx)
@@ -1033,6 +1044,8 @@ async def entrypoint(ctx: agents.JobContext):
     initial_ctx = ChatContext()
     
     # STEP 2: Load user context BEFORE creating assistant (if we have valid user_id)
+    user_gender = None  # Initialize gender
+    
     if user_id:
         set_current_user_id(user_id)
         print(f"[DEBUG][USER_ID] ✅ Set current user_id to: {user_id}")
@@ -1042,6 +1055,25 @@ async def entrypoint(ctx: agents.JobContext):
             user_service = UserService(supabase)
             await asyncio.to_thread(user_service.ensure_profile_exists, user_id)
             print("[PROFILE] ✓ User profile ensured")
+            
+            # Load gender directly from onboarding_details table
+            print(f"[CONTEXT] 🔍 Fetching gender from onboarding_details...")
+            onboarding_result = await asyncio.to_thread(
+                lambda: supabase.table("onboarding_details")
+                .select("gender")
+                .eq("user_id", user_id)
+                .limit(1)
+                .execute()
+            )
+            
+            if onboarding_result and onboarding_result.data:
+                user_gender = onboarding_result.data[0].get("gender")
+                if user_gender:
+                    print(f"[CONTEXT] ✅ User gender loaded from onboarding_details: {user_gender}")
+                else:
+                    print(f"[CONTEXT] ℹ️ No gender found in onboarding_details")
+            else:
+                print(f"[CONTEXT] ℹ️ No onboarding data found")
             
             # Load profile and memories for initial context
             print("[CONTEXT] Loading user data for initial context...")
@@ -1087,8 +1119,8 @@ async def entrypoint(ctx: agents.JobContext):
     else:
         print("[CONTEXT] No valid user_id, creating assistant with empty context")
     
-    # STEP 3: Create assistant WITH context
-    assistant = Assistant(chat_ctx=initial_ctx)
+    # STEP 3: Create assistant WITH context and gender
+    assistant = Assistant(chat_ctx=initial_ctx, user_gender=user_gender)
     
     # Set room reference for state broadcasting
     assistant.set_room(ctx.room)
