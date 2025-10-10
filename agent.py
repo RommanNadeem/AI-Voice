@@ -687,15 +687,14 @@ For every message you generate:
 
     async def generate_greeting(self, session):
         """
-        Generate initial greeting - OPTIMIZED for speed.
+        Generate initial greeting - SIMPLIFIED for speed.
         
-        Optimizations:
-        - Uses full name from onboarding_details (no fallback cascade)
-        - No last conversation context (not needed for first greeting)
-        - Minimal memory fetch (top 2 categories only)
-        - Reduced context size for faster LLM response
+        Features:
+        - Only fetches user's full name from onboarding_details
+        - Simple warm hello in Urdu
+        - No profile, no memories, no context
         
-        Expected latency: ~800ms (vs ~1850ms for full context)
+        Expected latency: ~200ms (minimal context)
         """
         await self.broadcast_state("thinking")
         
@@ -718,78 +717,34 @@ For every message you generate:
             return
         
         try:
-            # Parallel fetch: profile + context (onboarding_details has full name)
-            profile_task = self.profile_service.get_profile_async(user_id)
-            context_task = self.conversation_context_service.get_context(user_id)
+            # Only fetch user's name from onboarding_details
+            context_data = await self.conversation_context_service.get_context(user_id)
             
-            profile, context_data = await asyncio.gather(
-                profile_task, context_task, return_exceptions=True
-            )
-            
-            # Get full name from onboarding_details (single source, no fallback)
+            # Get full name from onboarding_details
             user_name = None
             if context_data and not isinstance(context_data, Exception):
                 user_name = context_data.get("user_name")
             
-            # Fetch only FACT and INTEREST categories (most important for greeting)
-            memories_by_category = {}
-            try:
-                categories = ['FACT', 'INTEREST']  # Reduced from 8 to 2
-                memories_by_category_raw = self.memory_service.get_memories_by_categories_batch(
-                    categories=categories,
-                    limit_per_category=2,  # Reduced from 3 to 2
-                    user_id=user_id
-                )
-                memories_by_category = {
-                    cat: [m['value'] for m in mems]
-                    for cat, mems in memories_by_category_raw.items()
-                    if mems
-                }
-            except Exception as e:
-                print(f"[GREETING] Memory fetch failed (non-critical): {e}")
-            
-            # Build minimal context for greeting
-            mem_sections = []
-            for category in ['FACT', 'INTEREST']:
-                if category in memories_by_category:
-                    values = memories_by_category[category]
-                    if values:
-                        mem_list = "\n".join([f"    • {(v or '')[:80]}" for v in values[:2]])
-                        mem_sections.append(f"  {category}:\n{mem_list}")
-            
-            categorized_mems = "\n".join(mem_sections) if mem_sections else "  (Building your profile)"
-            
-            # Minimal profile (first 200 chars only for greeting)
-            profile_text = "(New user - building profile)"
-            if profile and not isinstance(profile, Exception):
-                profile_text = profile[:200] if len(profile) > 200 else profile
-            
+            # Simple greeting instruction
             name_text = user_name or "دوست"  # Use "friend" in Urdu if no name
             
-            # Compact greeting context (50% smaller than full context)
-            context_block = f"""
-    🎯 GREETING CONTEXT (First Interaction):
-    
-    Name: {name_text}
-    Profile: {profile_text}
-    
-    Quick Facts:
-    {categorized_mems}
-    
-    Task: Warm, personal Urdu greeting (2 sentences).
-    {'Use their name: ' + name_text if user_name else 'Greet warmly'}
-    """
+            greeting_instruction = f"""
+{self._base_instructions}
+
+🎯 FIRST GREETING:
+
+User's name: {name_text}
+
+Task: Give a simple, warm Urdu greeting (1-2 sentences only).
+{'Use their name: ' + name_text if user_name else 'Greet warmly without using a name'}
+
+Keep it brief and friendly.
+"""
             
-            full_instructions = f"""{self._base_instructions}
+            print(f"[GREETING] Simple greeting for: '{user_name or 'unknown user'}'")
             
-    {context_block}
-    """
-            
-            print(f"[GREETING] Prompt: {len(full_instructions)} chars (optimized)")
-            print(f"[GREETING] Name: '{user_name}', Profile: {bool(profile)}, Memories: {len(memories_by_category)}")
-            
-            await session.generate_reply(instructions=full_instructions)
-            logging.info(f"[GREETING] Generated with {len(context_block)} chars context")
+            await session.generate_reply(instructions=greeting_instruction)
+            logging.info(f"[GREETING] Generated simple greeting with name only")
             
         except Exception as e:
             logging.error(f"[GREETING] Error: {e}")
