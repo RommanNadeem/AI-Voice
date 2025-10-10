@@ -47,6 +47,10 @@ for noisy in ("httpx", "httpcore", "hpack", "urllib3"):
 # Setup
 # ---------------------------
 load_dotenv()
+# Reuse a module-level OpenAI client for faster requests
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+openai_client = openai.OpenAI(api_key=OPENAI_API_KEY)
+
 
 # Supabase Configuration
 SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -521,7 +525,7 @@ def generate_user_profile(user_input: str, existing_profile: str = "") -> str:
         return ""
     
     try:
-        client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        client = openai_client
         
         prompt = f"""
         {"Update and enhance" if existing_profile else "Create"} a comprehensive 4-5 line user profile that captures their persona. Focus on:
@@ -577,7 +581,7 @@ def categorize_user_input(user_text: str) -> str:
     
     try:
         # Initialize OpenAI client
-        client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        client = openai_client
         
         # Create a prompt for categorization
         prompt = f"""
@@ -1031,20 +1035,21 @@ async def entrypoint(ctx):
 
     # ---- Background personalization (after identity) ----
     if user_id:
-        # RAG / memories: hydrate in background
-        try:
-            rag = get_or_create_rag(user_id, os.getenv("OPENAI_API_KEY"))
-            asyncio.create_task(rag.load_from_supabase(supabase, limit=500))
-            print("[RAG] background load started")
-        except Exception as e:
-            print(f"[RAG] init error: {e}")
-    
-        # Onboarding/profile bootstrap
-        try:
-            asyncio.create_task(initialize_user_from_onboarding(user_id))
-            print("[ONBOARDING] background init started")
-        except Exception as e:
-            print(f"[ONBOARDING] init error: {e}")
+        # Stagger heavy background work to after first reply
+        async def _delayed_bg():
+            await asyncio.sleep(1.5)
+            try:
+                rag = get_or_create_rag(user_id, os.getenv("OPENAI_API_KEY"))
+                await rag.load_from_supabase(supabase, limit=500)
+                print("[RAG] background load completed")
+            except Exception as e:
+                print(f"[RAG] init error: {e}")
+            try:
+                await initialize_user_from_onboarding(user_id)
+                print("[ONBOARDING] background init completed")
+            except Exception as e:
+                print(f"[ONBOARDING] init error: {e}")
+        asyncio.create_task(_delayed_bg())
 
     # ---- Build and start AgentSession (uses prewarmed assets) ----
     try:
@@ -1059,9 +1064,13 @@ async def entrypoint(ctx):
     assistant = Assistant()
     session = AgentSession(
         stt=lk_openai.STT(model="gpt-4o-transcribe", language="ur"),
-        llm=lk_openai.LLM(model="gpt-4o-mini"),
+        llm=lk_openai.LLM(model="gpt-4o-mini", temperature=0.6),
         tts=tts,
-        vad=vad,
+        vad=silero.VAD.load(
+            min_silence_duration=0.4,   # faster end of speech
+            activation_threshold=0.55,   # slightly more sensitive
+            min_speech_duration=0.1,
+        ),
     )
 
     # Optional: on job shutdown (per-job). Do NOT close process-level TTS here.
@@ -1080,12 +1089,12 @@ async def entrypoint(ctx):
 
     # ---- First reply: explicitly call retrieveFromMemory for common keys ----
     greet_name = (participant.name or participant.identity) if participant else "dost"
+    # Compact first turn: use consolidated info if available, with a small token budget
     first_message_hint = (
-        "You MUST call tools before replying. First call retrieveFromMemory('FACT','full_name'). "
-        "If not found, then call retrieveFromMemory('FACT','occupation'). Only after tool calls, compose your reply. "
-        f"Then greet '{greet_name}' warmly in Urdu in 1–2 short sentences and ask a light opener."
+        "Call getCompleteUserInfo if available; otherwise keep it light."
+        f" Greet '{greet_name}' warmly in Urdu in 1–2 short sentences and ask one light question."
     )
-    await session.generate_reply(instructions=first_message_hint)
+    await session.generate_reply(instructions=first_message_hint, max_tokens=120)
     print("[SESSION] first reply generated")
 
 
