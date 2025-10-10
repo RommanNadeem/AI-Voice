@@ -11,6 +11,7 @@ from core.validators import can_write_for_current_user, get_current_user_id
 from core.config import Config
 from infrastructure.connection_pool import get_connection_pool_sync, get_connection_pool
 from infrastructure.redis_cache import get_redis_cache
+from services.user_service import UserService
 
 
 class ProfileService:
@@ -123,6 +124,11 @@ class ProfileService:
         try:
             print(f"[PROFILE SERVICE] 💾 Saving profile for user {uid[:8]}...")
             print(f"[PROFILE SERVICE]    {profile_text[:150]}{'...' if len(profile_text) > 150 else ''}")
+            # Ensure FK parent exists in profiles table
+            user_service = UserService(self.supabase)
+            if not user_service.ensure_profile_exists(uid):
+                print(f"[PROFILE SERVICE] ❌ Cannot save profile - missing parent row in profiles for {uid[:8]}")
+                return False
             
             resp = self.supabase.table("user_profiles").upsert({
                 "user_id": uid,
@@ -168,6 +174,12 @@ class ProfileService:
                 print(f"[PROFILE SERVICE]    Similarity: 95%+, avoiding unnecessary DB write")
                 return True
             
+            # Ensure FK parent exists in profiles table before saving to user_profiles
+            user_service = UserService(self.supabase)
+            if not user_service.ensure_profile_exists(uid):
+                print(f"[PROFILE SERVICE] ❌ Cannot save profile - missing parent row in profiles for {uid[:8]}")
+                return False
+
             # Profile changed significantly - save to DB
             resp = await asyncio.to_thread(
                 lambda: self.supabase.table("user_profiles").upsert({
