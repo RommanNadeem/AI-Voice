@@ -219,7 +219,10 @@ def save_memory(category: str, key: str, value: str) -> bool:
             "key": key,
             "value": value,
         }
-        resp = supabase.table("memory").upsert(memory_data).execute()
+        resp = supabase.table("memory").upsert(
+            memory_data,
+            on_conflict="user_id,category,key",
+        ).execute()
         if getattr(resp, "error", None):
             print(f"[SUPABASE ERROR] memory upsert: {resp.error}")
             return False
@@ -232,12 +235,15 @@ def save_memory(category: str, key: str, value: str) -> bool:
             print("[MEMORY WARN] FK missing, ensuring profile then retrying once...")
             if ensure_profile_exists(user_id):
                 try:
-                    resp2 = supabase.table("memory").upsert({
-                        "user_id": user_id,
-                        "category": category,
-                        "key": key,
-                        "value": value,
-                    }).execute()
+                    resp2 = supabase.table("memory").upsert(
+                        {
+                            "user_id": user_id,
+                            "category": category,
+                            "key": key,
+                            "value": value,
+                        },
+                        on_conflict="user_id,category,key",
+                    ).execute()
                     if getattr(resp2, "error", None):
                         print(f"[SUPABASE ERROR] memory upsert (retry): {resp2.error}")
                         return False
@@ -347,11 +353,44 @@ def get_memories_by_category(category: str, limit: int = 5) -> list:
         return []
 
 def get_memories_by_categories_batch(categories: list[str], limit_per_category: int = 3) -> dict:
-    """Get recent memories for multiple categories in one call (simple per-category loop)."""
-    out: dict = {}
-    for cat in categories or []:
-        out[cat] = get_memories_by_category(cat, limit=limit_per_category)
-    return out
+    """Optimized: fetch multiple categories in a single query and group in memory."""
+    if not can_write_for_current_user():
+        return {cat: [] for cat in categories or []}
+    user_id = get_current_user_id()
+    try:
+        # Try both raw and legacy IDs
+        user_ids_to_try = [user_id]
+        if not user_id.startswith("user-"):
+            user_ids_to_try.append(f"user-{user_id}")
+
+        grouped = {cat: [] for cat in categories or []}
+
+        for uid in user_ids_to_try:
+            resp = (
+                supabase.table("memory")
+                .select("category,key,value,created_at")
+                .eq("user_id", uid)
+                .in_("category", [c.upper() for c in (categories or [])])
+                .order("created_at", desc=True)
+                .limit(limit_per_category * max(1, len(categories or [])))
+                .execute()
+            )
+            if getattr(resp, "error", None):
+                print(f"[SUPABASE ERROR] memory batch select for uid={uid}: {resp.error}")
+                continue
+            data = getattr(resp, "data", []) or []
+            for row in data:
+                cat = (row.get("category") or "").upper()
+                if cat in grouped and len(grouped[cat]) < limit_per_category:
+                    grouped[cat].append(row)
+            # If we filled all categories to desired limit, we can stop
+            if all(len(v) >= limit_per_category or len(v) > 0 for v in grouped.values()):
+                break
+
+        return grouped
+    except Exception as e:
+        print(f"[MEMORY ERROR] Batch fetch failed: {e}")
+        return {cat: [] for cat in categories or []}
 
 def save_user_profile(profile_text: str) -> bool:
     """Save user profile to Supabase"""
