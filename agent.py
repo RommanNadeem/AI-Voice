@@ -952,47 +952,21 @@ For every message you generate:
         """
             base = self._base_instructions
             
-            # Precompute callout_2 to avoid multiline expression in f-string
-            callout_2 = (
-                "Reference something specific from their profile or memories above"
-                if (profile or memories_by_category) else
-                "Start building rapport - ask about them naturally"
-            )
+            # Compact response prompt (reduce size for faster response)
+            full_instructions = f"""{base}
 
-            if greet:
-                # Compact greeting prompt (reduce size for faster response)
-                full_instructions = f"""{base}
+            {context_block}
 
-                {context_block}
+            User said: "{user_text}"
 
-                Task: First greeting in Urdu (2 short sentences)
-                {'Use name: ' + user_name if user_name else 'Greet warmly'}
-                {callout_2}
-                """
-                print(f"[DEBUG][PROMPT] Greeting prompt length: {len(full_instructions)} chars")
-                print(f"[DEBUG][PROMPT] Context block length: {len(context_block)} chars")
-                print(f"[DEBUG][PROMPT] User name: '{user_name}'")
-                print(f"[DEBUG][PROMPT] Has profile: {profile is not None}")
-                print(f"[DEBUG][PROMPT] Memory categories: {list(memories_by_category.keys())}")
+            Task: Respond in Urdu (2-3 sentences)
+            {'Use name: ' + user_name if user_name else 'Be warm'}
+            Reference context naturally.
+            """
+            print(f"[DEBUG][PROMPT] Response prompt length: {len(full_instructions)} chars")
+            print(f"[DEBUG][PROMPT] User text: '{user_text[:100]}'")
 
-                await session.generate_reply(instructions=full_instructions)
-
-            else:
-                # Compact response prompt (reduce size for faster response)
-                full_instructions = f"""{base}
-
-                {context_block}
-
-                User said: "{user_text}"
-
-                Task: Respond in Urdu (2-3 sentences)
-                {'Use name: ' + user_name if user_name else 'Be warm'}
-                Reference context naturally.
-                """
-                print(f"[DEBUG][PROMPT] Response prompt length: {len(full_instructions)} chars")
-                print(f"[DEBUG][PROMPT] User text: '{user_text[:100]}'")
-
-                await session.generate_reply(instructions=full_instructions)
+            await session.generate_reply(instructions=full_instructions)
 
             logging.info(f"[CONTEXT] Generated reply with {len(context_block)} chars of context")
             
