@@ -6,6 +6,7 @@ import time
 from typing import Optional, List, Dict
 from supabase import Client
 from core.validators import can_write_for_current_user, get_current_user_id
+from services.user_service import UserService
 
 
 class MemoryService:
@@ -57,6 +58,26 @@ class MemoryService:
                 on_conflict="user_id,category,key"
             ).execute()
             if getattr(resp, "error", None):
+                # Handle possible FK error to profiles by ensuring parent exists, then retry once
+                err = resp.error
+                err_str = str(err)
+                if isinstance(err, dict):
+                    err_code = err.get("code")
+                else:
+                    err_code = None
+                if err_code == "23503" or ("violates foreign key constraint" in err_str and "profiles" in err_str.lower()):
+                    print(f"[MEMORY SERVICE] ⚠️  FK error, ensuring profiles row exists then retrying once...")
+                    user_service = UserService(self.supabase)
+                    if user_service.ensure_profile_exists(uid):
+                        retry = self.supabase.table("memory").upsert(
+                            memory_data,
+                            on_conflict="user_id,category,key"
+                        ).execute()
+                        if not getattr(retry, "error", None):
+                            print(f"[MEMORY SERVICE] ✅ Saved successfully after ensuring profiles parent")
+                            return True
+                    print(f"[MEMORY SERVICE] ❌ Save error persists after retry: {resp.error}")
+                    return False
                 print(f"[MEMORY SERVICE] ❌ Save error: {resp.error}")
                 return False
             print(f"[MEMORY SERVICE] ✅ Saved successfully: [{category}] {key}")
@@ -272,6 +293,22 @@ class MemoryService:
             )
             
             if getattr(resp, "error", None):
+                # Handle possible FK error to profiles by ensuring parent exists, then retry once
+                err = resp.error
+                err_str = str(err)
+                err_code = err.get("code") if isinstance(err, dict) else None
+                if err_code == "23503" or ("violates foreign key constraint" in err_str and "profiles" in err_str.lower()):
+                    print(f"[MEMORY SERVICE] ⚠️  FK error, ensuring profiles row exists then retrying once (async)...")
+                    user_service = UserService(self.supabase)
+                    if user_service.ensure_profile_exists(user_id):
+                        retry = await asyncio.to_thread(
+                            lambda: self.supabase.table("memory").upsert(memory_data).execute()
+                        )
+                        if not getattr(retry, "error", None):
+                            print(f"[MEMORY SERVICE] ✅ Saved successfully after ensuring profiles parent (async)")
+                            return True
+                    print(f"[MEMORY SERVICE] ❌ Save error persists after retry: {resp.error}")
+                    return False
                 print(f"[MEMORY SERVICE] ❌ Save error: {resp.error}")
                 return False
             
