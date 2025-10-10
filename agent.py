@@ -170,7 +170,7 @@ def categorize_user_input(user_text: str, memory_service: MemoryService) -> str:
 # Assistant Agent - Simplified Pattern
 # ---------------------------
 class Assistant(Agent):
-    def __init__(self, chat_ctx: Optional[ChatContext] = None, user_gender: str = None):
+    def __init__(self, chat_ctx: Optional[ChatContext] = None, user_gender: str = None, user_time: str = None):
         # Track background tasks to prevent memory leaks
         self._background_tasks = set()
         
@@ -317,6 +317,12 @@ For every message you generate:
             
             self._base_instructions += gender_context
             print(f"[AGENT INIT] ✅ Gender context added to instructions: {user_gender}")
+        
+        # Add time context if available
+        if user_time:
+            time_context = f"\n\n---\n\n## Current Time\n\n{user_time}\n"
+            self._base_instructions += time_context
+            print(f"[AGENT INIT] ✅ Time context added: {user_time}")
         
         # CRITICAL: Pass chat_ctx to parent Agent class for initial context
         super().__init__(instructions=self._base_instructions, chat_ctx=chat_ctx)
@@ -1043,6 +1049,7 @@ async def entrypoint(ctx: agents.JobContext):
     
     # STEP 2: Load user context BEFORE creating assistant (if we have valid user_id)
     user_gender = None  # Initialize gender
+    user_time_context = None  # Initialize time context
     
     if user_id:
         set_current_user_id(user_id)
@@ -1072,6 +1079,36 @@ async def entrypoint(ctx: agents.JobContext):
                     print(f"[CONTEXT] ℹ️ No gender found in onboarding_details")
             else:
                 print(f"[CONTEXT] ℹ️ No onboarding data found")
+            
+            # Calculate user time using default timezone
+            user_time_context = None
+            try:
+                import pytz
+                from datetime import datetime
+                
+                # Default timezone (adjust based on your primary user region)
+                user_timezone = pytz.timezone('Asia/Karachi')
+                user_local_time = datetime.now(user_timezone)
+                current_hour = user_local_time.hour
+                
+                # Determine time of day
+                if 5 <= current_hour < 12:
+                    time_of_day = "morning"
+                elif 12 <= current_hour < 17:
+                    time_of_day = "afternoon"
+                elif 17 <= current_hour < 21:
+                    time_of_day = "evening"
+                else:
+                    time_of_day = "night"
+                
+                # Combine into single string
+                user_time_context = f"{time_of_day}, {current_hour}:00"
+                
+                print(f"[CONTEXT] ⏰ Time: {user_time_context} PKT")
+                
+            except Exception as e:
+                print(f"[CONTEXT] ⚠️ Failed to calculate time: {e}")
+                user_time_context = None
             
             # Load profile and memories for initial context
             print("[CONTEXT] Loading user data for initial context...")
@@ -1117,8 +1154,8 @@ async def entrypoint(ctx: agents.JobContext):
     else:
         print("[CONTEXT] No valid user_id, creating assistant with empty context")
     
-    # STEP 3: Create assistant WITH context and gender
-    assistant = Assistant(chat_ctx=initial_ctx, user_gender=user_gender)
+    # STEP 3: Create assistant WITH context, gender, and time
+    assistant = Assistant(chat_ctx=initial_ctx, user_gender=user_gender, user_time=user_time_context)
     
     # Set room reference for state broadcasting
     assistant.set_room(ctx.room)

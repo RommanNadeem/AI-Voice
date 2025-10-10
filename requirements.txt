@@ -12,6 +12,7 @@ hiredis>=2.2.0
 
 # Environment and configuration
 python-dotenv>=1.0.0
+pytz>=2024.1
 
 # LiveKit voice agent framework (using latest stable version)
 livekit-agents>=1.2.14
