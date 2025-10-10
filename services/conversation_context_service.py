@@ -130,6 +130,7 @@ class ConversationContextService:
                 self._fetch_onboarding_data(user_id),
                 self._fetch_last_conversation(user_id),
                 self._fetch_user_name(user_id),  # Fetch name specifically
+                self._fetch_user_gender(user_id),  # Fetch gender from memory
             ]
             
             # Add timeout to prevent slow queries from blocking
@@ -145,6 +146,7 @@ class ConversationContextService:
             onboarding = results[3] if not isinstance(results[3], Exception) else {}
             last_conv = results[4] if not isinstance(results[4], Exception) else {}
             user_name = results[5] if not isinstance(results[5], Exception) else None
+            user_gender = results[6] if not isinstance(results[6], Exception) else None
             
             return {
                 "user_profile": profile,
@@ -153,6 +155,7 @@ class ConversationContextService:
                 "onboarding_data": onboarding,
                 "last_conversation": last_conv,
                 "user_name": user_name,  # Add name separately
+                "user_gender": user_gender,  # Add gender separately
                 "fetched_at": datetime.utcnow().isoformat(),
             }
         except asyncio.TimeoutError:
@@ -193,6 +196,35 @@ class ConversationContextService:
             return None
         except Exception as e:
             print(f"[CONTEXT SERVICE] ❌ Name fetch error: {e}")
+            return None
+    
+    async def _fetch_user_gender(self, user_id: str) -> Optional[str]:
+        """
+        Fetch user's gender from memory table.
+        """
+        try:
+            print(f"[CONTEXT SERVICE] 🔍 Fetching user's gender from memory for {user_id[:8]}...")
+            
+            # Fetch gender from memory table
+            gender_result = await asyncio.to_thread(
+                lambda: self.supabase.table("memory")
+                .select("value")
+                .eq("user_id", user_id)
+                .eq("category", "FACT")
+                .eq("key", "gender")
+                .limit(1)
+                .execute()
+            )
+            if gender_result.data:
+                gender = gender_result.data[0].get("value", None)
+                if gender:
+                    print(f"[CONTEXT SERVICE] ✅ User's gender found in memory: '{gender}'")
+                    return gender
+            
+            print(f"[CONTEXT SERVICE] ℹ️  User's gender not found in memory")
+            return None
+        except Exception as e:
+            print(f"[CONTEXT SERVICE] ❌ Gender fetch error: {e}")
             return None
     
     async def _fetch_user_profile(self, user_id: str) -> str:

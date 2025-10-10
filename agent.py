@@ -204,7 +204,7 @@ At the same time, you gently help the user reflect on themselves and learn more 
 - **Sentence Shape:** Short, natural sentences.  
 - **Tone:** Warm, caring, playful, sarcastic
 - **Length:** 1–2 short sentences for casual turns, longer when the user is thoughtful.  
-- **Pronouns:** Use correct pronouns based on user's gender.  
+- **Pronouns:** Use correct pronouns based on user's gender (male/female).  
 - **Slang:** Light and natural, never forced.  
 - **Boundaries:** No romance or sexual roleplay. Strictly platonic.  
 - **Question Rhythm:** Exactly one clean, open-ended question per turn.  
@@ -265,7 +265,8 @@ At the same time, you gently help the user reflect on themselves and learn more 
 - `createUserProfile(profile_input)` → Build or update the user profile.  
 - `getUserProfile()` → View stored user profile info.  
 - **`getCompleteUserInfo()`** → **[USE THIS]** When user asks "what do you know about me?" or "what have you learned?" - retrieves EVERYTHING (profile + all memories + state).
-- `getUserState()` / `updateUserState(stage, trust_score)` → Track or update conversation stage & trust.  
+- `getUserState()` / `updateUserState(stage, trust_score)` → Track or update conversation stage & trust.
+- `getUserGender()` → Get user's gender and pronouns for appropriate addressing.  
 
 ### Memory Key Standards:
 - **ENGLISH KEYS ONLY**: All keys must be in English (e.g., `favorite_food`, `sister_name`, `hobby`). Never use Urdu or other languages for keys.
@@ -282,7 +283,9 @@ At the same time, you gently help the user reflect on themselves and learn more 
 - `storeInMemory("PREFERENCE", "favorite_sport", "فتبال")` ✅ English key, Urdu value
 - `storeInMemory("FACT", "sister_info", "بڑی بہن ہے")` ✅ English key, Urdu value
 
-**IMPORTANT**: When user asks about themselves or what you know about them, ALWAYS call `getCompleteUserInfo()` first to get accurate, complete data before responding.  
+**IMPORTANT**: When user asks about themselves or what you know about them, ALWAYS call `getCompleteUserInfo()` first to get accurate, complete data before responding.
+
+**GENDER CONTEXT**: Use `getUserGender()` to get the user's gender and appropriate pronouns. This helps you address them correctly throughout the conversation.  
 
 ---
 
@@ -325,7 +328,7 @@ For every message you generate:
             tool_names = [
                 'storeInMemory', 'retrieveFromMemory', 'searchMemories',
                 'getCompleteUserInfo', 'getUserProfile', 'createUserProfile',
-                'getUserState', 'updateUserState'
+                'getUserState', 'updateUserState', 'getUserGender'
             ]
             for name in tool_names:
                 if hasattr(self, name):
@@ -482,6 +485,44 @@ For every message you generate:
             return {"profile": None, "message": f"Error: {e}"}
     
     @function_tool()
+    async def getUserGender(self, context: RunContext):
+        """
+        Get user's gender from memory for pronoun usage.
+        
+        Returns:
+            User's gender and appropriate pronouns
+        """
+        print(f"[TOOL] 👤 getUserGender called")
+        user_id = get_current_user_id()
+        
+        if not user_id:
+            print(f"[TOOL] ⚠️  No active user")
+            return {"message": "No active user"}
+        
+        try:
+            # Get gender from memory
+            gender = self.memory_service.get_memory("FACT", "gender", user_id)
+            pronouns = self.memory_service.get_memory("PREFERENCE", "pronouns", user_id)
+            
+            if gender:
+                print(f"[TOOL] ✅ Gender retrieved: {gender}")
+                return {
+                    "gender": gender,
+                    "pronouns": pronouns or "آپ/تم",
+                    "message": f"User's gender: {gender}"
+                }
+            else:
+                print(f"[TOOL] ℹ️  No gender found in memory")
+                return {
+                    "gender": None,
+                    "pronouns": "آپ/تم",
+                    "message": "No gender information available"
+                }
+        except Exception as e:
+            print(f"[TOOL] ❌ Error: {e}")
+            return {"message": f"Error: {e}"}
+
+    @function_tool()
     async def getCompleteUserInfo(self, context: RunContext):
         """
         Retrieve ALL available information about the user in one call.
@@ -552,7 +593,7 @@ For every message you generate:
         except Exception as e:
             print(f"[TOOL] ❌ Error: {e}")
             return {"message": f"Error: {e}"}
-    
+
 
     @function_tool()
     async def searchMemories(self, context: RunContext, query: str, limit: int = 5):
@@ -723,21 +764,34 @@ For every message you generate:
             if not user_id:
                 return await _safe_generic_reply("no user_id")
 
-            # 3) Fetch only the user's name from onboarding_details
+            # 3) Fetch user's name and gender from context
             user_name = None
+            user_gender = None
             try:
                 ctx = await self.conversation_context_service.get_context(user_id)
                 if ctx and not isinstance(ctx, Exception):
                     user_name = ctx.get("user_name")
+                    user_gender = ctx.get("user_gender")
             except Exception as lookup_e:
-                logging.warning(f"[GREETING] Name lookup failed: {lookup_e}")
+                logging.warning(f"[GREETING] Context lookup failed: {lookup_e}")
 
             # 4) Minimal greeting instruction - no base instructions for speed
             name_text = user_name or "دوست"  # Urdu fallback display only
+            
+            # Gender-specific pronoun instructions
+            gender_instruction = ""
+            if user_gender:
+                if user_gender.lower() == "male":
+                    gender_instruction = "Use masculine pronouns (آپ/تم) when addressing the user.\n"
+                elif user_gender.lower() == "female":
+                    gender_instruction = "Use feminine pronouns (آپ/تم) when addressing the user.\n"
+            
             greeting_instruction = (
                 "You are Humraaz, a warm, friendly Urdu-speaking companion.\n"
                 f"User's name: {name_text}\n"
-                "Task: Say a brief, warm Urdu greeting (1 sentence only).\n"
+                + (f"User's gender: {user_gender}\n" if user_gender else "")
+                + gender_instruction
+                + "Task: Say a brief, warm Urdu greeting (1 sentence only).\n"
                 + (f"Rule: Use the name '{name_text}' naturally in your greeting.\n" if user_name else "Rule: Greet warmly without using any name.\n")
                 + "Language: Respond in Urdu only. No English words.\n"
                 "Keep it simple and friendly.\n"
