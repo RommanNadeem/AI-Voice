@@ -20,7 +20,7 @@ class MemoryService:
         
         Args:
             category: Memory category (FACT, GOAL, INTEREST, etc.)
-            key: Memory key
+            key: Memory key (must be English, snake_case, no timestamp format)
             value: Memory value
             user_id: Optional user ID (uses current user if not provided)
             
@@ -32,6 +32,12 @@ class MemoryService:
         
         uid = user_id or get_current_user_id()
         if not uid:
+            return False
+        
+        # Validate key format - reject timestamp-based keys
+        if key.startswith("user_input_"):
+            print(f"[MEMORY SERVICE] ❌ Rejected timestamp-based key: {key}")
+            print(f"[MEMORY SERVICE]    Use descriptive English keys instead (e.g., 'favorite_food', 'nickname')")
             return False
         
         try:
@@ -236,7 +242,7 @@ class MemoryService:
         
         Args:
             category: Memory category (FACT, GOAL, INTEREST, etc.)
-            key: Memory key
+            key: Memory key (must be English, snake_case, no timestamp format)
             value: Memory value
             user_id: User ID (explicit, required)
             
@@ -244,6 +250,12 @@ class MemoryService:
             True if successful, False otherwise
         """
         if not user_id:
+            return False
+        
+        # Validate key format - reject timestamp-based keys
+        if key.startswith("user_input_"):
+            print(f"[MEMORY SERVICE] ❌ Rejected timestamp-based key: {key}")
+            print(f"[MEMORY SERVICE]    Use descriptive English keys instead (e.g., 'favorite_food', 'nickname')")
             return False
         
         try:

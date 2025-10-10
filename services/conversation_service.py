@@ -37,7 +37,7 @@ class ConversationService:
             result = self.supabase.table("memory")\
                 .select("value, created_at")\
                 .eq("user_id", user_id)\
-                .like("key", "user_input_%")\
+                .not_.like("key", "user_input_%")\
                 .order("created_at", desc=True)\
                 .limit(5)\
                 .execute()
