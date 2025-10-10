@@ -687,70 +687,70 @@ For every message you generate:
 
     async def generate_greeting(self, session):
         """
-        Generate initial greeting - SIMPLIFIED for speed.
-        
-        Features:
-        - Only fetches user's full name from onboarding_details
-        - Simple warm hello in Urdu
-        - No profile, no memories, no context
-        
-        Expected latency: ~200ms (minimal context)
+        Initial greeting (fast path)
+        - Validates session (≤2s wait)
+        - Fetches user's full name from onboarding_details only
+        - Sends a brief, warm Urdu greeting (no memories/profile/context)
         """
-        await self.broadcast_state("thinking")
-        
-        # Session validation
-        if not hasattr(session, '_started') or not session._started:
-            print(f"[GREETING] ⚠️ Session not started yet, waiting...")
-            for i in range(10):
-                await asyncio.sleep(0.2)
-                if hasattr(session, '_started') and session._started:
-                    print(f"[GREETING] ✓ Session ready after {(i+1)*0.2}s")
-                    break
-            else:
-                print(f"[GREETING] ❌ Session still not ready after 2s - aborting")
-                return
 
-        user_id = get_current_user_id()
-        if not user_id:
-            print(f"[GREETING] ⚠️ No user_id - sending generic greeting")
-            await session.generate_reply(instructions=self._base_instructions)
-            return
-        
-        try:
-            # Only fetch user's name from onboarding_details
-            context_data = await self.conversation_context_service.get_context(user_id)
-            
-            # Get full name from onboarding_details
-            user_name = None
-            if context_data and not isinstance(context_data, Exception):
-                user_name = context_data.get("user_name")
-            
-            # Simple greeting instruction
-            name_text = user_name or "دوست"  # Use "friend" in Urdu if no name
-            
-            greeting_instruction = f"""
-{self._base_instructions}
-
-🎯 FIRST GREETING:
-
-User's name: {name_text}
-
-Task: Give a simple, warm Urdu greeting (1-2 sentences only).
-{'Use their name: ' + name_text if user_name else 'Greet warmly without using a name'}
-
-Keep it brief and friendly.
-"""
-            
-            print(f"[GREETING] Simple greeting for: '{user_name or 'unknown user'}'")
-            
-            await session.generate_reply(instructions=greeting_instruction)
-            logging.info(f"[GREETING] Generated simple greeting with name only")
-            
-        except Exception as e:
-            logging.error(f"[GREETING] Error: {e}")
-            print(f"[GREETING] ❌ Exception: {type(e).__name__}: {str(e)}")
-            if "isn't running" not in str(e):
+        async def _safe_generic_reply(reason: str):
+            logging.info(f"[GREETING] Fallback generic reply: {reason}")
+            try:
                 await session.generate_reply(instructions=self._base_instructions)
+            except Exception as inner_e:
+                logging.error(f"[GREETING] Fallback reply failed: {inner_e}")
+
+        await self.broadcast_state("thinking")
+
+        try:
+            # 1) Fast session readiness check (≤2s)
+            if not getattr(session, "_started", False):
+                for _ in range(10):  # 10 * 0.2s = 2.0s
+                    await asyncio.sleep(0.2)
+                    if getattr(session, "_started", False):
+                        break
+                else:
+                    logging.warning("[GREETING] Session not ready after 2s; aborting.")
+                    return
+
+            # 2) Get user id or fall back to generic greeting
+            user_id = get_current_user_id()
+            if not user_id:
+                return await _safe_generic_reply("no user_id")
+
+            # 3) Fetch only the user's name from onboarding_details
+            user_name = None
+            try:
+                ctx = await self.conversation_context_service.get_context(user_id)
+                if ctx and not isinstance(ctx, Exception):
+                    user_name = ctx.get("user_name")
+            except Exception as lookup_e:
+                logging.warning(f"[GREETING] Name lookup failed: {lookup_e}")
+
+            # 4) English prompt; explicitly instruct: respond in Urdu only
+            name_text = user_name or "دوست"  # Urdu fallback display only
+            greeting_instruction = (
+                f"{self._base_instructions}\n\n"
+                "ROLE: You are a kind, warm, Urdu-speaking companion.\n"
+                f"USER_NAME: {name_text}\n"
+                "TASK: Produce a brief welcome message (max two sentences) addressed to the user.\n"
+                + ("RULE: Naturally include the user's name once.\n" if user_name else "RULE: Do not mention any name.\n")
+                + "LANGUAGE: Respond in Urdu only. Do not include any English words.\n"
+                "TONE: Friendly, concise, natural.\n"
+                "CONTENT LIMITS: No extra context, no profile or memory references.\n"
+            )
+
+            logging.info(f"[GREETING] Sending simple greeting (user={user_name or 'unknown'})")
+            await session.generate_reply(instructions=greeting_instruction)
+            logging.info("[GREETING] Done.")
+
+        except Exception as e:
+            msg = str(e)
+            logging.error(f"[GREETING] Error: {e}")
+            print(f"[GREETING] ❌ Exception: {type(e).__name__}: {msg}")
+            if "isn't running" not in msg.casefold():
+                await _safe_generic_reply("exception caught")
+
     
     async def on_agent_speech_started(self, turn_ctx):
         """
