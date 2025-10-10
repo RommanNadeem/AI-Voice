@@ -487,21 +487,28 @@ class RAGMemorySystem:
             logging.info(f"[RAG] Loading memories from Supabase for user {self.user_id}...")
             print(f"[DEBUG][DB] Querying memory table for user_id: {self.user_id[:8]}, limit: {limit}")
             
-            # Fetch recent memories; try both raw UUID and legacy "user-<uuid>"
-            user_ids_to_try = [self.user_id]
-            if not self.user_id.startswith("user-"):
-                user_ids_to_try.append(f"user-{self.user_id}")
+            # Fetch recent memories. Prefer raw UUID. If input is legacy "user-<uuid>", strip prefix.
+            user_ids_to_try = []
+            if self.user_id.startswith("user-"):
+                user_ids_to_try.append(self.user_id.split("user-", 1)[1])  # stripped UUID
+            else:
+                user_ids_to_try.append(self.user_id)
             
             memories_data = []
             for uid in user_ids_to_try:
-                result = (
-                    supabase_client.table("memory")
-                    .select("category, key, value, created_at")
-                    .eq("user_id", uid)
-                    .order("created_at", desc=True)
-                    .limit(limit)
-                    .execute()
-                )
+                try:
+                    result = (
+                        supabase_client.table("memory")
+                        .select("category, key, value, created_at")
+                        .eq("user_id", uid)
+                        .order("created_at", desc=True)
+                        .limit(limit)
+                        .execute()
+                    )
+                except Exception as select_err:
+                    # Handle cases like Postgres 22P02 (invalid input syntax for type uuid)
+                    logging.warning(f"[RAG] Select failed for uid={uid}: {select_err}")
+                    continue
                 if getattr(result, "error", None):
                     logging.warning(f"[RAG] Supabase select error for uid={uid}: {result.error}")
                     continue
