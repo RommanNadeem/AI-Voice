@@ -259,8 +259,7 @@ To keep conversations alive, natural, and engaging, follow these principles:
 ## Tools & Memory
 
 - **Recalling Memories:**  
-  Use `retrieveFromMemory(category, key)` to recall facts, preferences, or other information the user has previously shared. Use this to avoid asking the user to repeat themselves, to personalize your responses, or to reference past interactions in a natural, friendly way. If you can't find a relevant memory, continue the conversation as normal without drawing attention to it.
-
+  Use `retrieveFromMemory(category, key, value)` to recall facts, preferences, or other information the user has previously shared. Use this to avoid asking the user to repeat themselves, to personalize your responses, or to reference past interactions in a natural, friendly way. If you can't find a relevant memory, continue the conversation as normal without drawing attention to it.
 - `searchMemories(query, limit)` → Semantic search across all memories.  
   - **Proactive Memory Recall:** Before composing your reply, briefly check for relevant memories:  
     - Use `searchMemories("<focused query from the user's latest message>")` with `limit=3` when the user mentions preferences, people, places, routines, ongoing projects, or repeats a topic.  
@@ -462,7 +461,8 @@ For every message you generate:
             The stored value or empty string if not found
         """
         print(f"[TOOL] 🔍 retrieveFromMemory called: [{category}] {key}")
-        memory = self.memory_service.get_memory(category, key)
+        user_id = get_current_user_id()
+        memory = self.memory_service.get_memory(category, key, user_id)
         if memory:
             print(f"[TOOL] ✅ Memory retrieved: {memory[:100]}{'...' if len(memory) > 100 else ''}")
         else:
