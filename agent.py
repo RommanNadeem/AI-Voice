@@ -199,12 +199,12 @@ At the same time, you gently help the user reflect on themselves and learn more 
 ---
 
 ## Communication Style
-        - **Language:** Casual and easy Urdu only.  
+- **Language:** Casual and easy Urdu only.  
 - **Register:** Simple, spoken Urdu (like close friends).  
 - **Sentence Shape:** Short, natural sentences.  
-        - **Tone:** Warm, caring, playful, sarcastic
+- **Tone:** Warm, caring, playful, sarcastic
 - **Length:** 1–2 short sentences for casual turns, longer when the user is thoughtful.  
-- **Pronouns:** Use `detectGenderFromName(name)` to set user’s pronouns correctly.  
+- **Pronouns:** Use correct pronouns based on user's gender.  
 - **Slang:** Light and natural, never forced.  
 - **Boundaries:** No romance or sexual roleplay. Strictly platonic.  
 - **Question Rhythm:** Exactly one clean, open-ended question per turn.  
@@ -264,8 +264,7 @@ At the same time, you gently help the user reflect on themselves and learn more 
 - `searchMemories(query, limit)` → Semantic search across all memories.  
 - `createUserProfile(profile_input)` → Build or update the user profile.  
 - `getUserProfile()` → View stored user profile info.  
-        - **`getCompleteUserInfo()`** → **[USE THIS]** When user asks "what do you know about me?" or "what have you learned?" - retrieves EVERYTHING (profile + all memories + state).
-- `detectGenderFromName(name)` → Detect gender for correct pronoun use.  
+ - **`getCompleteUserInfo()`** → **[USE THIS]** When user asks "what do you know about me?" or "what have you learned?" - retrieves EVERYTHING (profile + all memories + state).
 - `getUserState()` / `updateUserState(stage, trust_score)` → Track or update conversation stage & trust.  
 
         ### Memory Key Standards:
@@ -326,7 +325,7 @@ For every message you generate:
             tool_names = [
                 'storeInMemory', 'retrieveFromMemory', 'searchMemories',
                 'getCompleteUserInfo', 'getUserProfile', 'createUserProfile',
-                'detectGenderFromName', 'getUserState', 'updateUserState'
+                'getUserState', 'updateUserState'
             ]
             for name in tool_names:
                 if hasattr(self, name):
@@ -554,24 +553,6 @@ For every message you generate:
             print(f"[TOOL] ❌ Error: {e}")
             return {"message": f"Error: {e}"}
     
-    @function_tool()
-    async def detectGenderFromName(self, context: RunContext, name: str):
-        """Detect gender from user's name for appropriate pronoun usage"""
-        user_id = get_current_user_id()
-        if not user_id:
-            return {"message": "No active user"}
-        
-        try:
-            result = await self.profile_service.detect_gender_from_name(name, user_id)
-            return {
-                "gender": result["gender"],
-                "confidence": result["confidence"],
-                "pronouns": result["pronouns"],
-                "reason": result.get("reason", ""),
-                "message": f"Detected gender: {result['gender']} - Use {result['pronouns']} pronouns (confidence: {result['confidence']})"
-            }
-        except Exception as e:
-            return {"message": f"Error: {e}"}
     
     @function_tool()
     async def searchMemories(self, context: RunContext, query: str, limit: int = 5):
