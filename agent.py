@@ -1,138 +1,106 @@
+"""
+Companion Agent - Simplified Architecture
+==========================================
+Clean, simple pattern matching the old working code.
+"""
+
 import os
 import logging
 import time
-import uuid
 import asyncio
-import json
+import threading
 from typing import Optional
-from dotenv import load_dotenv
+from contextlib import asynccontextmanager
+from datetime import datetime
+from aiohttp import web
+
 from supabase import create_client, Client
-from livekit import rtc
-from livekit.agents import AgentSession, Agent, RoomInputOptions, RunContext, function_tool, ChatContext, AutoSubscribe
-
-
-from livekit import agents
-from livekit.agents import AgentSession, Agent, RoomInputOptions, RunContext, function_tool
+from livekit import agents, rtc
+from livekit.agents import AgentSession, Agent, RoomInputOptions, RunContext, function_tool, ChatContext
 from livekit.plugins import openai as lk_openai
-from rag_system import RAGMemorySystem, get_or_create_rag
 from livekit.plugins import silero
 from uplift_tts import TTS
-import openai
 
-
-from livekit import rtc
-from livekit.agents import (
-    Agent,
-    AgentSession,
-    RoomInputOptions,
-    RunContext,  # imported for completeness if you use tools
-    function_tool,  # ditto
-    cli,
-    WorkerOptions,
-    WorkerPermissions,
+# Import core utilities
+from core.config import Config
+from core.validators import (
+    set_current_user_id,
+    get_current_user_id,
+    set_supabase_client,
+    extract_uuid_from_identity,
+    can_write_for_current_user,
 )
-from livekit.agents.worker import JobRequest, JobProcess
-from livekit.plugins import openai as lk_openai
-from livekit.plugins import silero
-from uplift_tts import TTS
+
+# Import services
+from services import (
+    UserService,
+    MemoryService,
+    ProfileService,
+    ConversationService,
+    ConversationContextService,
+    ConversationStateService,
+    OnboardingService,
+    RAGService,
+)
+
+# Import infrastructure
+from infrastructure.connection_pool import get_connection_pool, get_connection_pool_sync, ConnectionPool
+from infrastructure.redis_cache import get_redis_cache, get_redis_cache_sync, RedisCache
+from infrastructure.database_batcher import get_db_batcher, get_db_batcher_sync, DatabaseBatcher
 
 # ---------------------------
-# Logging: keep things clean (no verbose httpx/hpack/httpcore spam)
+# Logging Configuration
 # ---------------------------
 logging.basicConfig(level=logging.INFO)
-for noisy in ("httpx", "httpcore", "hpack", "urllib3"):
+# Suppress noisy libraries and audio data logging
+for noisy in ("httpx", "httpcore", "hpack", "urllib3", "openai", "httpx._client", "httpcore.http11", "httpcore.connection"):
     logging.getLogger(noisy).setLevel(logging.WARNING)
 
-# ---------------------------
-# Setup
-# ---------------------------
-load_dotenv()
-# Reuse a module-level OpenAI client for faster requests
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-openai_client = openai.OpenAI(api_key=OPENAI_API_KEY)
-
-
-# Supabase Configuration
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
-SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
-
-# Dynamic User ID will be set from LiveKit session
-current_user_id: Optional[str] = None
+# Suppress OpenAI HTTP client verbose logging (prevents binary audio in console)
+logging.getLogger("openai._base_client").setLevel(logging.ERROR)
+logging.getLogger("httpx").setLevel(logging.ERROR)
 
 # ---------------------------
 # Supabase Client Setup
-# Prefer SERVICE_ROLE only in trusted server contexts; otherwise ANON + RLS
 # ---------------------------
 supabase: Optional[Client] = None
-if not SUPABASE_URL:
+
+if not Config.SUPABASE_URL:
     print("[SUPABASE ERROR] SUPABASE_URL not configured")
 else:
-    key = SUPABASE_SERVICE_ROLE_KEY or SUPABASE_ANON_KEY
+    key = Config.get_supabase_key()
     if not key:
         print("[SUPABASE ERROR] No Supabase key configured")
     else:
         try:
-            supabase = create_client(SUPABASE_URL, key)
-            print(f"[SUPABASE] Connected using {'SERVICE_ROLE' if SUPABASE_SERVICE_ROLE_KEY else 'ANON'} key")
+            loop = None
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+            
+            pool = get_connection_pool_sync()
+            if pool is None:
+                pool = ConnectionPool()
+                if loop.is_running():
+                    asyncio.create_task(pool.initialize())
+                else:
+                    loop.run_until_complete(pool.initialize())
+            
+            supabase = pool.get_supabase_client(Config.SUPABASE_URL, key)
+            set_supabase_client(supabase)
+            print(f"[SUPABASE] Connected using {'SERVICE_ROLE' if Config.SUPABASE_SERVICE_ROLE_KEY else 'ANON'} key (pooled)")
         except Exception as e:
             print(f"[SUPABASE ERROR] Connect failed: {e}")
             supabase = None
 
+
 # ---------------------------
-# Session / Identity Helpers
+# Helper Functions
 # ---------------------------
-def set_current_user_id(user_id: str):
-    """Set the current user ID from LiveKit session"""
-    global current_user_id
-    current_user_id = user_id
-    print(f"[SESSION] User ID set to: {user_id}")
-
-def get_current_user_id() -> Optional[str]:
-    """Get the current user ID"""
-    return current_user_id
-
-def clear_current_user_id():
-    """Clear the current user ID (used on disconnect)."""
-    global current_user_id
-    current_user_id = None
-    print("[SESSION] User ID cleared")
-
-def is_valid_uuid(uuid_string: str) -> bool:
-    """Check if string is a valid UUID format"""
-    try:
-        uuid.UUID(uuid_string)
-        return True
-    except ValueError:
-        return False
-
-def extract_uuid_from_identity(identity: Optional[str]) -> Optional[str]:
-    """
-    Return a UUID string from 'user-<uuid>' or '<uuid>'.
-    Return None if invalid (do not fabricate a fallback UUID here).
-    """
-    if not identity:
-        print("[UUID WARNING] Empty identity")
-        return None
-
-    if identity.startswith("user-"):
-        uuid_part = identity[5:]
-        if is_valid_uuid(uuid_part):
-            return uuid_part
-        print(f"[UUID WARNING] Invalid UUID in 'user-' identity: {uuid_part}")
-        return None
-
-    if is_valid_uuid(identity):
-        return identity
-
-    print(f"[UUID WARNING] Invalid identity format: {identity}")
-    return None
-
 async def wait_for_participant(room, *, target_identity: Optional[str] = None, timeout_s: int = 20):
-    """
-    Waits up to timeout_s for a remote participant.
-    If target_identity is provided, returns only when that identity is present.
-    """
+    """Wait for a remote participant to join"""
     deadline = time.time() + timeout_s
     while time.time() < deadline:
         parts = list(room.remote_participants.values())
@@ -142,487 +110,21 @@ async def wait_for_participant(room, *, target_identity: Optional[str] = None, t
                     if p.identity == target_identity:
                         return p
             else:
-                # Prefer STANDARD participants if available, else first
                 standard = [p for p in parts if getattr(p, "kind", None) == "STANDARD"]
                 return (standard[0] if standard else parts[0])
         await asyncio.sleep(0.5)
     return None
 
-def can_write_for_current_user() -> bool:
-    """Centralized guard to ensure DB writes are safe."""
-    uid = get_current_user_id()
-    if not uid:
-        print("[GUARD] No current user_id; skipping DB writes")
-        return False
-    if not is_valid_uuid(uid):
-        print(f"[GUARD] Invalid user_id format: {uid}; skipping DB writes")
-        return False
-    if not supabase:
-        print("[GUARD] Supabase not connected; skipping DB writes")
-        return False
-    return True
-
-# ---------------------------
-# User Profile & Memory Management
-# ---------------------------
-def ensure_profile_exists(user_id: str) -> bool:
-    """Ensure a profile exists for the user_id in the profiles table (profiles.user_id FK -> auth.users.id)."""
-    if not supabase:
-        print("[PROFILE ERROR] Supabase not connected")
-        return False
-    try:
-        resp = supabase.table("profiles").select("id").eq("user_id", user_id).execute()
-        rows = getattr(resp, "data", []) or []
-        if rows:
-            return True
-
-        profile_data = {
-            "user_id": user_id,
-            "email": f"user_{user_id[:8]}@companion.local",
-            "is_first_login": True,
-        }
-        # Use upsert to avoid races and duplicates
-        create_resp = supabase.table("profiles").upsert(profile_data).execute()
-        if getattr(create_resp, "error", None):
-            print(f"[PROFILE ERROR] {create_resp.error}")
-            return False
-        return True
-
-    except Exception as e:
-        print(f"[PROFILE ERROR] ensure_profile_exists failed: {e}")
-        return False
-
-def _normalize_category_key(category: str, key: str):
-    """Normalize category/key to consistent case to avoid mismatches across callers."""
-    norm_category = (category or "").strip().upper()
-    norm_key = (key or "").strip().lower()
-    return norm_category, norm_key
-
-def save_memory(category: str, key: str, value: str) -> bool:
-    """Save memory to Supabase"""
-    if not can_write_for_current_user():
-        return False
-    user_id = get_current_user_id()
-
-    # Normalize for consistency going forward
-    category, key = _normalize_category_key(category, key)
-
-    # Ensure profile exists before saving memory (foreign key safety)
-    if not ensure_profile_exists(user_id):
-        print(f"[MEMORY ERROR] Could not ensure profile exists for user {user_id}")
-        return False
-
-    try:
-        memory_data = {
-            "user_id": user_id,
-            "category": category,
-            "key": key,
-            "value": value,
-        }
-        resp = supabase.table("memory").upsert(
-            memory_data,
-            on_conflict="user_id,category,key",
-        ).execute()
-        if getattr(resp, "error", None):
-            print(f"[SUPABASE ERROR] memory upsert: {resp.error}")
-            return False
-        print(f"[MEMORY SAVED] [{category}] {key} for user {user_id}")
-        return True
-    except Exception as e:
-        # Handle possible FK race: create profile then retry once
-        emsg = str(e)
-        if "23503" in emsg:
-            print("[MEMORY WARN] FK missing, ensuring profile then retrying once...")
-            if ensure_profile_exists(user_id):
-                try:
-                    resp2 = supabase.table("memory").upsert(
-                        {
-                            "user_id": user_id,
-                            "category": category,
-                            "key": key,
-                            "value": value,
-                        },
-                        on_conflict="user_id,category,key",
-                    ).execute()
-                    if getattr(resp2, "error", None):
-                        print(f"[SUPABASE ERROR] memory upsert (retry): {resp2.error}")
-                        return False
-                    print(f"[MEMORY SAVED] [{category}] {key} for user {user_id} (after profile create)")
-                    return True
-                except Exception as e2:
-                    print(f"[MEMORY ERROR] Retry failed: {e2}")
-                    return False
-        print(f"[MEMORY ERROR] Failed to save memory: {e}")
-        return False
-
-def get_memory(category: str, key: str) -> Optional[str]:
-    """Get memory from Supabase"""
-    if not can_write_for_current_user():
-        return None
-    user_id = get_current_user_id()
-    # Build candidate user_ids to handle legacy rows
-    user_ids_to_try = []
-    if user_id:
-        user_ids_to_try.append(user_id)
-        if not user_id.startswith("user-"):
-            user_ids_to_try.append(f"user-{user_id}")
-        else:
-            stripped = extract_uuid_from_identity(user_id)
-            if stripped:
-                user_ids_to_try.append(stripped)
-
-    # Normalize category/key for the primary attempt
-    norm_category, norm_key = _normalize_category_key(category, key)
-
-    try:
-        # 1) Try normalized category/key for each candidate user_id
-        for uid in user_ids_to_try or [user_id]:
-            resp = supabase.table("memory").select("value") \
-                            .eq("user_id", uid) \
-                            .eq("category", norm_category) \
-                            .eq("key", norm_key) \
-                            .limit(1) \
-                            .execute()
-            if getattr(resp, "error", None):
-                print(f"[SUPABASE ERROR] memory select (norm) for uid={uid}: {resp.error}")
-                continue
-            data = getattr(resp, "data", []) or []
-            print(f"[MEMORY LOOKUP] uid={uid} [{norm_category}] {norm_key} -> {len(data)} rows")
-            if data:
-                return data[0].get("value")
-
-        # 2) Fallback: try original (non-normalized) category/key for legacy rows
-        for uid in user_ids_to_try or [user_id]:
-            resp2 = supabase.table("memory").select("value") \
-                             .eq("user_id", uid) \
-                             .eq("category", category) \
-                             .eq("key", key) \
-                             .limit(1) \
-                             .execute()
-            if getattr(resp2, "error", None):
-                print(f"[SUPABASE ERROR] memory select (raw) for uid={uid}: {resp2.error}")
-                continue
-            data2 = getattr(resp2, "data", []) or []
-            print(f"[MEMORY LOOKUP] uid={uid} [raw {category}] {key} -> {len(data2)} rows")
-            if data2:
-                return data2[0].get("value")
-
-        return None
-    except Exception as e:
-        print(f"[MEMORY ERROR] Failed to get memory: {e}")
-        return None
-
-def get_memories_by_category(category: str, limit: int = 5) -> list:
-    """Get recent memories for the current user by category."""
-    if not can_write_for_current_user():
-        return []
-    user_id = get_current_user_id()
-    norm_category, _ = _normalize_category_key(category, "")
-    try:
-        # Try both raw and legacy user_id formats
-        user_ids_to_try = [user_id]
-        if not user_id.startswith("user-"):
-            user_ids_to_try.append(f"user-{user_id}")
-        else:
-            stripped = extract_uuid_from_identity(user_id)
-            if stripped:
-                user_ids_to_try.append(stripped)
-
-        results: list = []
-        for uid in user_ids_to_try:
-            resp = (
-                supabase.table("memory")
-                .select("category,key,value,created_at")
-                .eq("user_id", uid)
-                .eq("category", norm_category)
-                .order("created_at", desc=True)
-                .limit(limit)
-                .execute()
-            )
-            if getattr(resp, "error", None):
-                print(f"[SUPABASE ERROR] memory select by category for uid={uid}: {resp.error}")
-                continue
-            data = getattr(resp, "data", []) or []
-            if data:
-                results.extend(data)
-            if len(results) >= limit:
-                break
-        return results[:limit]
-    except Exception as e:
-        print(f"[MEMORY ERROR] Failed to list memories: {e}")
-        return []
-
-def get_memories_by_categories_batch(categories: list[str], limit_per_category: int = 3) -> dict:
-    """Optimized: fetch multiple categories in a single query and group in memory."""
-    if not can_write_for_current_user():
-        return {cat: [] for cat in categories or []}
-    user_id = get_current_user_id()
-    try:
-        # Try both raw and legacy IDs
-        user_ids_to_try = [user_id]
-        if not user_id.startswith("user-"):
-            user_ids_to_try.append(f"user-{user_id}")
-
-        grouped = {cat: [] for cat in categories or []}
-
-        for uid in user_ids_to_try:
-            resp = (
-                supabase.table("memory")
-                .select("category,key,value,created_at")
-                .eq("user_id", uid)
-                .in_("category", [c.upper() for c in (categories or [])])
-                .order("created_at", desc=True)
-                .limit(limit_per_category * max(1, len(categories or [])))
-                .execute()
-            )
-            if getattr(resp, "error", None):
-                print(f"[SUPABASE ERROR] memory batch select for uid={uid}: {resp.error}")
-                continue
-            data = getattr(resp, "data", []) or []
-            for row in data:
-                cat = (row.get("category") or "").upper()
-                if cat in grouped and len(grouped[cat]) < limit_per_category:
-                    grouped[cat].append(row)
-            # If we filled all categories to desired limit, we can stop
-            if all(len(v) >= limit_per_category or len(v) > 0 for v in grouped.values()):
-                break
-
-        return grouped
-    except Exception as e:
-        print(f"[MEMORY ERROR] Batch fetch failed: {e}")
-        return {cat: [] for cat in categories or []}
-
-def save_user_profile(profile_text: str) -> bool:
-    """Save user profile to Supabase"""
-    if not can_write_for_current_user():
-        return False
-    user_id = get_current_user_id()
-    if not ensure_profile_exists(user_id):
-        print(f"[PROFILE ERROR] Could not ensure profile exists for user {user_id}")
-        return False
-    try:
-        resp = supabase.table("user_profiles").upsert({
-            "user_id": user_id,
-            "profile_text": profile_text,
-        }).execute()
-        if getattr(resp, "error", None):
-            print(f"[SUPABASE ERROR] user_profiles upsert: {resp.error}")
-            return False
-        print(f"[PROFILE SAVED] User {user_id}")
-        return True
-    except Exception as e:
-        # Handle possible FK race: create profile then retry once
-        emsg = str(e)
-        if "23503" in emsg:
-            print("[PROFILE WARN] FK missing, ensuring profile then retrying once...")
-            if ensure_profile_exists(user_id):
-                try:
-                    resp2 = supabase.table("user_profiles").upsert({
-                        "user_id": user_id,
-                        "profile_text": profile_text,
-                    }).execute()
-                    if getattr(resp2, "error", None):
-                        print(f"[SUPABASE ERROR] user_profiles upsert (retry): {resp2.error}")
-                        return False
-                    print(f"[PROFILE SAVED] User {user_id} (after profile create)")
-                    return True
-                except Exception as e2:
-                    print(f"[PROFILE ERROR] Retry failed: {e2}")
-                    return False
-        print(f"[PROFILE ERROR] Failed to save profile: {e}")
-        return False
-
-def get_user_profile() -> str:
-    """Get user profile from Supabase"""
-    if not can_write_for_current_user():
-        return ""
-    user_id = get_current_user_id()
-    try:
-        resp = supabase.table("user_profiles").select("profile_text").eq("user_id", user_id).execute()
-        if getattr(resp, "error", None):
-            print(f"[SUPABASE ERROR] user_profiles select: {resp.error}")
-            return ""
-        data = getattr(resp, "data", []) or []
-        if data:
-            return data[0].get("profile_text", "") or ""
-        return ""
-    except Exception as e:
-        print(f"[PROFILE ERROR] Failed to get profile: {e}")
-        return ""
-
-async def initialize_user_from_onboarding(user_id: str):
-    """
-    Initialize new user profile and memories from onboarding_details table.
-    Creates initial profile and categorized memories for name, occupation, and interests.
-    Runs in background to avoid latency.
-    """
-    if not supabase or not user_id:
-        return
-    
-    try:
-        print(f"[ONBOARDING] Checking if user {user_id} needs initialization...")
-        
-        # Check if profile already exists
-        profile_resp = supabase.table("user_profiles").select("profile_text").eq("user_id", user_id).execute()
-        has_profile = bool(profile_resp.data)
-        
-        # Check if memories already exist
-        memory_resp = supabase.table("memory").select("id").eq("user_id", user_id).limit(1).execute()
-        has_memories = bool(memory_resp.data)
-        
-        if has_profile and has_memories:
-            print(f"[ONBOARDING] User already initialized, skipping")
-            return
-        
-        # Fetch onboarding details
-        result = supabase.table("onboarding_details").select("full_name, occupation, interests").eq("user_id", user_id).execute()
-        
-        if not result.data:
-            print(f"[ONBOARDING] No onboarding data found for user {user_id}")
-            return
-        
-        onboarding = result.data[0]
-        full_name = onboarding.get("full_name", "")
-        occupation = onboarding.get("occupation", "")
-        interests = onboarding.get("interests", "")
-        
-        print(f"[ONBOARDING] Found data - Name: {full_name}, Occupation: {occupation}, Interests: {interests[:50] if interests else 'none'}...")
-        
-        # Create initial profile from onboarding data
-        if not has_profile and any([full_name, occupation, interests]):
-            profile_parts = []
-            
-            if full_name:
-                profile_parts.append(f"Their name is {full_name}.")
-            
-            if occupation:
-                profile_parts.append(f"They work as {occupation}.")
-            
-            if interests:
-                profile_parts.append(f"Their interests include: {interests}.")
-            
-            initial_profile = " ".join(profile_parts)
-            
-            # Use AI to create a more natural profile
-            enhanced_profile = generate_user_profile(
-                f"Name: {full_name}. Occupation: {occupation}. Interests: {interests}",
-                ""
-            )
-            
-            profile_to_save = enhanced_profile if enhanced_profile else initial_profile
-            
-            if save_user_profile(profile_to_save):
-                print(f"[ONBOARDING] ✓ Created initial profile")
-        
-        # Add memories for each onboarding field
-        if not has_memories:
-            memories_added = 0
-            
-            if full_name:
-                if save_memory("FACT", "full_name", full_name):
-                    memories_added += 1
-                    # Also add to RAG
-                    rag = get_or_create_rag(user_id, os.getenv("OPENAI_API_KEY"))
-                    rag.add_memory_background(f"User's name is {full_name}", "FACT")
-            
-            if occupation:
-                if save_memory("FACT", "occupation", occupation):
-                    memories_added += 1
-                    # Also add to RAG
-                    rag = get_or_create_rag(user_id, os.getenv("OPENAI_API_KEY"))
-                    rag.add_memory_background(f"User works as {occupation}", "FACT")
-            
-            if interests:
-                # Normalize to list whether DB returns text or array
-                if isinstance(interests, list):
-                    interest_list = [str(i).strip() for i in interests if str(i).strip()]
-                else:
-                    interest_list = [i.strip() for i in str(interests).split(',') if i.strip()]
-                
-                if interest_list:
-                    # Save all interests as one memory
-                    interests_text = ", ".join(interest_list)
-                    if save_memory("INTEREST", "main_interests", interests_text):
-                        memories_added += 1
-                    
-                    # Add each interest to RAG for better semantic search
-                    rag = get_or_create_rag(user_id, os.getenv("OPENAI_API_KEY"))
-                    for interest in interest_list:
-                        rag.add_memory_background(f"User is interested in {interest}", "INTEREST")
-            
-            print(f"[ONBOARDING] ✓ Created {memories_added} memories from onboarding data")
-        
-        print(f"[ONBOARDING] ✓ User initialization complete")
-        
-    except Exception as e:
-        print(f"[ONBOARDING ERROR] Failed to initialize user: {e}")
-
-
-def generate_user_profile(user_input: str, existing_profile: str = "") -> str:
-    """Generate or update comprehensive user profile using OpenAI"""
-    if not user_input or not user_input.strip():
-        return ""
-    
-    try:
-        client = openai_client
-        
-        prompt = f"""
-        {"Update and enhance" if existing_profile else "Create"} a comprehensive 4-5 line user profile that captures their persona. Focus on:
-        
-        - Interests & Hobbies (what they like, enjoy doing)
-        - Goals & Aspirations (what they want to achieve)
-        - Family & Relationships (important people in their life)
-        - Personality Traits (core characteristics, values, beliefs)
-        - Important Life Details (profession, background, experiences)
-        
-        {"Existing profile: " + existing_profile if existing_profile else ""}
-        
-        New information: "{user_input}"
-        
-        {"Merge the new information with the existing profile, keeping all important details while adding new insights." if existing_profile else "Create a new profile from this information."}
-        
-        Format: Write 4-5 concise, flowing sentences that paint a complete picture of who this person is.
-        Style: Natural, descriptive, like a character summary.
-        
-        Return only the profile text (4-5 sentences). If no meaningful information is found, return "NO_PROFILE_INFO".
-        """
-        
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": f"You are an expert at creating and updating comprehensive user profiles. {'Update and merge' if existing_profile else 'Create'} a 4-5 sentence persona summary that captures the user's complete personality, interests, goals, and important life details."},
-                {"role": "user", "content": prompt}
-            ],
-            max_tokens=200,
-            temperature=0.3
-        )
-        
-        profile = response.choices[0].message.content.strip()
-        
-        if profile == "NO_PROFILE_INFO" or len(profile) < 20:
-            print(f"[PROFILE GENERATION] No meaningful profile info found in: {user_input[:50]}...")
-            return existing_profile  # Return existing if no new info
-        
-        print(f"[PROFILE GENERATION] {'Updated' if existing_profile else 'Generated'} profile: {profile}")
-        return profile
-        
-    except Exception as e:
-        print(f"[PROFILE GENERATION ERROR] Failed to generate profile: {e}")
-        return existing_profile  # Return existing on error
-
-# ---------------------------
-# Memory Categorization
-# ---------------------------
-def categorize_user_input(user_text: str) -> str:
+def categorize_user_input(user_text: str, memory_service: MemoryService) -> str:
     """Categorize user input for memory storage using OpenAI"""
     if not user_text or not user_text.strip():
         return "FACT"
     
     try:
-        # Initialize OpenAI client
-        client = openai_client
+        pool = get_connection_pool_sync()
+        import openai
+        client = pool.get_openai_client() if pool else openai.OpenAI(api_key=Config.OPENAI_API_KEY)
         
-        # Create a prompt for categorization
         prompt = f"""
         Analyze the following user input and categorize it into one of these categories:
         
@@ -651,27 +153,32 @@ def categorize_user_input(user_text: str) -> str:
         )
         
         category = response.choices[0].message.content.strip().upper()
-        
-        # Validate the category is one of our expected ones
         valid_categories = ["GOAL", "INTEREST", "OPINION", "EXPERIENCE", "PREFERENCE", "PLAN", "RELATIONSHIP", "FACT"]
+        
         if category in valid_categories:
             print(f"[CATEGORIZATION] '{user_text[:50]}...' -> {category}")
             return category
         else:
-            print(f"[CATEGORIZATION WARNING] Invalid category '{category}' for input: {user_text[:50]}...")
             return "FACT"
             
     except Exception as e:
-        print(f"[CATEGORIZATION ERROR] Failed to categorize input: {e}")
+        print(f"[CATEGORIZATION ERROR] {e}")
         return "FACT"
 
+
 # ---------------------------
-# Assistant Agent with OpenAI Prompt
+# Assistant Agent - Simplified Pattern
 # ---------------------------
 class Assistant(Agent):
-    def __init__(self):
-
-        super().__init__(instructions="""
+    def __init__(self, chat_ctx: Optional[ChatContext] = None):
+        # Track background tasks to prevent memory leaks
+        self._background_tasks = set()
+        
+        # Store room reference for state broadcasting
+        self._room = None
+        self._current_state = "idle"
+        
+        self._base_instructions = """
 # Prompt: Humraaz – Urdu Companion
 
 You are **Humraaz**, a warm, witty, platonic female friend.  
@@ -692,10 +199,10 @@ At the same time, you gently help the user reflect on themselves and learn more 
 ---
 
 ## Communication Style
-- **Language:** Urdu only.  
+        - **Language:** Casual and easy Urdu only.  
 - **Register:** Simple, spoken Urdu (like close friends).  
 - **Sentence Shape:** Short, natural sentences.  
-- **Tone:** Warm, caring, playful, sarcastic buy not overly formal.  
+        - **Tone:** Warm, caring, playful, sarcastic
 - **Length:** 1–2 short sentences for casual turns, longer when the user is thoughtful.  
 - **Pronouns:** Use `detectGenderFromName(name)` to set user’s pronouns correctly.  
 - **Slang:** Light and natural, never forced.  
@@ -706,24 +213,77 @@ At the same time, you gently help the user reflect on themselves and learn more 
 ---
 
 ## Conversational “Secret Sauce”
-- **Add a POV:** Offer tiny opinions, playful teasing, or mild contradictions.  
-- **Callback magic:** Bring back details the user has shared before.  
-- **Pivot lightly:** Use a word, time of day, or callback to move topics smoothly.  
-- **Micro-stories:** Share small fictional “life” slices to feel two-way.  
-- **Reflection nudges:** Every few turns, help the user pause and notice something about themselves.  
-- **Pacing:** Short for casual talk, longer for reflective or emotional chats.  
-- **Earned memory:** Use remembered details to show care, not pressure.  
+
+        To keep conversations alive, natural, and engaging, follow these principles:
+
+        - **React like a person** Start with a short emotional beat. When felt appropriate. Emotion first, logic second.  
+
+        - **Add a Point of View** Share tiny opinions, playful teasing, or mild contradictions. Keep it safe but spicy.  
+
+        - **Callback Magic** Remember and bring back small details from earlier chats. Makes the conversation feel alive.  
+
+        - **Thematic Loops** Notice recurring themes (e.g., discipline, curiosity, stress) and gently highlight them later.  
+
+        - **Pivot Lightly** Shift topics using a word the user just said, the time of day, or a callback. Keep it natural.  
+
+        - **Micro-Stories** Occasionally share tiny fictional “life” slices to feel two-way, not just Q&A.  
+
+        - **Mood-Mirroring** Match the user’s energy: playful if they are playful, calm if they are reflective.  
+
+        - **Mini-Challenges**  Suggest small, playful tasks (e.g., “5 minute bina phone ke try karo”) to spark reflection.  
+
+        - **Humor Beats** Add light jokes or absurd twists (never at the user’s expense).  
+
+        - **Cultural Anchors** Use relatable Urdu/Pakistani context — chai, cricket, poetry, mehfil, ghazal, etc.  
+
+        - **Self-Hints / Persona Flavors** Occasionally drop subtle quirks about yourself to build relatability.  
+
+        - **“Why Not” Pivots** If the chat stalls, pick a casual detail and explore it with curiosity.  
+
+        - **Insight Finder** When the user shares something meaningful (a value, habit, or feeling), highlight a small **insight**.  
+        *Important: not every message is an insight — only when it feels natural.*  
+
+        - **Frictionless Pacing** Use short replies for casual talk, longer ones when the user opens up. Match their vibe.  
+
+        - **Time Awareness** Tie reflections to time of day or rhythms of life (e.g., “Shaam ka waqt sochnay pe majboor karta hai”).  
+
+        - **Earned Memory** Use remembered facts to show care, never to pressure or corner the user.  
+
+        - **Meta-Awareness (light)** Occasionally comment on the conversation itself to make it co-created.  
+        (e.g., “Arrey, hum kitna ghoom phir ke baatein kar rahe hain, mazay ki baat hai na?”)  
+        
 
 ---
 
 ## Tools & Memory
-- `storeInMemory(category, key, value)` → Save facts/preferences.  
-- `retrieveFromMemory(category, key)` → Fetch a specific memory.  
+        - **Remembering Facts:** Use the 'storeInMemory(category, key, value)' tool to remember specific, *user-related* facts or preferences when the user explicitly asks, or when they state a clear, concise piece of information that would help personalize or streamline *your future interactions with them*. This tool is for user-specific information that should persist across sessions. Do *not* use it for general project context. If unsure whether to save something, you can ask the user, "Should I remember that for you?". 
+
+        **CRITICAL**: The `key` parameter must ALWAYS be in English (e.g., "favorite_food", "sister_name", "hobby"). The `value` parameter contains the actual data (can be in any language). Example: `storeInMemory("PREFERENCE", "favorite_food", "بریانی")` - key is English, value is Urdu.
+
+        - **Recalling Memories:** Use the 'retrieveFromMemory(category, key)' tool to recall facts, preferences, or other information the user has previously shared. Use this to avoid asking the user to repeat themselves, to personalize your responses, or to reference past interactions in a natural, friendly way. If you can't find a relevant memory, continue the conversation as normal without drawing attention to it.
 - `searchMemories(query, limit)` → Semantic search across all memories.  
 - `createUserProfile(profile_input)` → Build or update the user profile.  
 - `getUserProfile()` → View stored user profile info.  
+        - **`getCompleteUserInfo()`** → **[USE THIS]** When user asks "what do you know about me?" or "what have you learned?" - retrieves EVERYTHING (profile + all memories + state).
 - `detectGenderFromName(name)` → Detect gender for correct pronoun use.  
 - `getUserState()` / `updateUserState(stage, trust_score)` → Track or update conversation stage & trust.  
+
+        ### Memory Key Standards:
+        - **ENGLISH KEYS ONLY**: All keys must be in English (e.g., `favorite_food`, `sister_name`, `hobby`). Never use Urdu or other languages for keys.
+        - **Use consistent keys**: Same concept = same key across updates (e.g., always use `favorite_food`, never switch to `food` or `fav_food`)
+        - **Snake_case naming**: `favorite_biryani`, `cooking_preference`, `short_term_goal`
+        - **Check before storing**: Use `searchMemories()` first to find existing keys, then UPDATE (don't duplicate)
+        - **Standard keys**: `name`, `age`, `location`, `occupation` (FACT); `favorite_*`, `*_preference` (PREFERENCE); `recent_*` (EXPERIENCE); `*_goal`, `*_plan` (GOAL/PLAN)
+        - **Never abbreviate**: Use `favorite_food` not `fav_food`
+        - **Update, don't duplicate**: If user corrects info, use the SAME key to update
+
+        **Example:** If you stored `storeInMemory("PREFERENCE", "favorite_food", "بریانی")`, and user later says "I prefer pizza", call `storeInMemory("PREFERENCE", "favorite_food", "pizza")` - SAME key updates the value.
+
+        **CORRECT Examples:**
+        - `storeInMemory("PREFERENCE", "favorite_sport", "فتبال")` ✅ English key, Urdu value
+        - `storeInMemory("FACT", "sister_info", "بڑی بہن ہے")` ✅ English key, Urdu value
+
+        **IMPORTANT**: When user asks about themselves or what you know about them, ALWAYS call `getCompleteUserInfo()` first to get accurate, complete data before responding.  
 
 ---
 
@@ -740,25 +300,139 @@ For every message you generate:
 1. Start with a short emotional beat.  
 2. Add one line of value (tiny opinion, reflection nudge, micro-story, or playful tease).  
 3. End with **one open-ended question** — sometimes casual, sometimes reflective.
-4 Always write in Pakistani Urdu.
-5 Avoid English words unless the user uses them first.
-6 Use Urdu punctuation: "،" for commas and "۔" for sentence end.
-  
-  
-""")
+        4. Make sure your response is in easy and casual "Urdu".
+
+
+        """
+        
+        # CRITICAL: Pass chat_ctx to parent Agent class for initial context
+        super().__init__(instructions=self._base_instructions, chat_ctx=chat_ctx)
+        
+        # Initialize services
+        self.memory_service = MemoryService(supabase)
+        self.profile_service = ProfileService(supabase)
+        self.user_service = UserService(supabase)
+        self.conversation_service = ConversationService(supabase)
+        self.conversation_context_service = ConversationContextService(supabase)
+        self.conversation_state_service = ConversationStateService(supabase)
+        self.onboarding_service = OnboardingService(supabase)
+        self.rag_service = None  # Set per-user in entrypoint
+        
+        # DEBUG: Log registered function tools (safely)
+        print("[AGENT INIT] Checking registered function tools...")
+        tool_count = 0
+        try:
+            # Manually check known function tool methods to avoid property access issues
+            tool_names = [
+                'storeInMemory', 'retrieveFromMemory', 'searchMemories',
+                'getCompleteUserInfo', 'getUserProfile', 'createUserProfile',
+                'detectGenderFromName', 'getUserState', 'updateUserState'
+            ]
+            for name in tool_names:
+                if hasattr(self, name):
+                    print(f"[AGENT INIT]   ✓ Function tool found: {name}")
+                    tool_count += 1
+            print(f"[AGENT INIT] ✅ Total function tools registered: {tool_count}")
+        except Exception as e:
+            print(f"[AGENT INIT] ⚠️ Tool verification skipped: {e}")
+    
+    def set_room(self, room):
+        """Set the room reference for state broadcasting"""
+        self._room = room
+        print(f"[STATE] Room reference set for state broadcasting")
+    
+    async def broadcast_state(self, state: str):
+        """
+        Broadcast agent state to frontend via LiveKit data channel.
+        States: 'idle', 'listening', 'thinking', 'speaking'
+        """
+        if not self._room:
+            print(f"[STATE] ⚠️  Cannot broadcast '{state}' - no room reference")
+            return
+        
+        if state == self._current_state:
+            # Don't spam duplicate states
+            print(f"[STATE] ⏭️  Skipping duplicate state: {state}")
+            return
+        
+        try:
+            message = state.encode('utf-8')
+            await self._room.local_participant.publish_data(
+                message,
+                reliable=True,
+                destination_identities=[]  # Broadcast to all
+            )
+            old_state = self._current_state
+            self._current_state = state
+            print(f"[STATE] 📡 Broadcasted: {old_state} → {state}")
+        except Exception as e:
+            print(f"[STATE] ❌ Failed to broadcast '{state}': {e}")
 
     @function_tool()
     async def storeInMemory(self, context: RunContext, category: str, key: str, value: str):
-        """Save a memory item"""
-        print(f"[TOOL] storeInMemory called: category={category}, key={key}, value_len={len(value) if value else 0}")
-        success = save_memory(category, key, value)
-        return {"success": success, "message": f"Memory [{category}] {key} saved" if success else "Failed to save memory"}
+        """
+        Store user information persistently in memory for future conversations.
+        
+        Use this when the user shares important personal information that should be remembered.
+        Examples: preferences, goals, facts about their life, relationships, etc.
+        
+        Args:
+            category: Memory category - must be one of: FACT, GOAL, INTEREST, EXPERIENCE, 
+                      PREFERENCE, PLAN, RELATIONSHIP, OPINION
+            key: Unique identifier in English (snake_case) - e.g., "favorite_food", "sister_name"
+            value: The actual data to remember (can be in any language, including Urdu)
+        
+        Returns:
+            Success status and confirmation message
+        """
+        print(f"[TOOL] 💾 storeInMemory called: [{category}] {key}")
+        print(f"[TOOL]    Value: {value[:100]}{'...' if len(value) > 100 else ''}")
+        
+        # STEP 1: Save to database
+        success = self.memory_service.save_memory(category, key, value)
+        
+        if success:
+            print(f"[TOOL] ✅ Memory stored to database")
+            
+            # STEP 2: Also add to RAG for immediate searchability
+            if self.rag_service:
+                try:
+                    await self.rag_service.add_memory_async(
+                        text=value,
+                        category=category,
+                        metadata={"key": key, "explicit_save": True, "important": True}
+                    )
+                    print(f"[TOOL] ✅ Memory indexed in RAG")
+                except Exception as e:
+                    print(f"[TOOL] ⚠️ RAG indexing failed (non-critical): {e}")
+        else:
+            print(f"[TOOL] ❌ Memory storage failed")
+        
+        return {
+            "success": success, 
+            "message": f"Memory [{category}] {key} saved and indexed" if success else "Failed to save memory"
+        }
 
     @function_tool()
     async def retrieveFromMemory(self, context: RunContext, category: str, key: str):
-        """Get a memory item"""
-        print(f"[TOOL] retrieveFromMemory called: category={category}, key={key}")
-        memory = get_memory(category, key)
+        """
+        Retrieve a specific memory item by category and key.
+        
+        Use this when you need to recall a specific piece of information you previously stored.
+        
+        Args:
+            category: Memory category (FACT, GOAL, INTEREST, etc.)
+            key: The exact key used when storing (e.g., "favorite_food")
+        
+        Returns:
+            The stored value or empty string if not found
+        """
+        print(f"[TOOL] 🔍 retrieveFromMemory called: [{category}] {key}")
+        memory = self.memory_service.get_memory(category, key)
+        if memory:
+            print(f"[TOOL] ✅ Memory retrieved: {memory[:100]}{'...' if len(memory) > 100 else ''}")
+        else:
+            print(f"[TOOL] ℹ️  Memory not found: [{category}] {key}")
         return {"value": memory or "", "found": memory is not None}
 
     @function_tool()
@@ -768,395 +442,1168 @@ For every message you generate:
         if not profile_input or not profile_input.strip():
             return {"success": False, "message": "No profile information provided"}
         
-        # Get existing profile for context
-        existing_profile = get_user_profile()
-        
-        # Generate/update profile using OpenAI
-        generated_profile = generate_user_profile(profile_input, existing_profile)
+        existing_profile = self.profile_service.get_profile()
+        generated_profile = self.profile_service.generate_profile(profile_input, existing_profile)
         
         if not generated_profile:
             return {"success": False, "message": "No meaningful profile information could be extracted"}
         
-        # Save the generated/updated profile
-        success = save_user_profile(generated_profile)
+        success = self.profile_service.save_profile(generated_profile)
         return {"success": success, "message": "User profile updated successfully" if success else "Failed to save profile"}
 
     @function_tool()
     async def getUserProfile(self, context: RunContext):
-        """Get user profile information"""
-        profile = get_user_profile()
-        return {"profile": profile}
+        """Get user profile information - includes comprehensive user details"""
+        print(f"[TOOL] 👤 getUserProfile called")
+        user_id = get_current_user_id()
+        
+        if not user_id:
+            print(f"[TOOL] ⚠️  No active user")
+            return {"profile": None, "message": "No active user"}
+        
+        try:
+            # Get profile with proper user_id
+            profile = await self.profile_service.get_profile_async(user_id)
+            
+            if profile:
+                print(f"[TOOL] ✅ Profile retrieved: {len(profile)} chars")
+                print(f"[TOOL]    Preview: {profile[:100]}...")
+                return {
+                    "profile": profile,
+                    "message": "Profile retrieved successfully"
+                }
+            else:
+                print(f"[TOOL] ℹ️  No profile found for user")
+                return {
+                    "profile": None,
+                    "message": "No profile information available yet"
+                }
+        except Exception as e:
+            print(f"[TOOL] ❌ Error: {e}")
+            return {"profile": None, "message": f"Error: {e}"}
+    
+    @function_tool()
+    async def getCompleteUserInfo(self, context: RunContext):
+        """
+        Retrieve ALL available information about the user in one call.
+        
+        Use this ONLY when the user explicitly asks what you know about them,
+        or requests a summary of their profile.
+        
+        DO NOT call this on every message - it's expensive and unnecessary.
+        Only use when specifically asked "what do you know about me?" or similar.
+        
+        Returns:
+            Complete user profile, all memories by category, conversation state, and trust score
+        """
+        print(f"[TOOL] 📋 getCompleteUserInfo called - retrieving ALL user data")
+        user_id = get_current_user_id()
+        
+        if not user_id:
+            print(f"[TOOL] ⚠️  No active user")
+            return {"message": "No active user"}
+        
+        try:
+            # Fetch everything in parallel
+            profile_task = self.profile_service.get_profile_async(user_id)
+            name_task = self.conversation_context_service.get_context(user_id)
+            state_task = self.conversation_state_service.get_state(user_id)
+            
+            profile, context_data, state = await asyncio.gather(
+                profile_task, name_task, state_task,
+                return_exceptions=True
+            )
+            
+            # Get memories by category
+            memories_by_category = {}
+            categories = ['FACT', 'GOAL', 'INTEREST', 'EXPERIENCE', 'PREFERENCE', 'RELATIONSHIP', 'PLAN', 'OPINION']
+            
+            for category in categories:
+                try:
+                    mems = self.memory_service.get_memories_by_category(category, limit=5, user_id=user_id)
+                    if mems:
+                        memories_by_category[category] = [m['value'] for m in mems]
+                except Exception as e:
+                    print(f"[TOOL] Error fetching {category}: {e}")
+            
+            # Extract name
+            user_name = None
+            if context_data and not isinstance(context_data, Exception):
+                user_name = context_data.get("user_name")
+            
+            # Build response
+            result = {
+                "user_name": user_name,
+                "profile": profile if not isinstance(profile, Exception) else None,
+                "conversation_stage": state.get("stage") if not isinstance(state, Exception) else "ORIENTATION",
+                "trust_score": state.get("trust_score") if not isinstance(state, Exception) else 2.0,
+                "memories_by_category": memories_by_category,
+                "total_memories": sum(len(v) for v in memories_by_category.values()),
+                "message": "Complete user information retrieved"
+            }
+            
+            print(f"[TOOL] ✅ Retrieved complete info:")
+            print(f"[TOOL]    Name: {user_name}")
+            print(f"[TOOL]    Profile: {'Yes' if result['profile'] else 'No'} ({len(result['profile']) if result['profile'] else 0} chars)")
+            print(f"[TOOL]    Stage: {result['conversation_stage']}, Trust: {result['trust_score']:.1f}")
+            print(f"[TOOL]    Memories: {result['total_memories']} across {len(memories_by_category)} categories")
+            
+            return result
+            
+        except Exception as e:
+            print(f"[TOOL] ❌ Error: {e}")
+            return {"message": f"Error: {e}"}
+    
+    @function_tool()
+    async def detectGenderFromName(self, context: RunContext, name: str):
+        """Detect gender from user's name for appropriate pronoun usage"""
+        user_id = get_current_user_id()
+        if not user_id:
+            return {"message": "No active user"}
+        
+        try:
+            result = await self.profile_service.detect_gender_from_name(name, user_id)
+            return {
+                "gender": result["gender"],
+                "confidence": result["confidence"],
+                "pronouns": result["pronouns"],
+                "reason": result.get("reason", ""),
+                "message": f"Detected gender: {result['gender']} - Use {result['pronouns']} pronouns (confidence: {result['confidence']})"
+            }
+        except Exception as e:
+            return {"message": f"Error: {e}"}
     
     @function_tool()
     async def searchMemories(self, context: RunContext, query: str, limit: int = 5):
         """
-        Search memories semantically using RAG - finds relevant past conversations and information.
-        Use this to recall what user has shared before, even if you don't remember exact keywords.
+        Search through stored memories semantically to find relevant information.
         
-        Examples:
-        - "What are user's hobbies?" → Finds all hobby-related memories
-        - "User's family" → Finds family mentions
-        - "Times user felt stressed" → Finds emotional context
+        Use this to recall what you know about the user when it's relevant to the conversation.
+        This performs semantic search, so you can use natural language queries.
+        
+        Args:
+            query: Natural language search query (e.g., "user's favorite foods", "family members")
+            limit: Maximum number of memories to return (default: 5, max: 20)
+        
+        Returns:
+            List of relevant memories with similarity scores
         """
+        print(f"[TOOL] 🔍 searchMemories called: query='{query}', limit={limit}")
         user_id = get_current_user_id()
+        
+        # DEBUG: Track user_id in tool execution
+        print(f"[DEBUG][USER_ID] searchMemories - Current user_id: {user_id[:8] if user_id else 'NONE'}")
+        
         if not user_id:
+            print(f"[TOOL] ⚠️  No active user")
+            print(f"[DEBUG][USER_ID] ❌ Tool call failed - user_id is None!")
             return {"memories": [], "message": "No active user"}
         
         try:
-            rag = get_or_create_rag(user_id, os.getenv("OPENAI_API_KEY"))
-            results = await rag.retrieve_relevant_memories(query, top_k=limit)
+            if not self.rag_service:
+                print(f"[TOOL] ⚠️  RAG not initialized")
+                print(f"[DEBUG][RAG] ❌ RAG service is None for user {user_id[:8]}")
+                return {"memories": [], "message": "RAG not initialized"}
+            
+            # DEBUG: Check RAG state
+            rag_system = self.rag_service.get_rag_system()
+            print(f"[DEBUG][RAG] RAG system exists: {rag_system is not None}")
+            if rag_system:
+                memory_count = len(rag_system.memories)
+                print(f"[DEBUG][RAG] Current RAG has {memory_count} memories loaded")
+                print(f"[DEBUG][RAG] RAG user_id: {rag_system.user_id[:8]}")
+                print(f"[DEBUG][RAG] FAISS index total: {rag_system.index.ntotal}")
+            
+            self.rag_service.update_conversation_context(query)
+            results = await self.rag_service.search_memories(
+                query=query,
+                top_k=limit,
+                use_advanced_features=True
+            )
+            
+            print(f"[TOOL] ✅ Found {len(results)} memories")
+            for i, mem in enumerate(results[:3], 1):
+                print(f"[TOOL]    #{i}: {mem.get('text', '')[:80]}...")
             
             return {
                 "memories": [
                     {
                         "text": r["text"],
                         "category": r["category"],
-                        "similarity": round(r["similarity"], 3)
+                        "similarity": round(r["similarity"], 3),
+                        "relevance_score": round(r.get("final_score", r["similarity"]), 3),
+                        "is_recent": (time.time() - r["timestamp"]) < 86400
                     } for r in results
                 ],
                 "count": len(results),
-                "message": f"Found {len(results)} relevant memories"
+                "message": f"Found {len(results)} relevant memories (advanced RAG)"
             }
         except Exception as e:
-            print(f"[RAG TOOL ERROR] {e}")
+            print(f"[TOOL] ❌ Error: {e}")
+            print(f"[DEBUG][RAG] Exception details: {type(e).__name__}: {str(e)}")
             return {"memories": [], "message": f"Error: {e}"}
     
     @function_tool()
-    async def getMemoryStats(self, context: RunContext):
-        """Get statistics about the user's memory system including RAG performance."""
+    async def getUserState(self, context: RunContext):
+        """Get current conversation state and trust score"""
+        print(f"[TOOL] 📊 getUserState called")
         user_id = get_current_user_id()
+        
         if not user_id:
+            print(f"[TOOL] ⚠️  No active user")
             return {"message": "No active user"}
         
         try:
-            rag = get_or_create_rag(user_id, os.getenv("OPENAI_API_KEY"))
-            stats = rag.get_stats()
+            state = await self.conversation_state_service.get_state(user_id)
+            print(f"[TOOL] ✅ State retrieved: Stage={state['stage']}, Trust={state['trust_score']:.1f}")
             
             return {
-                "total_memories": stats["total_memories"],
-                "cache_hit_rate": f"{stats['cache_hit_rate']:.1%}",
-                "retrievals_performed": stats["retrievals"],
-                "message": f"System has {stats['total_memories']} memories indexed"
+                "stage": state["stage"],
+                "trust_score": state["trust_score"],
+                "last_updated": state.get("last_updated"),
+                "metadata": state.get("metadata", {}),
+                "stage_history": state.get("stage_history", []),
+                "message": f"Current stage: {state['stage']}, Trust: {state['trust_score']:.1f}/10"
             }
         except Exception as e:
+            print(f"[TOOL] ❌ Error: {e}")
             return {"message": f"Error: {e}"}
 
     @function_tool()
-    async def getCompleteUserInfo(self, context: RunContext):
-        """Return profile, name, and recent memories by category for the active user."""
+    async def updateUserState(self, context: RunContext, stage: str = None, trust_score: float = None):
+        """Update conversation state and trust score"""
+        print(f"[TOOL] 📊 updateUserState called: stage={stage}, trust_score={trust_score}")
         user_id = get_current_user_id()
+        
         if not user_id:
+            print(f"[TOOL] ⚠️  No active user")
             return {"message": "No active user"}
 
         try:
-            # Profile
-            profile = get_user_profile() or ""
-
-            # Name from memory (FACT/full_name)
-            name = get_memory("FACT", "full_name") or ""
-
-            # Recent memories by category
-            categories = [
-                "FACT",
-                "INTEREST",
-                "GOAL",
-                "RELATIONSHIP",
-                "PREFERENCE",
-                "EXPERIENCE",
-                "PLAN",
-                "OPINION",
-            ]
-            mems_by_cat = get_memories_by_categories_batch(categories, limit_per_category=5)
-
-            # Simplify to values only per category
-            simple = {}
-            for cat, rows in mems_by_cat.items():
-                if rows:
-                    simple[cat] = [r.get("value", "") for r in rows if r.get("value")]
-
-            total = sum(len(v) for v in simple.values())
-
-            return {
-                "user_name": name,
-                "profile": profile,
-                "memories_by_category": simple,
-                "total_memories": total,
-                "message": "Complete user information retrieved",
-            }
+            success = await self.conversation_state_service.update_state(
+                stage=stage,
+                trust_score=trust_score,
+                user_id=user_id
+            )
+            
+            if success:
+                # Get updated state
+                new_state = await self.conversation_state_service.get_state(user_id)
+                print(f"[TOOL] ✅ State updated: Stage={new_state['stage']}, Trust={new_state['trust_score']:.1f}")
+                return {
+                    "success": True,
+                    "stage": new_state["stage"],
+                    "trust_score": new_state["trust_score"],
+                    "message": f"Updated to stage: {new_state['stage']}, Trust: {new_state['trust_score']:.1f}/10"
+                }
+            else:
+                print(f"[TOOL] ❌ State update failed")
+                return {"success": False, "message": "Failed to update state"}
+                
         except Exception as e:
-            return {"message": f"Error: {e}"}
+            print(f"[TOOL] ❌ Error: {e}")
+            return {"success": False, "message": f"Error: {e}"}
 
+    async def generate_greeting(self, session):
+        """
+        Generate initial greeting - OPTIMIZED for speed.
+        
+        Optimizations:
+        - Uses full name from onboarding_details (no fallback cascade)
+        - No last conversation context (not needed for first greeting)
+        - Minimal memory fetch (top 2 categories only)
+        - Reduced context size for faster LLM response
+        
+        Expected latency: ~800ms (vs ~1850ms for full context)
+        """
+        await self.broadcast_state("thinking")
+        
+        # Session validation
+        if not hasattr(session, '_started') or not session._started:
+            print(f"[GREETING] ⚠️ Session not started yet, waiting...")
+            for i in range(10):
+                await asyncio.sleep(0.2)
+                if hasattr(session, '_started') and session._started:
+                    print(f"[GREETING] ✓ Session ready after {(i+1)*0.2}s")
+                    break
+            else:
+                print(f"[GREETING] ❌ Session still not ready after 2s - aborting")
+                return
+
+        user_id = get_current_user_id()
+        if not user_id:
+            print(f"[GREETING] ⚠️ No user_id - sending generic greeting")
+            await session.generate_reply(instructions=self._base_instructions)
+            return
+        
+        try:
+            # Parallel fetch: profile + context (onboarding_details has full name)
+            profile_task = self.profile_service.get_profile_async(user_id)
+            context_task = self.conversation_context_service.get_context(user_id)
+            
+            profile, context_data = await asyncio.gather(
+                profile_task, context_task, return_exceptions=True
+            )
+            
+            # Get full name from onboarding_details (single source, no fallback)
+            user_name = None
+            if context_data and not isinstance(context_data, Exception):
+                user_name = context_data.get("user_name")
+            
+            # Fetch only FACT and INTEREST categories (most important for greeting)
+            memories_by_category = {}
+            try:
+                categories = ['FACT', 'INTEREST']  # Reduced from 8 to 2
+                memories_by_category_raw = self.memory_service.get_memories_by_categories_batch(
+                    categories=categories,
+                    limit_per_category=2,  # Reduced from 3 to 2
+                    user_id=user_id
+                )
+                memories_by_category = {
+                    cat: [m['value'] for m in mems]
+                    for cat, mems in memories_by_category_raw.items()
+                    if mems
+                }
+            except Exception as e:
+                print(f"[GREETING] Memory fetch failed (non-critical): {e}")
+            
+            # Build minimal context for greeting
+            mem_sections = []
+            for category in ['FACT', 'INTEREST']:
+                if category in memories_by_category:
+                    values = memories_by_category[category]
+                    if values:
+                        mem_list = "\n".join([f"    • {(v or '')[:80]}" for v in values[:2]])
+                        mem_sections.append(f"  {category}:\n{mem_list}")
+            
+            categorized_mems = "\n".join(mem_sections) if mem_sections else "  (Building your profile)"
+            
+            # Minimal profile (first 200 chars only for greeting)
+            profile_text = "(New user - building profile)"
+            if profile and not isinstance(profile, Exception):
+                profile_text = profile[:200] if len(profile) > 200 else profile
+            
+            name_text = user_name or "دوست"  # Use "friend" in Urdu if no name
+            
+            # Compact greeting context (50% smaller than full context)
+            context_block = f"""
+    🎯 GREETING CONTEXT (First Interaction):
+    
+    Name: {name_text}
+    Profile: {profile_text}
+    
+    Quick Facts:
+    {categorized_mems}
+    
+    Task: Warm, personal Urdu greeting (2 sentences).
+    {'Use their name: ' + name_text if user_name else 'Greet warmly'}
+    """
+            
+            full_instructions = f"""{self._base_instructions}
+            
+    {context_block}
+    """
+            
+            print(f"[GREETING] Prompt: {len(full_instructions)} chars (optimized)")
+            print(f"[GREETING] Name: '{user_name}', Profile: {bool(profile)}, Memories: {len(memories_by_category)}")
+            
+            await session.generate_reply(instructions=full_instructions)
+            logging.info(f"[GREETING] Generated with {len(context_block)} chars context")
+            
+        except Exception as e:
+            logging.error(f"[GREETING] Error: {e}")
+            print(f"[GREETING] ❌ Exception: {type(e).__name__}: {str(e)}")
+            if "isn't running" not in str(e):
+                await session.generate_reply(instructions=self._base_instructions)
+    
+    async def generate_response(self, session, user_text: str):
+        """
+        Generate response to user input - FULL context with last conversation.
+        
+        Features:
+        - Complete memory fetch (all 8 categories)
+        - Last conversation context included
+        - Full profile (400 chars)
+        - Conversation state & trust score
+        
+        Expected latency: ~1850ms (full context)
+        """
+        await self.broadcast_state("thinking")
+        
+        # Session validation
+        if not hasattr(session, '_started') or not session._started:
+            print(f"[RESPONSE] ⚠️ Session not started yet, waiting...")
+            for i in range(10):
+                await asyncio.sleep(0.2)
+                if hasattr(session, '_started') and session._started:
+                    print(f"[RESPONSE] ✓ Session ready after {(i+1)*0.2}s")
+                    break
+            else:
+                print(f"[RESPONSE] ❌ Session still not ready after 2s - aborting")
+                return
+        
+        user_id = get_current_user_id()
+        if not user_id:
+            print(f"[RESPONSE] ⚠️ No user_id available")
+            await session.generate_reply(instructions=self._base_instructions)
+            return
+            
+        try:
+            # Parallel fetch: profile + context + state
+            profile_task = self.profile_service.get_profile_async(user_id)
+            context_task = self.conversation_context_service.get_context(user_id)
+            state_task = self.conversation_state_service.get_state(user_id)
+
+            profile, context_data, conversation_state = await asyncio.gather(
+                profile_task, context_task, state_task, return_exceptions=True
+            )
+
+            # Get name from context only (no fallback cascade)
+            user_name = None
+            if context_data and not isinstance(context_data, Exception):
+                user_name = context_data.get("user_name")
+
+            # Process profile
+            profile_text = "(Building from conversation)"
+            if profile and not isinstance(profile, Exception):
+                profile_text = profile[:400] if len(profile) > 400 else profile
+
+            # Process conversation state
+            if isinstance(conversation_state, Exception) or not conversation_state:
+                conversation_state = {"stage": "ORIENTATION", "trust_score": 2.0}
+
+            # Fetch ALL memory categories for complete context
+            categories = ['FACT', 'GOAL', 'INTEREST', 'EXPERIENCE', 'PREFERENCE', 'RELATIONSHIP', 'PLAN', 'OPINION']
+            memories_by_category = {}
+            try:
+                memories_by_category_raw = self.memory_service.get_memories_by_categories_batch(
+                    categories=categories,
+                    limit_per_category=3,
+                    user_id=user_id
+                )
+                memories_by_category = {
+                    cat: [m['value'] for m in mems] 
+                    for cat, mems in memories_by_category_raw.items() 
+                    if mems
+                }
+            except Exception as e:
+                print(f"[RESPONSE] Memory batch fetch failed: {e}, using fallback")
+                for category in categories:
+                    try:
+                        mems = self.memory_service.get_memories_by_category(category, limit=3, user_id=user_id)
+                        if mems:
+                            memories_by_category[category] = [m['value'] for m in mems]
+                    except Exception:
+                        pass
+
+
+            # Build compact memory summary (reduce prompt size for faster LLM response)
+            mem_sections = []
+            if memories_by_category:
+                # Prioritize most important categories
+                priority_cats = ['FACT', 'INTEREST', 'GOAL', 'RELATIONSHIP']
+                for category in priority_cats:
+                    if category in memories_by_category:
+                        values = memories_by_category[category]
+                        if values:
+                            # Limit to 2 memories per category, 100 chars each
+                            mem_list = "\n".join([f"    • {(v or '')[:100]}" for v in values[:2]])
+                            mem_sections.append(f"  {category}:" + "\n" + mem_list)
+
+            categorized_mems = "\n".join(mem_sections) if mem_sections else "  (No prior memories)"
+
+            # Get last conversation context
+            last_conversation_context = self._get_last_conversation_context(conversation_state)
+            
+            # Build context parts separately to avoid f-string issues
+            last_context_part = ""
+            if last_conversation_context:
+                last_context_part = "Last Conversation Context:\n" + last_conversation_context + "\n"
+            
+            # Prepare profile text
+            profile_text = "(Building from conversation)"
+            if profile:
+                profile_text = profile[:400] if len(profile) > 400 else profile
+            
+            # Prepare name text
+            name_text = user_name or "Unknown - ask naturally"
+            
+            # Build rules section separately
+            rules_section = """Rules:
+            ✅ Use their name and reference memories naturally
+            ❌ Don't ask for info already shown above
+            ⚠️  If user asks "what do you know about me?" -> CALL getCompleteUserInfo() tool for full data!"""
+            
+            # Compact context block (reduce prompt size to prevent timeouts)
+            context_block = f"""
+            🎯 QUICK CONTEXT (for reference - NOT complete):
+
+            Name: {name_text}
+            Stage: {conversation_state['stage']} (Trust: {conversation_state['trust_score']:.1f}/10)
+            
+            Profile (partial): {profile_text}
+
+            Recent Memories (sample only):
+            {categorized_mems}
+
+            {last_context_part}
+
+            {rules_section}
+        """
+            base = self._base_instructions
+            
+            # Precompute callout_2 to avoid multiline expression in f-string
+            callout_2 = (
+                "Reference something specific from their profile or memories above"
+                if (profile or memories_by_category) else
+                "Start building rapport - ask about them naturally"
+            )
+
+            if greet:
+                # Compact greeting prompt (reduce size for faster response)
+                full_instructions = f"""{base}
+
+                {context_block}
+
+                Task: First greeting in Urdu (2 short sentences)
+                {'Use name: ' + user_name if user_name else 'Greet warmly'}
+                {callout_2}
+                """
+                print(f"[DEBUG][PROMPT] Greeting prompt length: {len(full_instructions)} chars")
+                print(f"[DEBUG][PROMPT] Context block length: {len(context_block)} chars")
+                print(f"[DEBUG][PROMPT] User name: '{user_name}'")
+                print(f"[DEBUG][PROMPT] Has profile: {profile is not None}")
+                print(f"[DEBUG][PROMPT] Memory categories: {list(memories_by_category.keys())}")
+
+                await session.generate_reply(instructions=full_instructions)
+
+            else:
+                # Compact response prompt (reduce size for faster response)
+                full_instructions = f"""{base}
+
+                {context_block}
+
+                User said: "{user_text}"
+
+                Task: Respond in Urdu (2-3 sentences)
+                {'Use name: ' + user_name if user_name else 'Be warm'}
+                Reference context naturally.
+                """
+                print(f"[DEBUG][PROMPT] Response prompt length: {len(full_instructions)} chars")
+                print(f"[DEBUG][PROMPT] User text: '{user_text[:100]}'")
+
+                await session.generate_reply(instructions=full_instructions)
+
+            logging.info(f"[CONTEXT] Generated reply with {len(context_block)} chars of context")
+            
+            # Don't broadcast "listening" here - TTS playback happens asynchronously
+            # State will be updated via on_agent_speech_committed callback
+            
+        except Exception as e:
+            logging.error(f"[RESPONSE] Error in generate_response: {e}")
+            print(f"[RESPONSE] ❌ Exception: {type(e).__name__}: {str(e)}")
+            import traceback
+            print(f"[RESPONSE] Traceback: {traceback.format_exc()}")
+            # Don't try to generate reply if session isn't running
+            if "isn't running" not in str(e):
+                try:
+                    await session.generate_reply(instructions=self._base_instructions)
+                except Exception as fallback_error:
+                    print(f"[RESPONSE] ❌ Fallback also failed: {fallback_error}")
+            else:
+                print(f"[RESPONSE] ⚠️ Session not running - skipping reply generation")
+
+    async def on_agent_speech_started(self, turn_ctx):
+        """
+        LiveKit Callback: Called when agent starts speaking (TTS playback begins)
+        Best Practice: Update UI state to show agent is speaking
+        """
+        logging.info(f"[AGENT] Started speaking")
+        await self.broadcast_state("speaking")
+    
+    async def on_agent_speech_committed(self, turn_ctx):
+        """
+        LiveKit Callback: Called when agent finishes generating and committing speech
+        Best Practice: Transition back to listening after speech is committed
+        """
+        logging.info(f"[AGENT] Speech committed - transitioning to listening")
+        await self.broadcast_state("listening")
+    
+    async def on_user_speech_started(self, turn_ctx):
+        """
+        LiveKit Callback: Called when user starts speaking (VAD detected speech)
+        Best Practice: Update UI to show user is speaking (stops "listening" animation)
+        """
+        logging.info(f"[USER] Started speaking")
+        # Note: We don't broadcast state here to avoid flickering on short utterances
+    
     async def on_user_turn_completed(self, turn_ctx, new_message):
         """
-        Automatically save user input as memory AND update profiles + RAG system.
-        ZERO-LATENCY: All processing happens in background without blocking responses.
+        LiveKit Callback: Save user input to memory and update profile (background)
+        Best Practice: Non-blocking background processing for zero latency
         """
         user_text = new_message.text_content or ""
-        print(f"[USER INPUT] {user_text}")
+        logging.info(f"[USER] {user_text[:80]}")
+        print(f"[STATE] 🎤 User finished speaking")
 
         if not can_write_for_current_user():
-            print("[AUTO PROCESSING] Skipped (no valid user_id or no DB)")
             return
-
-        # Fire-and-forget background processing (zero latency impact)
-        asyncio.create_task(self._process_with_rag_background(user_text))
+        
+        # Background processing (zero latency) - track task to prevent leaks
+        task = asyncio.create_task(self._process_background(user_text))
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
     
-    async def _process_with_rag_background(self, user_text: str):
-        """Background processing with RAG integration - runs asynchronously."""
+    async def cleanup(self):
+        """Cleanup background tasks on shutdown"""
+        if self._background_tasks:
+            print(f"[CLEANUP] Waiting for {len(self._background_tasks)} background tasks...")
+            await asyncio.gather(*self._background_tasks, return_exceptions=True)
+            print(f"[CLEANUP] ✓ All background tasks completed")
+    
+    def _get_last_conversation_context(self, conversation_state: dict) -> str:
+        """
+        Get last conversation context for first response generation.
+        
+        Args:
+            conversation_state: Current conversation state with last_ fields
+            
+        Returns:
+            Formatted string with last conversation context
+        """
+        if not conversation_state:
+            return ""
+        
+        context_parts = []
+        
+        # Add last conversation timestamp
+        if conversation_state.get("last_conversation_at"):
+            try:
+                last_time = datetime.fromisoformat(conversation_state["last_conversation_at"].replace('Z', '+00:00'))
+                time_diff = datetime.now(last_time.tzinfo) - last_time
+                
+                if time_diff.days > 0:
+                    context_parts.append(f"آخری بات چیت {time_diff.days} دن پہلے ہوئی تھی")
+                elif time_diff.seconds > 3600:
+                    hours = time_diff.seconds // 3600
+                    context_parts.append(f"آخری بات چیت {hours} گھنٹے پہلے ہوئی تھی")
+                elif time_diff.seconds > 60:
+                    minutes = time_diff.seconds // 60
+                    context_parts.append(f"آخری بات چیت {minutes} منٹ پہلے ہوئی تھی")
+                else:
+                    context_parts.append("آپ نے ابھی بات چیت کی تھی")
+            except:
+                pass
+        
+        # Add last summary
+        if conversation_state.get("last_summary"):
+            summary = conversation_state["last_summary"]
+            if len(summary) > 100:
+                summary = summary[:100] + "..."
+            context_parts.append(f"آخری بات چیت کا خلاصہ: {summary}")
+        
+        # Add last topics
+        if conversation_state.get("last_topics") and len(conversation_state["last_topics"]) > 0:
+            topics = ", ".join(conversation_state["last_topics"][:3])  # Limit to 3 topics
+            context_parts.append(f"آخری موضوعات: {topics}")
+        
+        if context_parts:
+            return "\n".join(context_parts)
+        return ""
+    
+    async def _process_background(self, user_text: str, assistant_response: str = None):
+        """Background processing - index in RAG, update profile, and track conversation context (LLM handles memory storage via tools)"""
         try:
             user_id = get_current_user_id()
             if not user_id:
                 return
             
-            print(f"[BACKGROUND] Processing user input with RAG...")
-            start_time = time.time()
+            if not user_text:
+                return
             
-            # Get or create RAG system for this user
-            rag = get_or_create_rag(user_id, os.getenv("OPENAI_API_KEY"))
+            logging.info(f"[BACKGROUND] Processing: {user_text[:50] if len(user_text) > 50 else user_text}...")
             
-            # Categorize input
-            category = categorize_user_input(user_text)
-            
-            # Save to traditional memory (Supabase)
+            # Categorize for RAG metadata (but don't auto-save to memory table)
+            category = await asyncio.to_thread(categorize_user_input, user_text, self.memory_service)
             ts_ms = int(time.time() * 1000)
-            memory_key = f"user_input_{ts_ms}"
-            print(f"[AUTO MEMORY] Saving: [{category}] {memory_key}")
             
-            memory_success = save_memory(category, memory_key, user_text)
-            if memory_success:
-                print(f"[AUTO MEMORY] ✓ Saved to Supabase")
+            # ✅ Index in RAG for semantic search (without storing in memory table)
+            # LLM will use storeInMemory() tool with consistent keys when needed
+            if self.rag_service:
+                self.rag_service.add_memory_background(
+                    text=user_text,
+                    category=category,
+                    metadata={"timestamp": ts_ms}
+                )
+                logging.info(f"[RAG] ✅ Indexed for search (memory storage handled by LLM tools)")
             
-            # Add to RAG system in background (non-blocking)
-            rag.add_memory_background(
-                text=user_text,
-                category=category,
-                metadata={"key": memory_key, "timestamp": ts_ms}
-            )
-            print(f"[RAG] ✓ Queued for indexing")
+            # Update profile - use async method with explicit user_id
+            existing_profile = await self.profile_service.get_profile_async(user_id)
             
-            # Update profile
-            existing_profile = get_user_profile()
-            generated_profile = generate_user_profile(user_text, existing_profile)
+            # Skip trivial inputs
+            if len(user_text.strip()) > 15:
+                generated_profile = await asyncio.to_thread(
+                    self.profile_service.generate_profile,
+                    user_text,
+                    existing_profile
+                )
+                
+                if generated_profile and generated_profile != existing_profile:
+                    await self.profile_service.save_profile_async(generated_profile, user_id)
+                    logging.info(f"[PROFILE] ✅ Updated")
             
-            if generated_profile and generated_profile != existing_profile:
-                profile_success = save_user_profile(generated_profile)
-                if profile_success:
-                    print(f"[AUTO PROFILE] ✓ Updated")
-            else:
-                print(f"[AUTO PROFILE] No new info")
+            # Update conversation context (last messages, summary, topics) if we have assistant response
+            if assistant_response:
+                try:
+                    await self.conversation_state_service.update_conversation_context(
+                        user_message=user_text,
+                        assistant_message=assistant_response,
+                        user_id=user_id
+                    )
+                except Exception as e:
+                    print(f"[BACKGROUND] Conversation context update failed: {e}")
             
-            elapsed = time.time() - start_time
-            print(f"[BACKGROUND] ✓ Completed in {elapsed:.2f}s (RAG indexing continues in background)")
+            # For now, we'll update conversation context in a separate background task
+            # that captures the user message and updates last_conversation_at
+            try:
+                await self.conversation_state_service.update_state(
+                    last_user_message=user_text,
+                    last_conversation_at=datetime.utcnow().isoformat(),
+                    user_id=user_id
+                )
+            except Exception as e:
+                print(f"[BACKGROUND] Last conversation update failed: {e}")
+            
+            # Update conversation state automatically
+            try:
+                state_update_result = await self.conversation_state_service.auto_update_from_interaction(
+                    user_input=user_text,
+                    user_profile=existing_profile or "",
+                    user_id=user_id
+                )
+                
+                if state_update_result.get("action_taken") != "none":
+                    logging.info(f"[STATE] ✅ Updated: {state_update_result['action_taken']}")
+                    if state_update_result.get("action_taken") == "stage_transition":
+                        old_stage = state_update_result["old_state"]["stage"]
+                        new_stage = state_update_result["new_state"]["stage"]
+                        logging.info(f"[STATE] 🎯 Stage transition: {old_stage} → {new_stage}")
+            except Exception as e:
+                logging.error(f"[STATE] Background update failed: {e}")
+            
+            logging.info(f"[BACKGROUND] ✅ Complete")
             
         except Exception as e:
-            print(f"[BACKGROUND ERROR] {e}")
-
-
-# ---------------------------
-# Prewarm (process-level cache)
-# ---------------------------
-def prewarm_fnc(proc: JobProcess):
-    """
-    Load heavy assets once per process and stash them in proc.userdata
-    so new jobs can start instantly without reloading models/resources.
-    """
-    if "vad" not in proc.userdata:
-        proc.userdata["vad"] = silero.VAD.load(
-            min_silence_duration=0.5,   # snappier turn-taking
-            activation_threshold=0.5,    # default sensitivity
-            min_speech_duration=0.1,     # accept short utterances
-        )
-    if "tts" not in proc.userdata:
-        proc.userdata["tts"] = TTS(voice_id="17", output_format="MP3_22050_32")
-
-
-# ---------------------------
-# Accept jobs intentionally
-# ---------------------------
-async def request_fnc(req: JobRequest):
-    """
-    Hook to accept/reject jobs and set the agent participant's name/attributes.
-    Great for quotas/allowlists and quick participant tagging.
-    """
-    await req.accept(
-        name="Humraaz",
-        attributes={"role": "agent", "app": "humraaz"},
-    )
-
-
-# ---------------------------
-# Helper: pick user_id robustly
-# ---------------------------
-def _resolve_user_id(
-    participant: rtc.RemoteParticipant,
-    job_metadata: Optional[str],
-) -> Optional[str]:
-    # 1) job metadata: {"user_id": "<uuid>"}
-    try:
-        meta = json.loads(job_metadata or "{}")
-        if isinstance(meta, dict) and meta.get("user_id"):
-            return meta["user_id"]
-    except Exception:
-        pass
-
-    # 2) participant attributes (set at token mint time)
-    try:
-        # attributes is a dict-like (SDK specific); adapt if your SDK differs
-        attrs = getattr(participant, "attributes", {}) or {}
-        val = attrs.get("user.id") or attrs.get("user_id")
-        if val:
-            return val
-    except Exception:
-        pass
-
-    # 3) parse identity (supports "user-<uuid>" or raw UUID)
-    try:
-        return extract_uuid_from_identity(getattr(participant, "identity", None))
-    except Exception:
-        return None
+            logging.error(f"[BACKGROUND ERROR] {e}")
 
 
 # ---------------------------
 # Entrypoint
 # ---------------------------
-async def entrypoint(ctx):
+async def entrypoint(ctx: agents.JobContext):
     """
-    LiveKit agent entrypoint:
-      - Connect with AUDIO_ONLY (voice-first)
-      - Register room listeners
-      - Wait deterministically for the single remote participant
-      - Resolve user_id and kick off background personalization loads
-      - Start AgentSession with prewarmed VAD/TTS and minimal LLM/STT config
-      - Send a short first reply
+    LiveKit agent entrypoint - simplified pattern
     """
-    room = ctx.room
-    print(f"[ENTRYPOINT] starting for room={room.name} job_id={ctx.job.id}")
+    print("=" * 80)
+    print(f"[ENTRYPOINT] 🚀 NEW JOB RECEIVED")
+    print(f"[ENTRYPOINT] Room: {ctx.room.name}")
+    print(f"[ENTRYPOINT] Job ID: {ctx.job.id if ctx.job else 'N/A'}")
+    print("=" * 80)
 
-    # ---- Room listeners BEFORE connect ----
-    @room.on("participant_connected")
-    def _on_participant_connected(p):
-        print(f"[EVENT] participant_connected: {getattr(p, 'identity', None)}")
-
-    @room.on("participant_disconnected")
-    def _on_participant_disconnected(p):
-        print(f"[EVENT] participant_disconnected: {getattr(p, 'identity', None)}")
-        # If no remote participants remain, shut down gracefully
-        try:
-            remaining = list(room.remote_participants.values())
-            if len(remaining) == 0:
-                print("[ENTRYPOINT] last participant left → shutting down")
-                ctx.shutdown(reason="All participants left")
-        except Exception as e:
-            print(f"[EVENT] disconnect handler error: {e}")
-
-    # ---- Connect (explicit) ----
-    await ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
-    print("[ENTRYPOINT] connected to room")
-
-    # ---- Deterministic wait for the single user ----
+    # Initialize infrastructure
     try:
-        participant: rtc.RemoteParticipant = await asyncio.wait_for(ctx.wait_for_participant(), timeout=20)
-    except asyncio.TimeoutError:
-        participant = None
+        await get_connection_pool()
+        print("[ENTRYPOINT] ✓ Connection pool initialized")
+    except Exception as e:
+        print(f"[ENTRYPOINT] Warning: Connection pool initialization failed: {e}")
+    
+    try:
+        redis_cache = await get_redis_cache()
+        if redis_cache.enabled:
+            print("[ENTRYPOINT] ✓ Redis cache initialized")
+    except Exception as e:
+        print(f"[ENTRYPOINT] Warning: Redis cache initialization failed: {e}")
+    
+    try:
+        batcher = await get_db_batcher(supabase)
+        print("[ENTRYPOINT] ✓ Database batcher initialized")
+    except Exception as e:
+        print(f"[ENTRYPOINT] Warning: Database batcher initialization failed: {e}")
 
+    # CRITICAL: Connect to the room first
+    print("[ENTRYPOINT] Connecting to LiveKit room...")
+    await ctx.connect()
+    print("[ENTRYPOINT] ✓ Connected to room")
+
+    # Initialize media + agent with enhanced debugging
+    print("[TTS] 🎤 Initializing TTS with voice: v_8eelc901")
+    
+    # Check TTS environment variables
+    uplift_api_key = os.environ.get("UPLIFTAI_API_KEY")
+    uplift_base_url = os.environ.get("UPLIFTAI_BASE_URL", "wss://api.upliftai.org")
+    
+    print(f"[TTS] Environment check:")
+    print(f"[TTS] - UPLIFTAI_API_KEY: {'✓ Set' if uplift_api_key else '❌ Missing'}")
+    print(f"[TTS] - UPLIFTAI_BASE_URL: {uplift_base_url}")
+    
+    if not uplift_api_key:
+        print("[TTS] ⚠️ WARNING: UPLIFTAI_API_KEY not set! TTS will fail!")
+        print("[TTS] 💡 Set UPLIFTAI_API_KEY environment variable")
+    
+    try:
+        tts = TTS(voice_id="v_8eelc901", output_format="MP3_22050_32")
+        print("[TTS] ✓ TTS instance created successfully")
+    except Exception as e:
+        print(f"[TTS] ❌ TTS initialization failed: {e}")
+        print("[TTS] 🔄 Attempting fallback TTS configuration...")
+        # Fallback with explicit parameters
+        try:
+            tts = TTS(
+                voice_id="v_8eelc901", 
+                output_format="MP3_22050_32",
+                base_url=uplift_base_url,
+                api_key=uplift_api_key
+            )
+            print("[TTS] ✓ Fallback TTS created successfully")
+        except Exception as e2:
+            print(f"[TTS] ❌ Fallback TTS also failed: {e2}")
+            raise e2
+    
+    # BEST PRACTICE: Wait for participant FIRST (more reliable)
+    # This ensures participant is in room before session initialization
+    print("[ENTRYPOINT] Waiting for participant to join...")
+    participant = await wait_for_participant(ctx.room, timeout_s=20)
     if not participant:
-        print("[ENTRYPOINT] no participant within timeout → proceed without DB writes")
-    else:
-        print(f"[ENTRYPOINT] participant joined: identity={participant.identity} name={participant.name}")
+        print("[ENTRYPOINT] ⚠️ No participant joined within timeout")
+        print("[ENTRYPOINT] Exiting gracefully...")
+        return
 
-    # ---- Resolve user_id (metadata → attributes → identity) ----
-    user_id = _resolve_user_id(participant, getattr(ctx.job, "metadata", None)) if participant else None
+    print(f"[ENTRYPOINT] ✓ Participant joined: sid={participant.sid}, identity={participant.identity}")
+    
+    # Extract user_id early to load context
+    user_id = extract_uuid_from_identity(participant.identity)
+    
+    # STEP 1: Create initial ChatContext
+    initial_ctx = ChatContext()
+    
+    # STEP 2: Load user context BEFORE creating assistant (if we have valid user_id)
     if user_id:
         set_current_user_id(user_id)
-        print(f"[IDENTITY] resolved user_id={user_id}")
+        print(f"[DEBUG][USER_ID] ✅ Set current user_id to: {user_id}")
+        
+        try:
+            # Ensure user profile exists
+            user_service = UserService(supabase)
+            await asyncio.to_thread(user_service.ensure_profile_exists, user_id)
+            print("[PROFILE] ✓ User profile ensured")
+            
+            # Load profile and memories for initial context
+            print("[CONTEXT] Loading user data for initial context...")
+            profile_service = ProfileService(supabase)
+            memory_service = MemoryService(supabase)
+            
+            # Load profile
+            profile = await asyncio.to_thread(profile_service.get_profile, user_id)
+            
+            # Load recent memories from key categories
+            categories = ['FACT', 'GOAL', 'INTEREST', 'PREFERENCE', 'RELATIONSHIP']
+            recent_memories = memory_service.get_memories_by_categories_batch(
+                categories=categories,
+                limit_per_category=3,
+                user_id=user_id
+            )
+            
+            # Build initial context message
+            context_parts = []
+            
+            if profile and len(profile.strip()) > 0:
+                context_parts.append(f"User profile: {profile[:300]}...")
+                print(f"[CONTEXT]   ✓ Profile loaded ({len(profile)} chars)")
+            
+            for category, mems in recent_memories.items():
+                if mems:
+                    mem_values = [m['value'] for m in mems[:3]]
+                    context_parts.append(f"{category}: {', '.join(mem_values)}")
+                    print(f"[CONTEXT]   ✓ {category}: {len(mems)} memories")
+            
+            if context_parts:
+                # Add as assistant message (internal context, not shown to user)
+                initial_ctx.add_message(
+                    role="assistant",
+                    content="[Internal context - User information loaded]\n" + "\n".join(context_parts)
+                )
+                print(f"[CONTEXT] ✅ Loaded {len(context_parts)} context items into ChatContext")
+            else:
+                print("[CONTEXT] ℹ️  No existing user data found, starting fresh")
+        except Exception as e:
+            print(f"[CONTEXT] ⚠️ Failed to load initial context: {e}")
+            print("[CONTEXT] Continuing with empty context")
     else:
-        print("[IDENTITY] could not resolve user_id; running without persistence")
-
-    # ---- Background personalization (after identity) ----
-    if user_id:
-        # Stagger heavy background work to after first reply
-        async def _delayed_bg():
-            await asyncio.sleep(1.5)
-            try:
-                rag = get_or_create_rag(user_id, os.getenv("OPENAI_API_KEY"))
-                await rag.load_from_supabase(supabase, limit=500)
-                print("[RAG] background load completed")
-            except Exception as e:
-                print(f"[RAG] init error: {e}")
-            try:
-                await initialize_user_from_onboarding(user_id)
-                print("[ONBOARDING] background init completed")
-            except Exception as e:
-                print(f"[ONBOARDING] init error: {e}")
-        asyncio.create_task(_delayed_bg())
-
-    # ---- Build and start AgentSession (uses prewarmed assets) ----
-    try:
-        tts = ctx.proc.userdata["tts"]
-        vad = ctx.proc.userdata["vad"]
-    except KeyError:
-        # Safety: if prewarm somehow didn't run
-        prewarm_fnc(ctx.proc)
-        tts = ctx.proc.userdata["tts"]
-        vad = ctx.proc.userdata["vad"]
-
-    assistant = Assistant()
+        print("[CONTEXT] No valid user_id, creating assistant with empty context")
+    
+    # STEP 3: Create assistant WITH context
+    assistant = Assistant(chat_ctx=initial_ctx)
+    
+    # Set room reference for state broadcasting
+    assistant.set_room(ctx.room)
+    
+    # Configure LLM with increased timeout for context-heavy prompts
+    llm = lk_openai.LLM(
+        model="gpt-4o-mini",
+        temperature=0.8,  # More creative responses
+    )
+    
+    # Pre-warm TTS connection in background (non-blocking)
+    print("[TTS] 🔥 Pre-warming TTS connection...")
+    async def warm_tts():
+        try:
+            # Trigger TTS connection early to avoid lazy init delay
+            test_stream = tts.stream()
+            await test_stream.aclose()
+            print("[TTS] ✅ TTS connection pre-warmed")
+        except Exception as e:
+            print(f"[TTS] ⚠️ Pre-warm failed (will retry on actual use): {e}")
+    
+    # Start TTS warm-up in background
+    asyncio.create_task(warm_tts())
+    
+    # LiveKit Best Practice: Optimize VAD for real-world conditions
+    # Lower activation threshold = more sensitive (might pick up background noise)
+    # Higher activation threshold = less sensitive (might miss quiet speech)
     session = AgentSession(
         stt=lk_openai.STT(model="gpt-4o-transcribe", language="ur"),
-        llm=lk_openai.LLM(model="gpt-4o-mini", temperature=0.6),
+        llm=llm,
         tts=tts,
         vad=silero.VAD.load(
-            min_silence_duration=0.4,   # faster end of speech
-            activation_threshold=0.55,   # slightly more sensitive
-            min_speech_duration=0.1,
+            min_silence_duration=0.5,      # Time to wait before considering speech ended
+            activation_threshold=0.6,      # Increased from 0.5 to reduce false triggers
+            min_speech_duration=0.15,      # Increased from 0.1 to ignore brief noise
         ),
     )
 
-    # Optional: on job shutdown (per-job). Do NOT close process-level TTS here.
-    async def _on_shutdown():
+    # Start session with RoomInputOptions (best practice)
+    print("[SESSION INIT] Starting LiveKit session...")
+    await session.start(
+        room=ctx.room, 
+        agent=assistant,
+        room_input_options=RoomInputOptions()
+    )
+    print("[SESSION INIT] ✓ Session started and initialized")
+    
+    # Wait for session to fully initialize
+    await asyncio.sleep(0.5)
+    print("[SESSION INIT] ✓ Session initialization complete")
+
+    # Check if we have a valid user (already extracted and set earlier)
+    if not user_id:
+        print("[ENTRYPOINT] No valid user_id - sending generic greeting...")
+        await assistant.generate_greeting(session)
+        return
+    
+    # User_id already set earlier, just verify
+    print(f"[SESSION] 👤 User ID: {user_id[:8]}...")
+    print(f"[DEBUG][USER_ID] Verification - get_current_user_id(): {get_current_user_id()}")
+    
+    # OPTIMIZATION: Initialize RAG and load in background (non-blocking)
+    print(f"[RAG] Initializing for user {user_id[:8]}...")
+    rag_service = RAGService(user_id)
+    assistant.rag_service = rag_service
+    print(f"[RAG] ✅ RAG service attached (will load in background)")
+    
+    # Load RAG and prefetch data in parallel background tasks
+    # This allows the first greeting to happen immediately
+    async def load_rag_background():
+        """Load RAG memories in background"""
         try:
-            # session will close with the room; nothing heavy to close here
-            print("[SHUTDOWN] job shutdown callback executed")
-        except Exception:
-            pass
+            print(f"[RAG_BG] Loading memories in background...")
+            await asyncio.wait_for(
+                rag_service.load_from_database(supabase, limit=500),
+                timeout=10.0
+            )
+            rag_system = rag_service.get_rag_system()
+            if rag_system:
+                print(f"[RAG_BG] ✅ Loaded {len(rag_system.memories)} memories in background")
+        except Exception as e:
+            print(f"[RAG_BG] ⚠️ Background load failed: {e}")
+    
+    async def prefetch_background():
+        """Prefetch user data in background"""
+        try:
+            batcher = await get_db_batcher(supabase)
+            prefetch_data = await batcher.prefetch_user_data(user_id)
+            print(f"[BATCH_BG] ✅ Prefetched {prefetch_data.get('memory_count', 0)} memories in background")
+        except Exception as e:
+            print(f"[BATCH_BG] ⚠️ Prefetch failed: {e}")
+    
+    # Start background tasks (don't wait for them)
+    asyncio.create_task(load_rag_background())
+    asyncio.create_task(prefetch_background())
+    print("[OPTIMIZATION] ⚡ RAG and prefetch loading in background (non-blocking)")
 
-    ctx.add_shutdown_callback(_on_shutdown)
+    if supabase:
+        print("[SUPABASE] ✓ Connected")
+    else:
+        print("[SUPABASE] ✗ Not connected")
 
-    # Start streaming
-    await session.start(room=room, agent=assistant, room_input_options=RoomInputOptions())
-    print("[SESSION] started")
+    # LiveKit Best Practice: AgentSession handles audio subscription automatically
+    # No need to manually wait - the session's VAD will activate when audio is ready
+    print("[AUDIO] ✓ AgentSession managing audio subscription automatically")
+    
+    # Brief delay to allow WebRTC connection to stabilize (optional, but helps)
+    await asyncio.sleep(0.5)
 
-    # ---- First reply: explicitly call retrieveFromMemory for common keys ----
-    greet_name = (participant.name or participant.identity) if participant else "dost"
-    # Compact first turn: use consolidated info if available, with a small token budget
-    first_message_hint = (
-        "Call getCompleteUserInfo if available; otherwise keep it light."
-        f" Greet '{greet_name}' warmly in Urdu in 1–2 short sentences and ask one light question."
-    )
-    await session.generate_reply(instructions=first_message_hint, max_tokens=120)
-    print("[SESSION] first reply generated")
+    # Generate greeting with optimized context (fast greeting)
+    print("[GREETING] Generating optimized greeting...")
+    await assistant.generate_greeting(session)
+    print("[GREETING] ✅ Greeting sent!")
+    
+    # LiveKit Best Practice: Use event-based disconnection detection
+    # Set up disconnection event handler
+    print("[ENTRYPOINT] 🎧 Agent is now listening and ready for conversation...")
+    print("[ENTRYPOINT] Setting up event handlers...")
+    
+    # Create an event to signal when participant disconnects
+    disconnect_event = asyncio.Event()
+    
+    def on_participant_disconnected(participant_obj: rtc.RemoteParticipant):
+        """Handle participant disconnection"""
+        if participant_obj.sid == participant.sid:
+            print(f"[ENTRYPOINT] 📴 Participant {participant.identity} disconnected (event)")
+            disconnect_event.set()
+    
+    def on_track_subscribed(track: rtc.Track, publication: rtc.TrackPublication, participant_obj: rtc.RemoteParticipant):
+        """Track when audio/video tracks are subscribed - useful for debugging"""
+        if participant_obj.sid == participant.sid:
+            print(f"[TRACK] ✅ Subscribed to {publication.kind.name} track: {publication.sid}")
+    
+    def on_track_unsubscribed(track: rtc.Track, publication: rtc.TrackPublication, participant_obj: rtc.RemoteParticipant):
+        """Track when audio/video tracks are unsubscribed"""
+        if participant_obj.sid == participant.sid:
+            print(f"[TRACK] ❌ Unsubscribed from {publication.kind.name} track: {publication.sid}")
+    
+    # Register all event handlers
+    ctx.room.on("participant_disconnected", on_participant_disconnected)
+    ctx.room.on("track_subscribed", on_track_subscribed)
+    ctx.room.on("track_unsubscribed", on_track_unsubscribed)
+    print("[ENTRYPOINT] ✓ Event handlers registered (disconnect, track_subscribed, track_unsubscribed)")
+    
+    try:
+        print("[ENTRYPOINT] Waiting for participant to disconnect...")
+
+        await asyncio.wait_for(disconnect_event.wait(), timeout=3600)  # 1 hour max
+        print("[ENTRYPOINT] ✓ Session completed normally (participant disconnected)")
+        
+    except asyncio.TimeoutError:
+        print("[ENTRYPOINT] ⚠️ Session timeout reached (1 hour)")
+        
+    except Exception as e:
+        print(f"[ENTRYPOINT] ⚠️ Session ended with exception: {e}")
+        
+    finally:
+        # Cleanup
+        print("[ENTRYPOINT] 🧹 Cleaning up resources...")
+        
+        # Unregister all event handlers
+        try:
+            ctx.room.off("participant_disconnected", on_participant_disconnected)
+            ctx.room.off("track_subscribed", on_track_subscribed)
+            ctx.room.off("track_unsubscribed", on_track_unsubscribed)
+            print("[ENTRYPOINT] ✓ Event handlers unregistered")
+        except Exception as e:
+            print(f"[ENTRYPOINT] ⚠️ Error unregistering handlers: {e}")
+        # Cleanup assistant resources
+        if hasattr(assistant, 'cleanup'):
+            try:
+                await assistant.cleanup()
+                print("[ENTRYPOINT] ✓ Assistant cleanup completed")
+            except Exception as cleanup_error:
+                print(f"[ENTRYPOINT] ⚠️ Cleanup error: {cleanup_error}")
+        
+        print("[ENTRYPOINT] ✓ Entrypoint finished")
 
 
-# ---------------------------
-# Main (worker options)
-# ---------------------------
+def start_health_check_server():
+    """
+    Start HTTP server for platform health checks.
+    Railway and other platforms need HTTP endpoints to verify the service is alive.
+    """
+    async def health(request):
+        return web.Response(text="OK\n", status=200)
+    
+    async def run_server():
+        try:
+            app = web.Application()
+            app.router.add_get('/health', health)
+            app.router.add_get('/', health)
+            
+            runner = web.AppRunner(app)
+            await runner.setup()
+            site = web.TCPSite(runner, '0.0.0.0', 8080)
+            await site.start()
+            print("[HEALTH] ✓ HTTP health check server running on port 8080")
+            print("[HEALTH] Endpoints: GET / and GET /health")
+            print("[HEALTH] 🎯 Server is ready to receive health checks")
+            
+            # Keep server running indefinitely
+            while True:
+                await asyncio.sleep(3600)
+        except Exception as e:
+            print(f"[HEALTH] ❌ Server startup error: {e}")
+            raise
+    
+    # Run server in background thread
+    def thread_target():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(run_server())
+        except Exception as e:
+            print(f"[HEALTH] ❌ Health check server error: {e}")
+    
+    thread = threading.Thread(target=thread_target, daemon=True, name="HealthCheckServer")
+    thread.start()
+    print("[HEALTH] Background health check thread started")
+
+
+async def shutdown_handler():
+    """Gracefully shutdown connections and cleanup resources"""
+    print("[SHUTDOWN] Initiating graceful shutdown...")
+    
+    pool = get_connection_pool_sync()
+    if pool:
+        try:
+            await pool.close()
+            print("[SHUTDOWN] ✓ Connection pool closed")
+        except Exception as e:
+            print(f"[SHUTDOWN] Error closing connection pool: {e}")
+    
+    redis_cache = get_redis_cache_sync()
+    if redis_cache:
+        try:
+            await redis_cache.close()
+            print("[SHUTDOWN] ✓ Redis cache closed")
+        except Exception as e:
+            print(f"[SHUTDOWN] Error closing Redis cache: {e}")
+    
+    print("[SHUTDOWN] ✓ Shutdown complete")
+
+
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-
-    opts = WorkerOptions(
+    print("="*80)
+    print("🚀 Starting Companion Agent")
+    print("="*80)
+    
+    # Start health check HTTP server for Railway/platform health checks
+    print("[MAIN] 🏥 Starting health check server...")
+    start_health_check_server()
+    
+    # Give health server a moment to start
+    time.sleep(1.0)  # Increased from 0.5s to 1.0s
+    
+    print("[MAIN] ✅ Health check server should be running")
+    print("[MAIN] 🚀 Starting LiveKit agent worker...")
+    agents.cli.run_app(agents.WorkerOptions(
         entrypoint_fnc=entrypoint,
-        request_fnc=request_fnc,
-        prewarm_fnc=prewarm_fnc,
-        permissions=WorkerPermissions(
-            can_publish=True,
-            can_subscribe=True,
-            can_publish_data=True,
-            hidden=False,  # must be visible to publish audio
-        ),
-        # ROOM is default → one agent per room (ideal for single-user "agent room")
-        num_idle_processes=2,   # small warm pool to hide cold starts
-        drain_timeout=15 * 60,  # graceful deploys without dropping calls
-        # initialize_process_timeout can stay default unless your models are huge
-    )
+        initialize_process_timeout=5,
+    ))
 
-    cli.run_app(opts)
