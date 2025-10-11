@@ -22,6 +22,7 @@ import time
 from typing import Dict, List, Optional, Any
 from datetime import datetime, timedelta
 from supabase import Client
+from core.user_id import UserId, UserIdError
 from infrastructure.redis_cache import get_redis_cache
 from infrastructure.database_batcher import get_db_batcher
 
