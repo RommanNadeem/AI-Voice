@@ -187,7 +187,7 @@ from core.user_id import UserId
 user_id = "bb4a6f7c-1e1d-4db8-9fcd-f7095759aba2"
 
 # For DB operations - use full UUID
-profile = supabase.table("profiles").select("*").eq("id", user_id).execute()
+profile = supabase.table("profiles").select("*").eq("user_id", user_id).execute()
 
 # For logging - use display format
 print(f"Loading profile for {UserId.format_for_display(user_id)}")  # "bb4a6f7c..."

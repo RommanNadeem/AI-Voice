@@ -45,8 +45,8 @@ class UserService:
             logger.info(f"[USER SERVICE] Checking if profile exists for {UserId.format_for_display(user_id)}")
             print(f"[USER SERVICE] Checking if profile exists for {UserId.format_for_display(user_id)}")
             
-            # STRICT EQUALITY: profiles.user_id = :user_id (exact match on full UUID)
-            resp = self.supabase.table("profiles").select("id").eq("user_id", user_id).execute()
+            # STRICT EQUALITY: profiles.id = :user_id (exact match on full UUID)
+            resp = self.supabase.table("profiles").select("id").eq("id", user_id).execute()
             rows = getattr(resp, "data", []) or []
             
             exists = len(rows) > 0
@@ -68,6 +68,8 @@ class UserService:
         """
         Ensure a profile exists for the user_id in the profiles table.
         Creates one if it doesn't exist (upsert behavior).
+        
+        Note: profiles.id stores the UUID (same as user_id) to match FK constraints.
         
         Args:
             user_id: Full user UUID (not a prefix)
@@ -93,12 +95,13 @@ class UserService:
             if self.profile_exists(user_id):
                 return True
 
-            # Create profile (profiles table has user_id column for UUID)
+            # Create profile (profiles table uses id column for UUID, same as user_id)
             logger.info(f"[USER SERVICE] Creating new profile for {UserId.format_for_display(user_id)}")
             print(f"[USER SERVICE] Creating new profile for {UserId.format_for_display(user_id)}")
             
             profile_data = {
-                "user_id": user_id,  # profiles.user_id column stores the UUID
+                "id": user_id,  # profiles.id column stores the UUID (same as user_id)
+                "user_id": user_id,  # Keep both for consistency
                 "email": f"user_{user_id[:8]}@companion.local",
                 "is_first_login": True,
             }
@@ -144,6 +147,8 @@ class UserService:
         """
         Get user information from profiles table.
         
+        Note: Queries profiles.id column which stores the UUID.
+        
         Args:
             user_id: Full user UUID (not a prefix)
             
@@ -162,8 +167,8 @@ class UserService:
             return None
         
         try:
-            # Query by user_id column
-            resp = self.supabase.table("profiles").select("*").eq("user_id", user_id).execute()
+            # Query by id column (which stores the UUID)
+            resp = self.supabase.table("profiles").select("*").eq("id", user_id).execute()
             data = getattr(resp, "data", []) or []
             return data[0] if data else None
         except Exception as e:
@@ -173,6 +178,8 @@ class UserService:
     def update_user_profile(self, user_id: str, updates: dict) -> bool:
         """
         Update user profile fields.
+        
+        Note: Updates profiles.id column which stores the UUID.
         
         Args:
             user_id: Full user UUID (not a prefix)
@@ -193,8 +200,8 @@ class UserService:
             return False
         
         try:
-            # Update by user_id column
-            resp = self.supabase.table("profiles").update(updates).eq("user_id", user_id).execute()
+            # Update by id column (which stores the UUID)
+            resp = self.supabase.table("profiles").update(updates).eq("id", user_id).execute()
             if getattr(resp, "error", None):
                 print(f"[USER SERVICE] Update error: {resp.error}")
                 return False
