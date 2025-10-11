@@ -2,10 +2,13 @@
 Onboarding Service - Handles new user initialization from onboarding data
 """
 
+import logging
 from typing import Optional
 from supabase import Client
 from core.validators import get_current_user_id
 from core.config import Config
+
+logger = logging.getLogger(__name__)
 
 
 class OnboardingService:
@@ -26,33 +29,46 @@ class OnboardingService:
             return
         
         try:
-            print(f"[ONBOARDING SERVICE] Checking if user {user_id} needs initialization...")
+            logger.info(f"🔄 Checking if user {user_id[:8]} needs initialization...")
             
             # Check if profile already exists
             profile_resp = self.supabase.table("user_profiles").select("profile_text").eq("user_id", user_id).execute()
             has_profile = bool(profile_resp.data)
+            logger.info(f"  Profile exists: {has_profile}")
             
             # Check if memories already exist
             memory_resp = self.supabase.table("memory").select("id").eq("user_id", user_id).limit(1).execute()
             has_memories = bool(memory_resp.data)
+            logger.info(f"  Memories exist: {has_memories}")
             
             if has_profile and has_memories:
-                print(f"[ONBOARDING SERVICE] User already initialized, skipping")
+                logger.info(f"✓ User already fully initialized, skipping")
                 return
             
+            if not has_profile:
+                logger.warning(f"⚠️  Missing user_profiles row - will create")
+            if not has_memories:
+                logger.warning(f"⚠️  Missing memories - will create")
+            
             # Fetch onboarding details
-            result = self.supabase.table("onboarding_details").select("full_name, occupation, interests").eq("user_id", user_id).execute()
+            result = self.supabase.table("onboarding_details").select("full_name, gender, occupation, interests").eq("user_id", user_id).execute()
             
             if not result.data:
-                print(f"[ONBOARDING SERVICE] No onboarding data found for user {user_id}")
+                logger.error(f"❌ No onboarding_details found for user {user_id[:8]}")
+                logger.error(f"   User needs to complete onboarding first")
                 return
             
             onboarding = result.data[0]
             full_name = onboarding.get("full_name", "")
+            gender = onboarding.get("gender", "")
             occupation = onboarding.get("occupation", "")
             interests = onboarding.get("interests", "")
             
-            print(f"[ONBOARDING SERVICE] Found data - Name: {full_name}, Occupation: {occupation}")
+            logger.info(f"✓ Found onboarding data:")
+            logger.info(f"  Name: {full_name}")
+            logger.info(f"  Gender: {gender}")
+            logger.info(f"  Occupation: {occupation}")
+            logger.info(f"  Interests: {interests}")
             
             # Import services here to avoid circular dependency
             from services.profile_service import ProfileService
@@ -62,23 +78,31 @@ class OnboardingService:
             profile_service = ProfileService(self.supabase)
             memory_service = MemoryService(self.supabase)
             
-            # Detect gender from name for appropriate pronoun usage (will be stored with other memories)
+            # Determine pronouns from gender (stored with other memories)
             gender_info = None
-            if full_name:
-                try:
-                    gender_info = await profile_service.detect_gender_from_name(full_name, user_id)
-                    print(f"[ONBOARDING SERVICE] Gender detected: {gender_info['gender']} ({gender_info['pronouns']})")
-                except Exception as e:
-                    print(f"[ONBOARDING SERVICE] Gender detection failed: {e}")
+            if gender:
+                # Map gender to pronouns
+                pronouns_map = {
+                    "male": "he/him",
+                    "female": "she/her",
+                    "non-binary": "they/them",
+                    "other": "they/them"
+                }
+                pronouns = pronouns_map.get(gender.lower(), "they/them")
+                gender_info = {
+                    "gender": gender,
+                    "pronouns": pronouns
+                }
+                logger.info(f"✓ Gender info: {gender} ({pronouns})")
             
             # Create initial profile from onboarding data using async 250-char generator
             if not has_profile and any([full_name, occupation, interests]):
                 try:
                     created = await profile_service.create_profile_from_onboarding_async(user_id)
                     if created:
-                        print(f"[ONBOARDING SERVICE] ✓ Created initial profile (<=250 chars)")
+                        logger.info(f"✓ Created initial profile (<=250 chars)")
                 except Exception as e:
-                    print(f"[ONBOARDING SERVICE] Failed to create initial profile: {e}")
+                    logger.error(f"Failed to create initial profile: {e}")
             
             # Add memories for each onboarding field
             if not has_memories:
@@ -101,7 +125,7 @@ class OnboardingService:
                             memories_added += 1
                             rag.add_memory_background(f"Use {gender_info['pronouns']} pronouns for user", "PREFERENCE")
                         
-                        print(f"[ONBOARDING SERVICE] ✓ Stored gender: {gender_info['gender']} ({gender_info['pronouns']})")
+                        logger.info(f"✓ Stored gender: {gender_info['gender']} ({gender_info['pronouns']})")
                 
                 if occupation:
                     if memory_service.save_memory("FACT", "occupation", occupation, user_id):
@@ -122,10 +146,10 @@ class OnboardingService:
                         for interest in interest_list:
                             rag.add_memory_background(f"User is interested in {interest}", "INTEREST")
                 
-                print(f"[ONBOARDING SERVICE] ✓ Created {memories_added} memories from onboarding data")
+                logger.info(f"✓ Created {memories_added} memories from onboarding data")
             
-            print(f"[ONBOARDING SERVICE] ✓ User initialization complete")
+            logger.info(f"✓ User initialization complete")
             
         except Exception as e:
-            print(f"[ONBOARDING SERVICE] initialize_user_from_onboarding failed: {e}")
+            logger.error(f"initialize_user_from_onboarding failed: {e}", exc_info=True)
 

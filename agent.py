@@ -232,7 +232,9 @@ def extract_memory_key_value(user_text: str, category: str):
             return None
 
         return (key_norm, value)
-    except Exception:
+    except Exception as e:
+        logging.error(f"[MEMORY EXTRACTION] Failed to extract memory from text: {e}")
+        logging.error(f"[MEMORY EXTRACTION] User text: {user_text[:100]}")
         return None
 
 # ---------------------------
@@ -337,15 +339,16 @@ Advance conversation maturity using Social Penetration Theory, all while nurturi
 Before any significant tool call, state in one line the purpose and minimal required inputs.
 
 - **Remembering User Facts:**
-  - Use `retrieveFromMemory(category, key, value)` to recall user-shared facts, preferences, or details.
+  - Use `retrieveFromMemory(category, key)` to recall user-shared facts, preferences, or details.
   - Use `searchMemories(query, limit)` for semantic recalls, especially when user mentions people, places, habits, or recurring topics. Use sparingly (1 callback per 2–3 turns), avoid sensitive recalls unless user leads.
   - `createUserProfile(profile_input)`, `getUserProfile()`, `getUserState()`, `updateUserState(stage, trust_score)`, and `getUserGender()` are for managing user data/context.
-  - **Always** use `getCompleteUserInfo()` if user asks “what do you know about me?”
+  - **Always** use `getCompleteUserInfo()` if user asks "what do you know about me?"
 - **Storing User Facts:**
+  - **IMPORTANT:** Whenever a user shares personal information (name, preferences, facts, interests, relationships, goals, etc.), you MUST call `storeInMemory(category, key, value)` to save it.
   - Use `storeInMemory(category, key, value)` for concise user facts that streamline future chats.
   - Keys **must** be English and snake_case (`favorite_food`, `sister_name`, etc.). Never abbreviate or use Urdu in keys.
-  - Use `searchMemories` first; update, don’t duplicate. Example: Update `favorite_food` rather than create new.
-  - Confirm before saving uncertain details – ask user if unsure: “کیا میں یہ بات آپ کے لیے یاد رکھوں؟”
+  - Use `searchMemories` first; update, don't duplicate. Example: Update `favorite_food` rather than create new.
+  - Confirm before saving uncertain details – ask user if unsure: "کیا میں یہ بات آپ کے لیے یاد رکھوں؟"
 
 After each tool call or code edit, validate the result in 1–2 lines and proceed or self-correct if validation fails.
 
@@ -520,11 +523,14 @@ For every reply:
         Returns:
             Success status and confirmation message
         """
+        logging.info(f"[TOOL] 💾 storeInMemory called: [{category}] {key}")
+        logging.info(f"[TOOL]    Value: {value[:100]}{'...' if len(value) > 100 else ''}")
         print(f"[TOOL] 💾 storeInMemory called: [{category}] {key}")
         print(f"[TOOL]    Value: {value[:100]}{'...' if len(value) > 100 else ''}")
         
         # STEP 1: Save to database
         success = self.memory_service.save_memory(category, key, value)
+        logging.info(f"[TOOL] Memory save result: {success}")
         
         if success:
             print(f"[TOOL] ✅ Memory stored to database")
@@ -1099,16 +1105,20 @@ For every reply:
             # NEW: Heuristic auto-save to memory table if a durable (key, value) can be extracted
             # This complements the LLM tool call and ensures persistence when the model doesn't call tools
             try:
+                logging.info(f"[MEMORY] Attempting to extract memory from: '{user_text[:80]}...'")
                 kv = await asyncio.to_thread(extract_memory_key_value, user_text, category)
                 if kv:
                     key, normalized_value = kv
+                    logging.info(f"[MEMORY] ✅ Extracted: [{category}] {key} = {normalized_value[:50]}...")
                     saved = await self.memory_service.store_memory_async(category, key, normalized_value, user_id)
                     if saved:
-                        logging.info(f"[MEMORY] ✅ Auto-saved: [{category}] {key}")
+                        logging.info(f"[MEMORY] ✅ Auto-saved to database: [{category}] {key}")
                     else:
-                        logging.info(f"[MEMORY] ❌ Auto-save failed: [{category}] {key}")
+                        logging.error(f"[MEMORY] ❌ Auto-save to database failed: [{category}] {key}")
+                else:
+                    logging.info(f"[MEMORY] ℹ️  No durable memory detected in user text")
             except Exception as e:
-                logging.error(f"[MEMORY] Auto-save error: {e}")
+                logging.error(f"[MEMORY] Auto-save error: {e}", exc_info=True)
 
             # ✅ Index in RAG for semantic search (without storing in memory table)
             # LLM will use storeInMemory() tool with consistent keys when needed
@@ -1265,10 +1275,19 @@ async def entrypoint(ctx: agents.JobContext):
         print(f"[DEBUG][USER_ID] ✅ Set current user_id to: {user_id}")
         
         try:
-            # Ensure user profile exists
+            # Ensure user profile exists (parent table)
             user_service = UserService(supabase)
             await asyncio.to_thread(user_service.ensure_profile_exists, user_id)
             print("[PROFILE] ✓ User profile ensured")
+            
+            # Initialize user from onboarding data (creates profile + memories)
+            try:
+                logging.info(f"[ONBOARDING] Initializing user {user_id[:8]} from onboarding data...")
+                onboarding_service_tmp = OnboardingService(supabase)
+                await onboarding_service_tmp.initialize_user_from_onboarding(user_id)
+                logging.info("[ONBOARDING] ✓ User initialization complete (profile + memories created)")
+            except Exception as e:
+                logging.error(f"[ONBOARDING] ⚠️ Failed to initialize user from onboarding: {e}", exc_info=True)
             
             # Load gender directly from onboarding_details table
             print(f"[CONTEXT] 🔍 Fetching gender from onboarding_details...")

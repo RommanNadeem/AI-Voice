@@ -2,11 +2,14 @@
 Memory Service - Handles memory storage and retrieval operations
 """
 
+import logging
 import time
 from typing import Optional, List, Dict
 from supabase import Client
 from core.validators import can_write_for_current_user, get_current_user_id
 from services.user_service import UserService
+
+logger = logging.getLogger(__name__)
 
 
 class MemoryService:
@@ -288,8 +291,11 @@ class MemoryService:
                 "value": value,
             }
             
+            logger.info(f"[MEMORY SERVICE] 💾 Attempting async save: [{category}] {key}")
+            logger.debug(f"[MEMORY SERVICE]    User: {user_id[:8]}... Value: {value[:50]}...")
+            
             resp = await asyncio.to_thread(
-                lambda: self.supabase.table("memory").upsert(memory_data).execute()
+                lambda: self.supabase.table("memory").upsert(memory_data, on_conflict="user_id,category,key").execute()
             )
             
             if getattr(resp, "error", None):
@@ -297,24 +303,32 @@ class MemoryService:
                 err = resp.error
                 err_str = str(err)
                 err_code = err.get("code") if isinstance(err, dict) else None
+                logger.error(f"[MEMORY SERVICE] ❌ Save error: {err_str}")
+                
                 if err_code == "23503" or ("violates foreign key constraint" in err_str and "profiles" in err_str.lower()):
+                    logger.warning(f"[MEMORY SERVICE] ⚠️  FK error, ensuring profiles row exists then retrying once (async)...")
                     print(f"[MEMORY SERVICE] ⚠️  FK error, ensuring profiles row exists then retrying once (async)...")
                     user_service = UserService(self.supabase)
                     if user_service.ensure_profile_exists(user_id):
                         retry = await asyncio.to_thread(
-                            lambda: self.supabase.table("memory").upsert(memory_data).execute()
+                            lambda: self.supabase.table("memory").upsert(memory_data, on_conflict="user_id,category,key").execute()
                         )
                         if not getattr(retry, "error", None):
+                            logger.info(f"[MEMORY SERVICE] ✅ Saved successfully after ensuring profiles parent (async)")
                             print(f"[MEMORY SERVICE] ✅ Saved successfully after ensuring profiles parent (async)")
                             return True
+                    logger.error(f"[MEMORY SERVICE] ❌ Save error persists after retry: {resp.error}")
                     print(f"[MEMORY SERVICE] ❌ Save error persists after retry: {resp.error}")
                     return False
+                logger.error(f"[MEMORY SERVICE] ❌ Save error: {resp.error}")
                 print(f"[MEMORY SERVICE] ❌ Save error: {resp.error}")
                 return False
             
+            logger.info(f"[MEMORY SERVICE] ✅ Saved async: [{category}] {key}")
             print(f"[MEMORY SERVICE] ✅ Saved async: [{category}] {key}")
             return True
         except Exception as e:
+            logger.error(f"[MEMORY SERVICE] store_memory_async failed: {e}", exc_info=True)
             print(f"[MEMORY SERVICE] store_memory_async failed: {e}")
             return False
     
