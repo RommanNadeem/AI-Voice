@@ -1275,10 +1275,17 @@ async def entrypoint(ctx: agents.JobContext):
         print(f"[DEBUG][USER_ID] ✅ Set current user_id to: {user_id}")
         
         try:
-            # Ensure user profile exists (parent table)
+            # Ensure user profile exists (parent table) - CRITICAL for FK constraints
             user_service = UserService(supabase)
-            await asyncio.to_thread(user_service.ensure_profile_exists, user_id)
-            print("[PROFILE] ✓ User profile ensured")
+            profile_exists = await asyncio.to_thread(user_service.ensure_profile_exists, user_id)
+            
+            if not profile_exists:
+                logging.error(f"[PROFILE] ❌ CRITICAL: Failed to ensure profile exists for {user_id[:8]}")
+                logging.error(f"[PROFILE] This will cause ALL memory and profile saves to fail!")
+                print(f"[PROFILE] ❌ CRITICAL: Failed to ensure profile exists for {user_id[:8]}")
+            else:
+                logging.info(f"[PROFILE] ✅ Profile exists in database for {user_id[:8]}")
+                print(f"[PROFILE] ✅ Profile exists in database for {user_id[:8]}")
             
             # Initialize user from onboarding data (creates profile + memories)
             try:
