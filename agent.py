@@ -1186,7 +1186,7 @@ async def entrypoint(ctx: agents.JobContext):
                 prof_service_tmp = ProfileService(supabase)
                 created = await prof_service_tmp.create_profile_from_onboarding_async(user_id)
                 if created:
-                    print("[PROFILE] ✓ Initial 200-char profile created from onboarding_details")
+                    print("[PROFILE] ✓ Initial 250-char profile created from onboarding_details")
             except Exception as e:
                 print(f"[PROFILE] ⚠️ Failed to create profile from onboarding_details: {e}")
 

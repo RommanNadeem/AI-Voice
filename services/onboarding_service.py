@@ -71,31 +71,14 @@ class OnboardingService:
                 except Exception as e:
                     print(f"[ONBOARDING SERVICE] Gender detection failed: {e}")
             
-            # Create initial profile from onboarding data
+            # Create initial profile from onboarding data using async 250-char generator
             if not has_profile and any([full_name, occupation, interests]):
-                profile_parts = []
-                
-                if full_name:
-                    profile_parts.append(f"Their name is {full_name}.")
-                
-                if occupation:
-                    profile_parts.append(f"They work as {occupation}.")
-                
-                if interests:
-                    profile_parts.append(f"Their interests include: {interests}.")
-                
-                initial_profile = " ".join(profile_parts)
-                
-                # Use AI to create a more natural profile
-                enhanced_profile = profile_service.generate_profile(
-                    f"Name: {full_name}. Occupation: {occupation}. Interests: {interests}",
-                    ""
-                )
-                
-                profile_to_save = enhanced_profile if enhanced_profile else initial_profile
-                
-                if profile_service.save_profile(profile_to_save, user_id):
-                    print(f"[ONBOARDING SERVICE] ✓ Created initial profile")
+                try:
+                    created = await profile_service.create_profile_from_onboarding_async(user_id)
+                    if created:
+                        print(f"[ONBOARDING SERVICE] ✓ Created initial profile (<=250 chars)")
+                except Exception as e:
+                    print(f"[ONBOARDING SERVICE] Failed to create initial profile: {e}")
             
             # Add memories for each onboarding field
             if not has_memories:

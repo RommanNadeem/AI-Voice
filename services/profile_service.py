@@ -247,7 +247,7 @@ class ProfileService:
     
     async def create_profile_from_onboarding_async(self, user_id: str) -> bool:
         """
-        Create and save a concise (<=200 chars) profile_text from onboarding_details
+        Create and save a concise (<=250 chars) profile_text from onboarding_details
         using OpenAI. Skips if no onboarding data or profile already exists.
         """
         if not user_id:
@@ -291,7 +291,7 @@ class ProfileService:
             pool = get_connection_pool_sync()
             client = pool.get_openai_client() if pool else openai.OpenAI(api_key=Config.OPENAI_API_KEY)
             
-            # Build concise prompt for <=200 chars, factual only from provided fields
+            # Build concise prompt for <=250 chars, factual only from provided fields
             fields_text = (
                 f"Name: {full_name}. " if full_name else ""
             ) + (
@@ -303,12 +303,12 @@ class ProfileService:
             )
             
             sys_msg = (
-                "You write a single compact profile line (<=200 characters). "
+                "You write a single compact profile line (<=250 characters). "
                 "ONLY use the provided facts; do not infer or add information. "
                 "Return plain text without headings."
             )
             user_msg = (
-                "Create a concise 200-character profile that includes available fields: "
+                "Create a concise 250-character profile that includes available fields: "
                 "name, gender, occupation, interests. Keep natural and factual.\n\n"
                 f"Facts: {fields_text}"
             )
@@ -323,8 +323,8 @@ class ProfileService:
                 temperature=0.2,
             )
             profile_text = (resp.choices[0].message.content or "").strip()
-            if len(profile_text) > 200:
-                profile_text = profile_text[:200]
+            if len(profile_text) > 250:
+                profile_text = profile_text[:250]
             if not profile_text:
                 return False
             
