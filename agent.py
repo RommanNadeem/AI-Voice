@@ -166,6 +166,74 @@ def categorize_user_input(user_text: str, memory_service: MemoryService) -> str:
         return "FACT"
 
 
+# Heuristic extraction of a stable (key, value) pair for memory persistence
+def extract_memory_key_value(user_text: str, category: str):
+    """Return (key, value) suitable for saving to the memory table or None.
+
+    The key must be English snake_case and stable across updates (e.g., "favorite_food").
+    Only produce a pair for durable, user-related information. Skip ephemeral status.
+    """
+    try:
+        import re
+        pool = get_connection_pool_sync()
+        import openai
+        client = pool.get_openai_client() if pool else openai.OpenAI(api_key=Config.OPENAI_API_KEY)
+
+        system_msg = (
+            "You extract durable, user-specific facts or preferences from a single user utterance. "
+            "Respond ONLY as compact JSON with keys 'key' and 'value'. "
+            "The 'key' MUST be English snake_case (e.g., favorite_food, sister_name, hobby). "
+            "Only produce a key if the info helps personalize future conversations. "
+            "If nothing durable is present, respond with the exact text: NONE."
+        )
+
+        user_msg = (
+            f"Category hint: {category}.\n"
+            f"User text: {user_text}\n\n"
+            "Examples that SHOULD produce a key:\n"
+            "- 'مجھے چکن قورمہ بہت پسند ہے' -> key: favorite_food, value: چکن قورمہ\n"
+            "- 'میری بہن کا نام عائشہ ہے' -> key: sister_name, value: عائشہ\n"
+            "- 'میں کراچی میں رہتا ہوں' -> key: location, value: کراچی\n\n"
+            "Examples that SHOULD be NONE (ephemeral):\n"
+            "- 'میں ٹھیک ہوں'\n"
+            "- 'آج میں مصروف ہوں'\n"
+        )
+
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": system_msg},
+                {"role": "user", "content": user_msg},
+            ],
+            max_tokens=60,
+            temperature=0.1,
+        )
+
+        content = (resp.choices[0].message.content or "").strip()
+        if content.upper() == "NONE":
+            return None
+
+        # Parse minimal JSON without importing heavy deps
+        # Expecting: {"key": "favorite_food", "value": "بریانی"}
+        import json
+        data = json.loads(content)
+        key = str(data.get("key", "")).strip()
+        value = str(data.get("value", "")).strip()
+
+        if not key or not value:
+            return None
+
+        # Normalize key strictly to English snake_case
+        key_norm = key.lower().strip()
+        key_norm = re.sub(r"[^a-z0-9_]+", "_", key_norm)
+        key_norm = re.sub(r"_+", "_", key_norm).strip("_")
+        if not key_norm or key_norm.startswith("user_input_"):
+            return None
+
+        return (key_norm, value)
+    except Exception:
+        return None
+
 # ---------------------------
 # Assistant Agent - Simplified Pattern
 # ---------------------------
@@ -901,10 +969,24 @@ For every message you generate:
             
             logging.info(f"[BACKGROUND] Processing: {user_text[:50] if len(user_text) > 50 else user_text}...")
             
-            # Categorize for RAG metadata (but don't auto-save to memory table)
+            # Categorize for RAG metadata (previously we didn't auto-save to DB)
             category = await asyncio.to_thread(categorize_user_input, user_text, self.memory_service)
             ts_ms = int(time.time() * 1000)
             
+            # NEW: Heuristic auto-save to memory table if a durable (key, value) can be extracted
+            # This complements the LLM tool call and ensures persistence when the model doesn't call tools
+            try:
+                kv = await asyncio.to_thread(extract_memory_key_value, user_text, category)
+                if kv:
+                    key, normalized_value = kv
+                    saved = await self.memory_service.store_memory_async(category, key, normalized_value, user_id)
+                    if saved:
+                        logging.info(f"[MEMORY] ✅ Auto-saved: [{category}] {key}")
+                    else:
+                        logging.info(f"[MEMORY] ❌ Auto-save failed: [{category}] {key}")
+            except Exception as e:
+                logging.error(f"[MEMORY] Auto-save error: {e}")
+
             # ✅ Index in RAG for semantic search (without storing in memory table)
             # LLM will use storeInMemory() tool with consistent keys when needed
             if self.rag_service:
