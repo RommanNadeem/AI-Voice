@@ -63,6 +63,7 @@ class RAGMemorySystem:
         
         # Tier 1: Conversation context tracking
         self.conversation_context: List[str] = []  # Recent conversation turns
+        self.conversation_turns: List[Dict[str, str]] = []  # Full conversation turns with user/assistant
         self.current_topic: Optional[str] = None
         self.referenced_memories: Set[int] = set()  # Track mentioned memories
         
@@ -157,6 +158,30 @@ class RAGMemorySystem:
             self.conversation_context.pop(0)
         
         logging.debug(f"[RAG] Updated conversation context (size: {len(self.conversation_context)})")
+    
+    def add_conversation_turn(self, user_message: str, assistant_message: str):
+        """
+        Add a complete conversation turn (user + assistant) to context.
+        
+        Args:
+            user_message: User's message
+            assistant_message: Assistant's response
+        """
+        if not user_message or not assistant_message:
+            return
+        
+        turn = {
+            "user": user_message,
+            "assistant": assistant_message,
+            "timestamp": time.time()
+        }
+        
+        self.conversation_turns.append(turn)
+        # Keep only last 10 turns
+        if len(self.conversation_turns) > 10:
+            self.conversation_turns.pop(0)
+        
+        logging.debug(f"[RAG] Added conversation turn (total turns: {len(self.conversation_turns)})")
     
     def calculate_importance_score(self, memory: Dict) -> float:
         """
@@ -451,9 +476,46 @@ class RAGMemorySystem:
             logging.error(f"[RAG] Retrieval failed: {e}")
             return []
     
+    def get_conversation_context(self) -> List[str]:
+        """
+        Get the current conversation context.
+        
+        Returns:
+            List of recent conversation turns (last 10)
+        """
+        return self.conversation_context.copy()
+    
+    def get_last_conversation_turn(self) -> Optional[str]:
+        """
+        Get the last conversation turn.
+        
+        Returns:
+            Last conversation turn text or None if empty
+        """
+        return self.conversation_context[-1] if self.conversation_context else None
+    
+    def get_last_complete_turn(self) -> Optional[Dict[str, str]]:
+        """
+        Get the last complete conversation turn (user + assistant).
+        
+        Returns:
+            Dictionary with 'user' and 'assistant' keys or None if empty
+        """
+        return self.conversation_turns[-1] if self.conversation_turns else None
+    
+    def get_conversation_turns(self) -> List[Dict[str, str]]:
+        """
+        Get all conversation turns.
+        
+        Returns:
+            List of conversation turns with user/assistant messages
+        """
+        return self.conversation_turns.copy()
+    
     def reset_conversation_context(self):
         """Reset conversation context (e.g., new session)."""
         self.conversation_context.clear()
+        self.conversation_turns.clear()
         self.referenced_memories.clear()
         self.current_topic = None
         logging.info("[RAG] Conversation context reset")

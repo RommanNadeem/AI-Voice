@@ -94,6 +94,40 @@ class RAGService:
         if rag:
             rag.update_conversation_context(text)
     
+    def get_conversation_context(self) -> List[str]:
+        """Get the current conversation context"""
+        rag = self.get_rag_system()
+        if rag:
+            return rag.get_conversation_context()
+        return []
+    
+    def get_last_conversation_turn(self) -> Optional[str]:
+        """Get the last conversation turn"""
+        rag = self.get_rag_system()
+        if rag:
+            return rag.get_last_conversation_turn()
+        return None
+    
+    def add_conversation_turn(self, user_message: str, assistant_message: str):
+        """Add a complete conversation turn to RAG context"""
+        rag = self.get_rag_system()
+        if rag:
+            rag.add_conversation_turn(user_message, assistant_message)
+    
+    def get_last_complete_turn(self) -> Optional[Dict[str, str]]:
+        """Get the last complete conversation turn (user + assistant)"""
+        rag = self.get_rag_system()
+        if rag:
+            return rag.get_last_complete_turn()
+        return None
+    
+    def get_conversation_turns(self) -> List[Dict[str, str]]:
+        """Get all conversation turns"""
+        rag = self.get_rag_system()
+        if rag:
+            return rag.get_conversation_turns()
+        return []
+    
     def reset_conversation_context(self):
         """Reset conversation context (e.g., new session)"""
         rag = self.get_rag_system()

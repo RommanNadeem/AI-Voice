@@ -247,6 +247,11 @@ class Assistant(Agent):
         self._room = None
         self._current_state = "idle"
         
+        # Track last processed conversation context for database updates
+        self._last_processed_context = ""
+        self._pending_user_message = ""  # Store user message until we get assistant response
+        self._last_assistant_response = ""  # Store last assistant response from conversation_item_added
+        
         self._base_instructions = """
 # Prompt: Humraaz – Urdu Companion
 
@@ -898,33 +903,30 @@ For every reply:
         """
         logging.info(f"[AGENT] Speech committed - transitioning to listening")
         
-        # Capture assistant response for context updates
-        try:
-            if hasattr(turn_ctx, 'agent_message') and turn_ctx.agent_message:
-                assistant_response = turn_ctx.agent_message.text_content or ""
-                if assistant_response:
-                    # Get the last user message from turn context
-                    user_message = ""
-                    if hasattr(turn_ctx, 'user_message') and turn_ctx.user_message:
-                        user_message = turn_ctx.user_message.text_content or ""
-                    
-                    # Trigger conversation context update with both messages
-                    if user_message and assistant_response:
-                        user_id = get_current_user_id()
-                        if user_id:
-                            try:
-                                await self.conversation_state_service.update_conversation_context(
-                                    user_message=user_message,
-                                    assistant_message=assistant_response,
-                                    user_id=user_id
-                                )
-                                logging.info(f"[CONTEXT] ✅ Updated conversation context with summary")
-                            except Exception as e:
-                                logging.error(f"[CONTEXT] Failed to update conversation context: {e}")
-        except Exception as e:
-            logging.error(f"[CONTEXT] Error capturing assistant response: {e}")
+        # Update conversation context in database using RAG context
+        await self._update_conversation_context_from_rag()
         
         await self.broadcast_state("listening")
+    
+    async def on_conversation_item_added(self, item):
+        """
+        LiveKit Callback: Called when a new item is added to conversation (user or assistant)
+        Best Practice: Capture assistant responses for context updates
+        """
+        try:
+            # Check if this is an assistant message
+            if hasattr(item, 'role') and item.role == 'assistant':
+                # Get the text content
+                if hasattr(item, 'text_content') and item.text_content:
+                    self._last_assistant_response = item.text_content
+                    logging.info(f"[ASSISTANT] Response captured: {item.text_content[:50]}...")
+                    print(f"[ASSISTANT] Response: {item.text_content[:80]}...")
+                elif hasattr(item, 'content') and item.content:
+                    self._last_assistant_response = item.content
+                    logging.info(f"[ASSISTANT] Response captured: {item.content[:50]}...")
+                    print(f"[ASSISTANT] Response: {item.content[:80]}...")
+        except Exception as e:
+            logging.error(f"[ASSISTANT] Failed to capture response: {e}")
     
     async def on_user_speech_started(self, turn_ctx):
         """
@@ -942,6 +944,13 @@ For every reply:
         user_text = new_message.text_content or ""
         logging.info(f"[USER] {user_text[:80]}")
         print(f"[STATE] 🎤 User finished speaking")
+        
+        # Store user message for later conversation turn completion
+        self._pending_user_message = user_text
+        
+        # Update RAG conversation context
+        if self.rag_service:
+            self.rag_service.update_conversation_context(user_text)
 
         if not can_write_for_current_user():
             return
@@ -951,6 +960,48 @@ For every reply:
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)
     
+    async def _update_conversation_context_from_rag(self):
+        """
+        Update conversation context in database using captured assistant response.
+        Uses the assistant response from on_conversation_item_added callback.
+        """
+        try:
+            if not self.rag_service or not self._pending_user_message:
+                return
+            
+            # Use captured assistant response or placeholder
+            assistant_message = self._last_assistant_response or "Assistant provided a response to the user"
+            
+            # Add the conversation turn to RAG
+            self.rag_service.add_conversation_turn(
+                user_message=self._pending_user_message,
+                assistant_message=assistant_message
+            )
+            
+            # Update database with conversation context
+            user_id = get_current_user_id()
+            if user_id:
+                print(f"[CONTEXT] Updating conversation context...")
+                print(f"[CONTEXT] User: {self._pending_user_message[:50]}...")
+                print(f"[CONTEXT] Assistant: {assistant_message[:50]}...")
+                
+                await self.conversation_state_service.update_conversation_context(
+                    user_message=self._pending_user_message,
+                    assistant_message=assistant_message,
+                    user_id=user_id
+                )
+                
+                logging.info(f"[CONTEXT] ✅ Updated conversation context with summary")
+                print(f"[CONTEXT] ✅ Summary saved to last_summary column")
+                
+                # Clear pending messages after processing
+                self._pending_user_message = ""
+                self._last_assistant_response = ""
+                
+        except Exception as e:
+            logging.error(f"[CONTEXT] Failed to update conversation context: {e}")
+            print(f"[CONTEXT] ❌ Error: {e}")
+    
     async def cleanup(self):
         """Cleanup background tasks on shutdown"""
         if self._background_tasks:
@@ -958,7 +1009,7 @@ For every reply:
             await asyncio.gather(*self._background_tasks, return_exceptions=True)
             print(f"[CLEANUP] ✓ All background tasks completed")
     
-    async def _process_background(self, user_text: str, assistant_response: str = None):
+    async def _process_background(self, user_text: str):
         """Background processing - index in RAG, update profile, and track conversation context (LLM handles memory storage via tools)"""
         try:
             user_id = get_current_user_id()
@@ -1012,17 +1063,6 @@ For every reply:
                 if generated_profile and generated_profile != existing_profile:
                     await self.profile_service.save_profile_async(generated_profile, user_id)
                     logging.info(f"[PROFILE] ✅ Updated")
-            
-            # Update conversation context (last messages, summary, topics) if we have assistant response
-            if assistant_response:
-                try:
-                    await self.conversation_state_service.update_conversation_context(
-                        user_message=user_text,
-                        assistant_message=assistant_response,
-                        user_id=user_id
-                    )
-                except Exception as e:
-                    print(f"[BACKGROUND] Conversation context update failed: {e}")
             
             # Update conversation state with last user message
             try:
