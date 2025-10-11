@@ -252,6 +252,13 @@ class Assistant(Agent):
         self._pending_user_message = ""  # Store user message until we get assistant response
         self._last_assistant_response = ""  # Store last assistant response from conversation_item_added
         
+        # PATCH: Store session and chat context for conversation history management
+        self._session = None
+        self._chat_ctx = chat_ctx if chat_ctx else ChatContext()
+        self._conversation_history = []  # [(user_msg, assistant_msg), ...]
+        self._max_history_turns = 10  # Keep last 10 turns for context
+        self._max_context_tokens = 3000  # Approximate token budget for history
+        
         self._base_instructions = """
 # Prompt: Humraaz – Urdu Companion
 
@@ -419,6 +426,55 @@ For every reply:
         """Set the room reference for state broadcasting"""
         self._room = room
         print(f"[STATE] Room reference set for state broadcasting")
+    
+    def set_session(self, session):
+        """Store session reference for conversation history management"""
+        self._session = session
+        print(f"[SESSION] Session reference stored for history management")
+    
+    def _estimate_tokens(self, text: str) -> int:
+        """Rough token estimate: ~4 chars per token for English/Urdu mix"""
+        return len(text) // 4
+    
+    def _update_conversation_history(self, user_msg: str, assistant_msg: str):
+        """
+        PATCH: Maintain conversation history with token budget.
+        Keeps last N turns within token limit for stable session state.
+        """
+        if not user_msg or not assistant_msg:
+            return
+        
+        # Add new turn
+        self._conversation_history.append((user_msg, assistant_msg))
+        
+        # Trim history to max turns
+        if len(self._conversation_history) > self._max_history_turns:
+            self._conversation_history = self._conversation_history[-self._max_history_turns:]
+        
+        # Trim by token budget (keep most recent within budget)
+        total_tokens = 0
+        trimmed_history = []
+        for user, asst in reversed(self._conversation_history):
+            turn_tokens = self._estimate_tokens(user) + self._estimate_tokens(asst)
+            if total_tokens + turn_tokens > self._max_context_tokens:
+                break
+            trimmed_history.insert(0, (user, asst))
+            total_tokens += turn_tokens
+        
+        self._conversation_history = trimmed_history
+        print(f"[HISTORY] Updated: {len(self._conversation_history)} turns, ~{total_tokens} tokens")
+    
+    def _get_conversation_context_string(self) -> str:
+        """Format conversation history as context string"""
+        if not self._conversation_history:
+            return ""
+        
+        context_lines = ["## Recent Conversation:"]
+        for user_msg, asst_msg in self._conversation_history:
+            context_lines.append(f"User: {user_msg}")
+            context_lines.append(f"Assistant: {asst_msg}")
+        
+        return "\n".join(context_lines)
     
     async def broadcast_state(self, state: str):
         """
@@ -910,8 +966,8 @@ For every reply:
     
     async def on_conversation_item_added(self, item):
         """
-        LiveKit Callback: Called when a new item is added to conversation (user or assistant)
-        Best Practice: Capture assistant responses for context updates
+        PATCH: Capture assistant responses and update conversation history.
+        This ensures the model has stable context across turns.
         """
         try:
             # Check if this is an assistant message
@@ -921,10 +977,25 @@ For every reply:
                     self._last_assistant_response = item.text_content
                     logging.info(f"[ASSISTANT] Response captured: {item.text_content[:50]}...")
                     print(f"[ASSISTANT] Response: {item.text_content[:80]}...")
+                    
+                    # PATCH: Update conversation history when we have both user and assistant messages
+                    if self._pending_user_message:
+                        self._update_conversation_history(
+                            self._pending_user_message,
+                            item.text_content
+                        )
+                        
                 elif hasattr(item, 'content') and item.content:
                     self._last_assistant_response = item.content
                     logging.info(f"[ASSISTANT] Response captured: {item.content[:50]}...")
                     print(f"[ASSISTANT] Response: {item.content[:80]}...")
+                    
+                    # PATCH: Update conversation history
+                    if self._pending_user_message:
+                        self._update_conversation_history(
+                            self._pending_user_message,
+                            item.content
+                        )
         except Exception as e:
             logging.error(f"[ASSISTANT] Failed to capture response: {e}")
     
@@ -1341,6 +1412,9 @@ async def entrypoint(ctx: agents.JobContext):
         ),
     )
 
+    # PATCH: Store session reference in assistant for history management
+    assistant.set_session(session)
+    
     # Start session with RoomInputOptions (best practice)
     print("[SESSION INIT] Starting LiveKit session...")
     await session.start(
