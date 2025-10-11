@@ -45,8 +45,8 @@ class UserService:
             logger.info(f"[USER SERVICE] Checking if profile exists for {UserId.format_for_display(user_id)}")
             print(f"[USER SERVICE] Checking if profile exists for {UserId.format_for_display(user_id)}")
             
-            # STRICT EQUALITY: profiles.id = :user_id (exact match on full UUID)
-            resp = self.supabase.table("profiles").select("id").eq("id", user_id).execute()
+            # STRICT EQUALITY: profiles.user_id = :user_id (exact match on full UUID)
+            resp = self.supabase.table("profiles").select("id").eq("user_id", user_id).execute()
             rows = getattr(resp, "data", []) or []
             
             exists = len(rows) > 0
@@ -93,12 +93,12 @@ class UserService:
             if self.profile_exists(user_id):
                 return True
 
-            # Create profile (profiles table uses id as PK, not user_id)
+            # Create profile (profiles table has user_id column for UUID)
             logger.info(f"[USER SERVICE] Creating new profile for {UserId.format_for_display(user_id)}")
             print(f"[USER SERVICE] Creating new profile for {UserId.format_for_display(user_id)}")
             
             profile_data = {
-                "id": user_id,  # profiles.id is the PK (UUID)
+                "user_id": user_id,  # profiles.user_id column stores the UUID
                 "email": f"user_{user_id[:8]}@companion.local",
                 "is_first_login": True,
             }
@@ -162,8 +162,8 @@ class UserService:
             return None
         
         try:
-            # Query by id (profiles.id is the PK)
-            resp = self.supabase.table("profiles").select("*").eq("id", user_id).execute()
+            # Query by user_id column
+            resp = self.supabase.table("profiles").select("*").eq("user_id", user_id).execute()
             data = getattr(resp, "data", []) or []
             return data[0] if data else None
         except Exception as e:
@@ -193,8 +193,8 @@ class UserService:
             return False
         
         try:
-            # Update by id (profiles.id is the PK)
-            resp = self.supabase.table("profiles").update(updates).eq("id", user_id).execute()
+            # Update by user_id column
+            resp = self.supabase.table("profiles").update(updates).eq("user_id", user_id).execute()
             if getattr(resp, "error", None):
                 print(f"[USER SERVICE] Update error: {resp.error}")
                 return False
