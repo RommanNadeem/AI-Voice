@@ -249,7 +249,7 @@ class ConversationContextService:
         try:
             result = await asyncio.to_thread(
                 lambda: self.supabase.table("conversation_state")
-                .select("stage, trust_score, updated_at")
+                .select("stage, trust_score, updated_at, last_summary, last_topics, last_user_message, last_assistant_message, last_conversation_at")
                 .eq("user_id", user_id)
                 .execute()
             )

@@ -568,7 +568,7 @@ Respond in JSON:
         """
         try:
             # Get OpenAI client for summary generation
-            pool = get_connection_pool()
+            pool = await get_connection_pool()
             if not pool:
                 return "Summary unavailable"
                 
@@ -618,7 +618,7 @@ Focus on the main topic or sentiment. Keep it concise and factual."""
         """
         try:
             # Get OpenAI client for topic extraction
-            pool = get_connection_pool()
+            pool = await get_connection_pool()
             if not pool:
                 return []
                 
