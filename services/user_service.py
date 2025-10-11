@@ -107,36 +107,30 @@ class UserService:
             }
             
             try:
-                create_resp = self.supabase.table("profiles").insert(profile_data).execute()
+                # Use upsert to prevent race conditions - will insert if new, update if exists
+                create_resp = self.supabase.table("profiles").upsert(profile_data, on_conflict="user_id").execute()
                 
-                # Verify the insert actually worked
+                # Verify the upsert actually worked
                 if getattr(create_resp, "error", None):
-                    logger.error(f"[USER SERVICE] Insert returned error: {create_resp.error}")
-                    print(f"[USER SERVICE] Insert returned error: {create_resp.error}")
+                    logger.error(f"[USER SERVICE] Upsert returned error: {create_resp.error}")
+                    print(f"[USER SERVICE] Upsert returned error: {create_resp.error}")
                     return False
                 
                 if not create_resp.data or len(create_resp.data) == 0:
-                    logger.error(f"[USER SERVICE] Insert returned no data - creation may have failed")
-                    print(f"[USER SERVICE] Insert returned no data - creation may have failed")
+                    logger.error(f"[USER SERVICE] Upsert returned no data - operation may have failed")
+                    print(f"[USER SERVICE] Upsert returned no data - operation may have failed")
                     return False
                 
-                logger.info(f"[USER SERVICE] ✅ Created profile for user {UserId.format_for_display(user_id)}")
-                print(f"[USER SERVICE] ✅ Created profile for user {UserId.format_for_display(user_id)}")
+                logger.info(f"[USER SERVICE] ✅ Ensured profile exists for user {UserId.format_for_display(user_id)}")
+                print(f"[USER SERVICE] ✅ Ensured profile exists for user {UserId.format_for_display(user_id)}")
                 print(f"[USER SERVICE] Verification: {create_resp.data}")
                 return True
-            except Exception as insert_error:
-                # Handle duplicate key error (profile might have been created by another process)
-                err_str = str(insert_error)
-                logger.error(f"[USER SERVICE] Insert exception: {err_str}")
-                
-                if "duplicate key" in err_str.lower() or "unique constraint" in err_str.lower():
-                    logger.warning(f"[USER SERVICE] Profile already exists (concurrent creation)")
-                    print(f"[USER SERVICE] Profile already exists (concurrent creation)")
-                    return True
-                else:
-                    logger.error(f"[USER SERVICE] Profile creation error: {insert_error}", exc_info=True)
-                    print(f"[USER SERVICE] Profile creation error: {insert_error}")
-                    return False
+            except Exception as upsert_error:
+                # Upsert should rarely fail, but handle any unexpected errors
+                err_str = str(upsert_error)
+                logger.error(f"[USER SERVICE] Upsert exception: {err_str}")
+                print(f"[USER SERVICE] Upsert exception: {err_str}")
+                return False
 
         except Exception as e:
             logger.error(f"[USER SERVICE] ensure_profile_exists failed: {e}", exc_info=True)
