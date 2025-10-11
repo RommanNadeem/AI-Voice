@@ -277,7 +277,13 @@ class ProfileService:
             full_name = (ob.get("full_name") or "").strip()
             gender = (ob.get("gender") or "").strip()
             occupation = (ob.get("occupation") or "").strip()
-            interests = (ob.get("interests") or "").strip()
+            
+            # Handle interests as either list or string
+            interests_raw = ob.get("interests")
+            if isinstance(interests_raw, list):
+                interests = ", ".join(str(i) for i in interests_raw if i)
+            else:
+                interests = (interests_raw or "").strip()
             
             if not any([full_name, gender, occupation, interests]):
                 return False

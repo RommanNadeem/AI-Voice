@@ -132,19 +132,23 @@ class OnboardingService:
                         memories_added += 1
                         rag.add_memory_background(f"User works as {occupation}", "FACT")
                 
-                if interests:
-                    # Split interests if comma-separated
-                    interest_list = [i.strip() for i in interests.split(',') if i.strip()]
+            if interests:
+                # Handle interests as either list or string
+                if isinstance(interests, list):
+                    interest_list = [str(i).strip() for i in interests if i]
+                else:
+                    # Split comma-separated string
+                    interest_list = [i.strip() for i in str(interests).split(',') if i.strip()]
+                
+                if interest_list:
+                    # Save all interests as one memory
+                    interests_text = ", ".join(interest_list)
+                    if memory_service.save_memory("INTEREST", "main_interests", interests_text, user_id):
+                        memories_added += 1
                     
-                    if interest_list:
-                        # Save all interests as one memory
-                        interests_text = ", ".join(interest_list)
-                        if memory_service.save_memory("INTEREST", "main_interests", interests_text, user_id):
-                            memories_added += 1
-                        
-                        # Add each interest to RAG for better semantic search
-                        for interest in interest_list:
-                            rag.add_memory_background(f"User is interested in {interest}", "INTEREST")
+                    # Add each interest to RAG for better semantic search
+                    for interest in interest_list:
+                        rag.add_memory_background(f"User is interested in {interest}", "INTEREST")
                 
                 logger.info(f"✓ Created {memories_added} memories from onboarding data")
             
