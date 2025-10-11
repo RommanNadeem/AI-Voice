@@ -540,45 +540,47 @@ class RAGMemorySystem:
     async def load_from_supabase(self, supabase_client, limit: int = 500):
         """
         Load recent memories from Supabase and build FAISS index.
+        Uses ONLY the full UUID for querying (no prefix handling).
         
         Args:
             supabase_client: Supabase client instance
             limit: Maximum memories to load
         """
         try:
-            logging.info(f"[RAG] Loading memories from Supabase for user {self.user_id}...")
-            print(f"[DEBUG][DB] Querying memory table for user_id: {self.user_id[:8]}, limit: {limit}")
+            from core.user_id import UserId, UserIdError
             
-            # Fetch recent memories. Prefer raw UUID. If input is legacy "user-<uuid>", strip prefix.
-            user_ids_to_try = []
-            if self.user_id.startswith("user-"):
-                user_ids_to_try.append(self.user_id.split("user-", 1)[1])  # stripped UUID
-            else:
-                user_ids_to_try.append(self.user_id)
+            # STRICT VALIDATION: Ensure we have a full UUID
+            try:
+                UserId.assert_full_uuid(self.user_id)
+            except UserIdError as e:
+                logging.error(f"[RAG] ❌ Invalid user_id for load_from_supabase: {e}")
+                print(f"[RAG] ❌ Invalid user_id: {e}")
+                return
             
-            memories_data = []
-            for uid in user_ids_to_try:
-                try:
-                    result = (
-                        supabase_client.table("memory")
-                        .select("category, key, value, created_at")
-                        .eq("user_id", uid)
-                        .order("created_at", desc=True)
-                        .limit(limit)
-                        .execute()
-                    )
-                except Exception as select_err:
-                    # Handle cases like Postgres 22P02 (invalid input syntax for type uuid)
-                    logging.warning(f"[RAG] Select failed for uid={uid}: {select_err}")
-                    continue
-                if getattr(result, "error", None):
-                    logging.warning(f"[RAG] Supabase select error for uid={uid}: {result.error}")
-                    continue
-                data = result.data if result.data else []
-                if data:
-                    memories_data.extend(data)
-                if len(memories_data) >= limit:
-                    break
+            logging.info(f"[RAG] Loading memories from Supabase for user {UserId.format_for_display(self.user_id)}...")
+            print(f"[DEBUG][DB] Querying memory table for user_id: {self.user_id} (full UUID), limit: {limit}")
+            
+            # Query using ONLY the full UUID - no prefix handling
+            try:
+                result = (
+                    supabase_client.table("memory")
+                    .select("category, key, value, created_at")
+                    .eq("user_id", self.user_id)
+                    .order("created_at", desc=True)
+                    .limit(limit)
+                    .execute()
+                )
+            except Exception as select_err:
+                logging.error(f"[RAG] ❌ Select failed for user_id={self.user_id}: {select_err}")
+                print(f"[RAG] ❌ Query failed: {select_err}")
+                return
+            
+            if getattr(result, "error", None):
+                logging.error(f"[RAG] ❌ Supabase select error: {result.error}")
+                print(f"[RAG] ❌ Supabase error: {result.error}")
+                return
+            
+            memories_data = result.data if result.data else []
             
             logging.info(f"[RAG] Loaded {len(memories_data)} memories from database")
             print(f"[DEBUG][DB] ✅ Query returned {len(memories_data)} memories from database")
@@ -589,7 +591,8 @@ class RAGMemorySystem:
                 for i, mem in enumerate(memories_data[:3], 1):
                     print(f"[DEBUG][DB]   #{i}: [{mem.get('category')}] {mem.get('value', '')[:60]}...")
             else:
-                print(f"[DEBUG][DB] ⚠️  No memories found in database for user {self.user_id[:8]}")
+                from core.user_id import UserId
+                print(f"[DEBUG][DB] ⚠️  No memories found in database for user {UserId.format_for_display(self.user_id)}")
             
             # Create embeddings in parallel (batched for efficiency)
             embedding_tasks = []
@@ -684,17 +687,29 @@ class RAGMemorySystem:
 user_rag_systems = {}  # {user_id: RAGMemorySystem}
 
 def get_or_create_rag(user_id: str, openai_api_key: str) -> RAGMemorySystem:
-    """Get existing RAG system or create new one for user."""
-    print(f"[DEBUG][RAG] get_or_create_rag called for user {user_id[:8]}")
-    print(f"[DEBUG][RAG] Current user_rag_systems keys: {[uid[:8] for uid in user_rag_systems.keys()]}")
+    """
+    Get existing RAG system or create new one for user.
+    Validates that user_id is a full UUID.
+    """
+    from core.user_id import UserId, UserIdError
+    
+    # STRICT VALIDATION: Ensure full UUID
+    try:
+        UserId.assert_full_uuid(user_id)
+    except UserIdError as e:
+        print(f"[RAG] ❌ CRITICAL: Invalid user_id: {e}")
+        raise
+    
+    print(f"[DEBUG][RAG] get_or_create_rag called for user {UserId.format_for_display(user_id)}")
+    print(f"[DEBUG][RAG] Current user_rag_systems keys: {[UserId.format_for_display(uid) for uid in user_rag_systems.keys()]}")
     
     if user_id not in user_rag_systems:
-        print(f"[DEBUG][RAG] 🆕 Creating NEW RAG instance for {user_id[:8]}")
+        print(f"[DEBUG][RAG] 🆕 Creating NEW RAG instance for {UserId.format_for_display(user_id)}")
         user_rag_systems[user_id] = RAGMemorySystem(user_id, openai_api_key)
         print(f"[DEBUG][RAG] ✅ RAG instance created and stored in global dict")
     else:
         existing_rag = user_rag_systems[user_id]
-        print(f"[DEBUG][RAG] ♻️  Returning EXISTING RAG for {user_id[:8]}")
+        print(f"[DEBUG][RAG] ♻️  Returning EXISTING RAG for {UserId.format_for_display(user_id)}")
         print(f"[DEBUG][RAG]    Existing RAG has {len(existing_rag.memories)} memories")
         print(f"[DEBUG][RAG]    FAISS index size: {existing_rag.index.ntotal}")
     

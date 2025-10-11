@@ -8,6 +8,7 @@ from typing import Optional, Dict
 from supabase import Client
 import openai
 from core.validators import can_write_for_current_user, get_current_user_id
+from core.user_id import UserId, UserIdError
 from core.config import Config
 from infrastructure.connection_pool import get_connection_pool_sync, get_connection_pool
 from infrastructure.redis_cache import get_redis_cache
@@ -122,12 +123,12 @@ class ProfileService:
             return False
         
         try:
-            print(f"[PROFILE SERVICE] 💾 Saving profile for user {uid[:8]}...")
+            print(f"[PROFILE SERVICE] 💾 Saving profile for user {UserId.format_for_display(uid)}...")
             print(f"[PROFILE SERVICE]    {profile_text[:150]}{'...' if len(profile_text) > 150 else ''}")
             # Ensure FK parent exists in profiles table
             user_service = UserService(self.supabase)
             if not user_service.ensure_profile_exists(uid):
-                print(f"[PROFILE SERVICE] ❌ Cannot save profile - missing parent row in profiles for {uid[:8]}")
+                print(f"[PROFILE SERVICE] ❌ Cannot save profile - missing parent row in profiles for {UserId.format_for_display(uid)}")
                 return False
             
             resp = self.supabase.table("user_profiles").upsert({
@@ -177,7 +178,7 @@ class ProfileService:
             # Ensure FK parent exists in profiles table before saving to user_profiles
             user_service = UserService(self.supabase)
             if not user_service.ensure_profile_exists(uid):
-                print(f"[PROFILE SERVICE] ❌ Cannot save profile - missing parent row in profiles for {uid[:8]}")
+                print(f"[PROFILE SERVICE] ❌ Cannot save profile - missing parent row in profiles for {UserId.format_for_display(uid)}")
                 return False
 
             # Profile changed significantly - save to DB
@@ -194,7 +195,7 @@ class ProfileService:
             # 🚀 OPTIMIZATION: Update cache instead of deleting (prevents cache miss)
             await redis_cache.set(cache_key, profile_text, ttl=3600)
             print(f"[PROFILE SERVICE] ✅ Profile saved and cache updated (smart)")
-            print(f"[PROFILE SERVICE]    User: {uid[:8]}...")
+            print(f"[PROFILE SERVICE]    User: {UserId.format_for_display(uid)}...")
             
             return True
         except Exception as e:
@@ -359,7 +360,7 @@ class ProfileService:
             return ""
         
         try:
-            print(f"[PROFILE SERVICE] 🔍 Fetching profile for user {uid[:8]}...")
+            print(f"[PROFILE SERVICE] 🔍 Fetching profile for user {UserId.format_for_display(uid)}...")
             
             resp = self.supabase.table("user_profiles").select("profile_text").eq("user_id", uid).execute()
             if getattr(resp, "error", None):
@@ -396,7 +397,7 @@ class ProfileService:
             return ""
         
         # Try Redis cache first
-        print(f"[PROFILE SERVICE] 🔍 Fetching profile (async) for user {uid[:8]}...")
+        print(f"[PROFILE SERVICE] 🔍 Fetching profile (async) for user {UserId.format_for_display(uid)}...")
         redis_cache = await get_redis_cache()
         cache_key = f"user:{uid}:profile"
         cached_profile = await redis_cache.get(cache_key)

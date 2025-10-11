@@ -7,6 +7,7 @@ import time
 from typing import Optional, List, Dict
 from supabase import Client
 from core.validators import can_write_for_current_user, get_current_user_id
+from core.user_id import UserId, UserIdError
 from services.user_service import UserService
 
 logger = logging.getLogger(__name__)
@@ -21,6 +22,7 @@ class MemoryService:
     def save_memory(self, category: str, key: str, value: str, user_id: Optional[str] = None) -> bool:
         """
         Save memory to Supabase.
+        ENSURES profile exists BEFORE attempting insert to prevent FK errors.
         
         Args:
             category: Memory category (FACT, GOAL, INTEREST, etc.)
@@ -38,10 +40,26 @@ class MemoryService:
         if not uid:
             return False
         
+        # STRICT VALIDATION: Ensure full UUID
+        try:
+            UserId.assert_full_uuid(uid)
+        except UserIdError as e:
+            logger.error(f"[MEMORY SERVICE] ❌ Invalid user_id: {e}")
+            print(f"[MEMORY SERVICE] ❌ Invalid user_id: {e}")
+            return False
+        
         # Validate key format - reject timestamp-based keys
         if key.startswith("user_input_"):
             print(f"[MEMORY SERVICE] ❌ Rejected timestamp-based key: {key}")
             print(f"[MEMORY SERVICE]    Use descriptive English keys instead (e.g., 'favorite_food', 'nickname')")
+            return False
+        
+        # CRITICAL: Ensure profile exists BEFORE any memory insert
+        user_service = UserService(self.supabase)
+        if not user_service.ensure_profile_exists(uid):
+            logger.error(f"[MEMORY SERVICE] ❌ CRITICAL: Cannot save memory - profile does not exist for {UserId.format_for_display(uid)}")
+            print(f"[MEMORY SERVICE] ❌ CRITICAL: Cannot save memory - profile does not exist for {UserId.format_for_display(uid)}")
+            print(f"[MEMORY SERVICE] ❌ This is a FK constraint violation waiting to happen!")
             return False
         
         try:
@@ -52,10 +70,10 @@ class MemoryService:
                 "value": value,
             }
             logger.info(f"[MEMORY SERVICE] 💾 Saving memory (sync): [{category}] {key}")
-            logger.debug(f"[MEMORY SERVICE]    User: {uid[:8]}... Value: {value[:50]}...")
+            logger.debug(f"[MEMORY SERVICE]    User: {UserId.format_for_display(uid)} Value: {value[:50]}...")
             print(f"[MEMORY SERVICE] 💾 Saving memory: [{category}] {key}")
             print(f"[MEMORY SERVICE]    Value: {value[:100]}{'...' if len(value) > 100 else ''}")
-            print(f"[MEMORY SERVICE]    User: {uid[:8]}...")
+            print(f"[MEMORY SERVICE]    User: {UserId.format_for_display(uid)}")
             
             # Upsert with conflict resolution on unique constraint (user_id, category, key)
             try:
@@ -68,34 +86,16 @@ class MemoryService:
                 err_str = str(db_error)
                 logger.error(f"[MEMORY SERVICE] ❌ Database error (sync): {err_str}")
                 
-                # Check if it's a FK constraint violation
+                # Check if it's a FK constraint violation (23503)
                 if "23503" in err_str or ("violates foreign key constraint" in err_str.lower() and "profiles" in err_str.lower()):
-                    logger.warning(f"[MEMORY SERVICE] ⚠️  FK error detected (sync), ensuring profiles row exists...")
-                    print(f"[MEMORY SERVICE] ⚠️  FK error detected, ensuring profiles row exists then retrying once...")
-                    
-                    # Ensure profile exists and retry
-                    user_service = UserService(self.supabase)
-                    profile_created = user_service.ensure_profile_exists(uid)
-                    
-                    if profile_created:
-                        logger.info(f"[MEMORY SERVICE] ✓ Profile exists (sync), retrying memory save...")
-                        print(f"[MEMORY SERVICE] ✓ Profile exists, retrying...")
-                        try:
-                            retry = self.supabase.table("memory").upsert(
-                                memory_data,
-                                on_conflict="user_id,category,key"
-                            ).execute()
-                            logger.info(f"[MEMORY SERVICE] ✅ Saved successfully after ensuring profiles parent (sync)")
-                            print(f"[MEMORY SERVICE] ✅ Saved successfully after ensuring profiles parent")
-                            return True
-                        except Exception as retry_error:
-                            logger.error(f"[MEMORY SERVICE] ❌ Retry failed (sync): {retry_error}")
-                            print(f"[MEMORY SERVICE] ❌ Retry failed: {retry_error}")
-                            return False
-                    else:
-                        logger.error(f"[MEMORY SERVICE] ❌ Failed to ensure profile exists (sync)")
-                        print(f"[MEMORY SERVICE] ❌ Failed to ensure profile exists")
-                        return False
+                    # This should NEVER happen because we called ensure_profile_exists above
+                    logger.critical(f"[MEMORY SERVICE] 🚨 CRITICAL BUG: FK error after ensure_profile_exists!")
+                    logger.critical(f"[MEMORY SERVICE] 🚨 user_id: {uid}")
+                    logger.critical(f"[MEMORY SERVICE] 🚨 Error: {err_str}")
+                    print(f"[MEMORY SERVICE] 🚨 CRITICAL BUG: FK error despite ensuring profile exists!")
+                    print(f"[MEMORY SERVICE] 🚨 This indicates a serious consistency issue")
+                    print(f"[MEMORY SERVICE] 🚨 user_id: {uid}")
+                    return False
                 else:
                     # Some other database error
                     logger.error(f"[MEMORY SERVICE] ❌ Non-FK database error (sync): {err_str}")
@@ -136,9 +136,17 @@ class MemoryService:
         if not uid:
             return None
         
+        # STRICT VALIDATION: Ensure full UUID
+        try:
+            UserId.assert_full_uuid(uid)
+        except UserIdError as e:
+            logger.error(f"[MEMORY SERVICE] ❌ Invalid user_id: {e}")
+            print(f"[MEMORY SERVICE] ❌ Invalid user_id: {e}")
+            return None
+        
         try:
             print(f"[MEMORY SERVICE] 🔍 Fetching memory: [{category}] {key}")
-            print(f"[MEMORY SERVICE]    User: {uid[:8]}...")
+            print(f"[MEMORY SERVICE]    User: {UserId.format_for_display(uid)}")
             
             resp = self.supabase.table("memory").select("value") \
                             .eq("user_id", uid) \
@@ -180,9 +188,17 @@ class MemoryService:
         if not uid:
             return []
         
+        # STRICT VALIDATION: Ensure full UUID
+        try:
+            UserId.assert_full_uuid(uid)
+        except UserIdError as e:
+            logger.error(f"[MEMORY SERVICE] ❌ Invalid user_id: {e}")
+            print(f"[MEMORY SERVICE] ❌ Invalid user_id: {e}")
+            return []
+        
         try:
             print(f"[MEMORY SERVICE] 🔍 Fetching memories by category: [{category}] (limit: {limit})")
-            print(f"[MEMORY SERVICE]    User: {uid[:8]}...")
+            print(f"[MEMORY SERVICE]    User: {UserId.format_for_display(uid)}")
             
             resp = self.supabase.table("memory").select("*") \
                             .eq("user_id", uid) \
@@ -256,9 +272,17 @@ class MemoryService:
         if not uid:
             return {cat: [] for cat in categories}
         
+        # STRICT VALIDATION: Ensure full UUID
+        try:
+            UserId.assert_full_uuid(uid)
+        except UserIdError as e:
+            logger.error(f"[MEMORY SERVICE] ❌ Invalid user_id: {e}")
+            print(f"[MEMORY SERVICE] ❌ Invalid user_id: {e}")
+            return {cat: [] for cat in categories}
+        
         try:
             print(f"[MEMORY SERVICE] 🚀 Batch fetching {len(categories)} categories (optimized)...")
-            print(f"[MEMORY SERVICE]    User: {uid[:8]}...")
+            print(f"[MEMORY SERVICE]    User: {UserId.format_for_display(uid)}")
             
             # Single query with .in_() filter - gets all categories at once!
             resp = self.supabase.table("memory").select("*") \
@@ -291,17 +315,26 @@ class MemoryService:
     async def store_memory_async(self, category: str, key: str, value: str, user_id: str) -> bool:
         """
         Save memory to Supabase (async version).
+        ENSURES profile exists BEFORE attempting insert to prevent FK errors.
         
         Args:
             category: Memory category (FACT, GOAL, INTEREST, etc.)
             key: Memory key (must be English, snake_case, no timestamp format)
             value: Memory value
-            user_id: User ID (explicit, required)
+            user_id: User ID (explicit, required - full UUID)
             
         Returns:
             True if successful, False otherwise
         """
         if not user_id:
+            return False
+        
+        # STRICT VALIDATION: Ensure full UUID
+        try:
+            UserId.assert_full_uuid(user_id)
+        except UserIdError as e:
+            logger.error(f"[MEMORY SERVICE] ❌ Invalid user_id: {e}")
+            print(f"[MEMORY SERVICE] ❌ Invalid user_id: {e}")
             return False
         
         # Validate key format - reject timestamp-based keys
@@ -310,8 +343,17 @@ class MemoryService:
             print(f"[MEMORY SERVICE]    Use descriptive English keys instead (e.g., 'favorite_food', 'nickname')")
             return False
         
+        # CRITICAL: Ensure profile exists BEFORE any memory insert
+        import asyncio
+        user_service = UserService(self.supabase)
+        profile_exists = await asyncio.to_thread(user_service.ensure_profile_exists, user_id)
+        if not profile_exists:
+            logger.error(f"[MEMORY SERVICE] ❌ CRITICAL: Cannot save memory - profile does not exist for {UserId.format_for_display(user_id)}")
+            print(f"[MEMORY SERVICE] ❌ CRITICAL: Cannot save memory - profile does not exist for {UserId.format_for_display(user_id)}")
+            print(f"[MEMORY SERVICE] ❌ This is a FK constraint violation waiting to happen!")
+            return False
+        
         try:
-            import asyncio
             memory_data = {
                 "user_id": user_id,
                 "category": category,
@@ -320,7 +362,7 @@ class MemoryService:
             }
             
             logger.info(f"[MEMORY SERVICE] 💾 Attempting async save: [{category}] {key}")
-            logger.debug(f"[MEMORY SERVICE]    User: {user_id[:8]}... Value: {value[:50]}...")
+            logger.debug(f"[MEMORY SERVICE]    User: {UserId.format_for_display(user_id)} Value: {value[:50]}...")
             
             try:
                 resp = await asyncio.to_thread(
@@ -329,39 +371,22 @@ class MemoryService:
             except Exception as db_error:
                 # Handle FK constraint errors from Postgrest exceptions
                 err_str = str(db_error)
-                logger.error(f"[MEMORY SERVICE] ❌ Database error: {err_str}")
+                logger.error(f"[MEMORY SERVICE] ❌ Database error (async): {err_str}")
                 
-                # Check if it's a FK constraint violation
+                # Check if it's a FK constraint violation (23503)
                 if "23503" in err_str or ("violates foreign key constraint" in err_str.lower() and "profiles" in err_str.lower()):
-                    logger.warning(f"[MEMORY SERVICE] ⚠️  FK error detected, ensuring profiles row exists...")
-                    print(f"[MEMORY SERVICE] ⚠️  FK error detected, ensuring profiles row exists...")
-                    
-                    # Ensure profile exists and retry
-                    user_service = UserService(self.supabase)
-                    profile_created = await asyncio.to_thread(user_service.ensure_profile_exists, user_id)
-                    
-                    if profile_created:
-                        logger.info(f"[MEMORY SERVICE] ✓ Profile exists, retrying memory save...")
-                        print(f"[MEMORY SERVICE] ✓ Profile exists, retrying memory save...")
-                        try:
-                            retry = await asyncio.to_thread(
-                                lambda: self.supabase.table("memory").upsert(memory_data, on_conflict="user_id,category,key").execute()
-                            )
-                            logger.info(f"[MEMORY SERVICE] ✅ Saved successfully after ensuring profiles parent (async)")
-                            print(f"[MEMORY SERVICE] ✅ Saved successfully after ensuring profiles parent (async)")
-                            return True
-                        except Exception as retry_error:
-                            logger.error(f"[MEMORY SERVICE] ❌ Retry failed: {retry_error}")
-                            print(f"[MEMORY SERVICE] ❌ Retry failed: {retry_error}")
-                            return False
-                    else:
-                        logger.error(f"[MEMORY SERVICE] ❌ Failed to ensure profile exists")
-                        print(f"[MEMORY SERVICE] ❌ Failed to ensure profile exists")
-                        return False
+                    # This should NEVER happen because we called ensure_profile_exists above
+                    logger.critical(f"[MEMORY SERVICE] 🚨 CRITICAL BUG: FK error after ensure_profile_exists! (async)")
+                    logger.critical(f"[MEMORY SERVICE] 🚨 user_id: {user_id}")
+                    logger.critical(f"[MEMORY SERVICE] 🚨 Error: {err_str}")
+                    print(f"[MEMORY SERVICE] 🚨 CRITICAL BUG: FK error despite ensuring profile exists! (async)")
+                    print(f"[MEMORY SERVICE] 🚨 This indicates a serious consistency issue")
+                    print(f"[MEMORY SERVICE] 🚨 user_id: {user_id}")
+                    return False
                 else:
                     # Some other database error
-                    logger.error(f"[MEMORY SERVICE] ❌ Non-FK database error: {err_str}")
-                    print(f"[MEMORY SERVICE] ❌ Non-FK database error: {err_str}")
+                    logger.error(f"[MEMORY SERVICE] ❌ Non-FK database error (async): {err_str}")
+                    print(f"[MEMORY SERVICE] ❌ Non-FK database error (async): {err_str}")
                     return False
             
             # Check response for errors (old error handling pattern)

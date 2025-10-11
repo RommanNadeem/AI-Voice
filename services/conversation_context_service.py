@@ -176,7 +176,7 @@ class ConversationContextService:
         🔥 FIX: Always use onboarding table as the source of truth for names.
         """
         try:
-            print(f"[CONTEXT SERVICE] 🔍 Fetching user's name from onboarding_details for {user_id[:8]}...")
+            print(f"[CONTEXT SERVICE] 🔍 Fetching user's name from onboarding_details for {UserId.format_for_display(user_id)}...")
             
             # 🔥 ALWAYS use onboarding_details table for names
             onboarding_result = await asyncio.to_thread(
@@ -203,7 +203,7 @@ class ConversationContextService:
         Fetch user's gender from memory table.
         """
         try:
-            print(f"[CONTEXT SERVICE] 🔍 Fetching user's gender from memory for {user_id[:8]}...")
+            print(f"[CONTEXT SERVICE] 🔍 Fetching user's gender from memory for {UserId.format_for_display(user_id)}...")
             
             # Fetch gender from memory table
             gender_result = await asyncio.to_thread(

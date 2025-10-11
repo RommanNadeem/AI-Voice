@@ -29,7 +29,7 @@ class OnboardingService:
             return
         
         try:
-            logger.info(f"🔄 Checking if user {user_id[:8]} needs initialization...")
+            logger.info(f"🔄 Checking if user {UserId.format_for_display(user_id)} needs initialization...")
             
             # Check if profile already exists
             profile_resp = self.supabase.table("user_profiles").select("profile_text").eq("user_id", user_id).execute()
@@ -54,7 +54,7 @@ class OnboardingService:
             result = self.supabase.table("onboarding_details").select("full_name, gender, occupation, interests").eq("user_id", user_id).execute()
             
             if not result.data:
-                logger.error(f"❌ No onboarding_details found for user {user_id[:8]}")
+                logger.error(f"❌ No onboarding_details found for user {UserId.format_for_display(user_id)}")
                 logger.error(f"   User needs to complete onboarding first")
                 return
             

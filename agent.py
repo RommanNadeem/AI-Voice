@@ -30,6 +30,7 @@ from core.validators import (
     extract_uuid_from_identity,
     can_write_for_current_user,
 )
+from core.user_id import UserId, UserIdError
 
 # Import services
 from services import (
@@ -755,7 +756,7 @@ For every reply:
         user_id = get_current_user_id()
         
         # DEBUG: Track user_id in tool execution
-        print(f"[DEBUG][USER_ID] searchMemories - Current user_id: {user_id[:8] if user_id else 'NONE'}")
+        print(f"[DEBUG][USER_ID] searchMemories - Current user_id: {UserId.format_for_display(user_id) if user_id else 'NONE'}")
         
         if not user_id:
             print(f"[TOOL] ⚠️  No active user")
@@ -765,7 +766,7 @@ For every reply:
         try:
             if not self.rag_service:
                 print(f"[TOOL] ⚠️  RAG not initialized")
-                print(f"[DEBUG][RAG] ❌ RAG service is None for user {user_id[:8]}")
+                print(f"[DEBUG][RAG] ❌ RAG service is None for user {UserId.format_for_display(user_id)}")
                 return {"memories": [], "message": "RAG not initialized"}
             
             # DEBUG: Check RAG state
@@ -774,7 +775,7 @@ For every reply:
             if rag_system:
                 memory_count = len(rag_system.memories)
                 print(f"[DEBUG][RAG] Current RAG has {memory_count} memories loaded")
-                print(f"[DEBUG][RAG] RAG user_id: {rag_system.user_id[:8]}")
+                print(f"[DEBUG][RAG] RAG user_id: {UserId.format_for_display(rag_system.user_id)}")
                 print(f"[DEBUG][RAG] FAISS index total: {rag_system.index.ntotal}")
             
             self.rag_service.update_conversation_context(query)
@@ -1280,16 +1281,16 @@ async def entrypoint(ctx: agents.JobContext):
             profile_exists = await asyncio.to_thread(user_service.ensure_profile_exists, user_id)
             
             if not profile_exists:
-                logging.error(f"[PROFILE] ❌ CRITICAL: Failed to ensure profile exists for {user_id[:8]}")
+                logging.error(f"[PROFILE] ❌ CRITICAL: Failed to ensure profile exists for {UserId.format_for_display(user_id)}")
                 logging.error(f"[PROFILE] This will cause ALL memory and profile saves to fail!")
-                print(f"[PROFILE] ❌ CRITICAL: Failed to ensure profile exists for {user_id[:8]}")
+                print(f"[PROFILE] ❌ CRITICAL: Failed to ensure profile exists for {UserId.format_for_display(user_id)}")
             else:
-                logging.info(f"[PROFILE] ✅ Profile exists in database for {user_id[:8]}")
-                print(f"[PROFILE] ✅ Profile exists in database for {user_id[:8]}")
+                logging.info(f"[PROFILE] ✅ Profile exists in database for {UserId.format_for_display(user_id)}")
+                print(f"[PROFILE] ✅ Profile exists in database for {UserId.format_for_display(user_id)}")
             
             # Initialize user from onboarding data (creates profile + memories)
             try:
-                logging.info(f"[ONBOARDING] Initializing user {user_id[:8]} from onboarding data...")
+                logging.info(f"[ONBOARDING] Initializing user {UserId.format_for_display(user_id)} from onboarding data...")
                 onboarding_service_tmp = OnboardingService(supabase)
                 await onboarding_service_tmp.initialize_user_from_onboarding(user_id)
                 logging.info("[ONBOARDING] ✓ User initialization complete (profile + memories created)")
@@ -1461,11 +1462,11 @@ async def entrypoint(ctx: agents.JobContext):
         return
     
     # User_id already set earlier, just verify
-    print(f"[SESSION] 👤 User ID: {user_id[:8]}...")
+    print(f"[SESSION] 👤 User ID: {UserId.format_for_display(user_id)}...")
     print(f"[DEBUG][USER_ID] Verification - get_current_user_id(): {get_current_user_id()}")
     
     # OPTIMIZATION: Initialize RAG and load in background (non-blocking)
-    print(f"[RAG] Initializing for user {user_id[:8]}...")
+    print(f"[RAG] Initializing for user {UserId.format_for_display(user_id)}...")
     rag_service = RAGService(user_id)
     assistant.rag_service = rag_service
     print(f"[RAG] ✅ RAG service attached (will load in background)")
