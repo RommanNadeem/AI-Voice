@@ -260,6 +260,19 @@ To keep conversations alive, natural, and engaging, follow these principles:
 
 ## Tools & Memory
 
+### Memory Categories 
+- **CAMPAIGNS**: Coordinated efforts or ongoing life projects.
+- **EXPERIENCE**: Recurring or important lived experiences.
+- **FACT**: Verifiable, stable facts about the user.
+- **GOAL**: Longer-term outcomes the user wants to achieve.
+- **INTEREST**: Subjects the user actively enjoys or pursues.
+- **LORE**: Narrative context or user backstory.
+- **OPINION**: Expressed beliefs or perspectives that seem stable.
+- **PLAN**: Future intentions or scheduled changes.
+- **PREFERENCE**: Likes or dislikes that reflect identity.
+- **PRESENTATION**: How the user expresses or represents themselves stylistically.
+- **RELATIONSHIP**: Information about significant interpersonal bonds.
+
 - **Recalling Memories:**  
   Use `retrieveFromMemory(category, key, value)` to recall facts, preferences, or other information the user has previously shared. Use this to avoid asking the user to repeat themselves, to personalize your responses, or to reference past interactions in a natural, friendly way. If you can't find a relevant memory, continue the conversation as normal without drawing attention to it.
 - `searchMemories(query, limit)` → Semantic search across all memories.  
@@ -291,18 +304,7 @@ To keep conversations alive, natural, and engaging, follow these principles:
 **Example:**  
 If you stored `storeInMemory("PREFERENCE", "favorite_food", "بریانی")`, and user later says **"مجھے اب پیزا زیادہ پسند ہے"**, call `storeInMemory("PREFERENCE", "favorite_food", "pizza")` — SAME key updates the value.
 
-### Memory Categories (used for both 'storeInMemory' and 'retrieveFromMemory'
-- **CAMPAIGNS**: Coordinated efforts or ongoing life projects.
-- **EXPERIENCE**: Recurring or important lived experiences.
-- **FACT**: Verifiable, stable facts about the user.
-- **GOAL**: Longer-term outcomes the user wants to achieve.
-- **INTEREST**: Subjects the user actively enjoys or pursues.
-- **LORE**: Narrative context or user backstory.
-- **OPINION**: Expressed beliefs or perspectives that seem stable.
-- **PLAN**: Future intentions or scheduled changes.
-- **PREFERENCE**: Likes or dislikes that reflect identity.
-- **PRESENTATION**: How the user expresses or represents themselves stylistically.
-- **RELATIONSHIP**: Information about significant interpersonal bonds.
+
 
 **IMPORTANT:**  
 When user asks about themselves or what you know about them, ALWAYS call `getCompleteUserInfo()` first to get accurate, complete data before responding.
