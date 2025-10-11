@@ -85,8 +85,9 @@ Based on implementation, the schema is:
 ```sql
 -- profiles table (parent)
 CREATE TABLE profiles (
-    id UUID PRIMARY KEY,  -- This IS the user_id
-    email TEXT,
+    id SERIAL PRIMARY KEY,  -- Auto-increment PK
+    user_id UUID UNIQUE NOT NULL,  -- This is the user's UUID
+    email TEXT UNIQUE,
     is_first_login BOOLEAN,
     ...
 );
@@ -94,17 +95,19 @@ CREATE TABLE profiles (
 -- memory table (child)
 CREATE TABLE memory (
     id UUID PRIMARY KEY,
-    user_id UUID REFERENCES profiles(id),  -- FK to profiles.id
+    user_id UUID NOT NULL,  -- FK to profiles.user_id
     category TEXT,
     key TEXT,
     value TEXT,
+    FOREIGN KEY (user_id) REFERENCES profiles(user_id),
     ...
 );
 
 -- user_profiles table (child)
 CREATE TABLE user_profiles (
-    user_id UUID PRIMARY KEY REFERENCES profiles(id),  -- FK to profiles.id
+    user_id UUID PRIMARY KEY,  -- FK to profiles.user_id
     profile_text TEXT,
+    FOREIGN KEY (user_id) REFERENCES profiles(user_id),
     ...
 );
 ```
