@@ -897,6 +897,33 @@ For every reply:
         Best Practice: Transition back to listening after speech is committed
         """
         logging.info(f"[AGENT] Speech committed - transitioning to listening")
+        
+        # Capture assistant response for context updates
+        try:
+            if hasattr(turn_ctx, 'agent_message') and turn_ctx.agent_message:
+                assistant_response = turn_ctx.agent_message.text_content or ""
+                if assistant_response:
+                    # Get the last user message from turn context
+                    user_message = ""
+                    if hasattr(turn_ctx, 'user_message') and turn_ctx.user_message:
+                        user_message = turn_ctx.user_message.text_content or ""
+                    
+                    # Trigger conversation context update with both messages
+                    if user_message and assistant_response:
+                        user_id = get_current_user_id()
+                        if user_id:
+                            try:
+                                await self.conversation_state_service.update_conversation_context(
+                                    user_message=user_message,
+                                    assistant_message=assistant_response,
+                                    user_id=user_id
+                                )
+                                logging.info(f"[CONTEXT] ✅ Updated conversation context with summary")
+                            except Exception as e:
+                                logging.error(f"[CONTEXT] Failed to update conversation context: {e}")
+        except Exception as e:
+            logging.error(f"[CONTEXT] Error capturing assistant response: {e}")
+        
         await self.broadcast_state("listening")
     
     async def on_user_speech_started(self, turn_ctx):
