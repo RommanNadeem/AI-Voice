@@ -35,14 +35,14 @@ class ProfileService:
         if not user_input or not user_input.strip():
             return existing_profile
         
-        # OPTIMIZATION: Skip profile generation for short/trivial inputs
-        if len(user_input.strip()) < 15:
+        # OPTIMIZATION: Skip profile generation for very short inputs (reduced from 15 to 5)
+        if len(user_input.strip()) < 5:
             return existing_profile
         
-        # OPTIMIZATION: Skip if profile is long enough and input seems trivial
+        # OPTIMIZATION: Skip only single-word trivial responses
         if existing_profile and len(existing_profile) > 200:
-            # Check if input contains meaningful profile information
-            trivial_patterns = ["ok", "okay", "yes", "no", "haan", "nahi", "achha", "theek"]
+            # Check if input is a single trivial word
+            trivial_patterns = ["ok", "okay", "yes", "no", "haan", "nahi"]
             if user_input.lower().strip() in trivial_patterns:
                 return existing_profile
         
@@ -222,8 +222,8 @@ class ProfileService:
         
         len_diff_pct = abs(len(new_norm) - len(old_norm)) / len(old_norm)
         
-        # If length changed by more than 5%, consider it changed
-        if len_diff_pct > 0.05:
+        # If length changed by more than 10%, consider it changed (relaxed from 5%)
+        if len_diff_pct > 0.10:
             return False
         
         # Small length change - check word-level similarity
@@ -237,11 +237,11 @@ class ProfileService:
         total = max(len(old_words), len(new_words))
         similarity = overlap / total if total > 0 else 0
         
-        # If 95%+ similar, consider unchanged
-        is_similar = similarity > 0.95
+        # If 90%+ similar, consider unchanged (relaxed from 95%)
+        is_similar = similarity > 0.90
         
         if is_similar:
-            print(f"[PROFILE SERVICE] Profile similarity: {similarity*100:.1f}% (threshold: 95%)")
+            print(f"[PROFILE SERVICE] Profile similarity: {similarity*100:.1f}% (threshold: 90%)")
         
         return is_similar
     

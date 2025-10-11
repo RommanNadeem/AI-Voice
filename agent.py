@@ -974,8 +974,8 @@ For every reply:
             # Update profile - use async method with explicit user_id
             existing_profile = await self.profile_service.get_profile_async(user_id)
             
-            # Skip trivial inputs
-            if len(user_text.strip()) > 15:
+            # Skip only very short inputs (reduced from 15 to 5 chars)
+            if len(user_text.strip()) > 5:
                 generated_profile = await asyncio.to_thread(
                     self.profile_service.generate_profile,
                     user_text,
