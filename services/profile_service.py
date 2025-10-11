@@ -245,6 +245,96 @@ class ProfileService:
         
         return is_similar
     
+    async def create_profile_from_onboarding_async(self, user_id: str) -> bool:
+        """
+        Create and save a concise (<=200 chars) profile_text from onboarding_details
+        using OpenAI. Skips if no onboarding data or profile already exists.
+        """
+        if not user_id:
+            return False
+        if not self.supabase:
+            return False
+        
+        try:
+            # If a profile already exists and is non-empty, skip
+            existing = await self.get_profile_async(user_id)
+            if existing and existing.strip():
+                return True
+            
+            # Fetch onboarding_details: full_name, gender, occupation, interests
+            import asyncio
+            result = await asyncio.to_thread(
+                lambda: self.supabase.table("onboarding_details")
+                    .select("full_name, gender, occupation, interests")
+                    .eq("user_id", user_id)
+                    .limit(1)
+                    .execute()
+            )
+            data = getattr(result, "data", []) or []
+            if not data:
+                return False
+            ob = data[0]
+            full_name = (ob.get("full_name") or "").strip()
+            gender = (ob.get("gender") or "").strip()
+            occupation = (ob.get("occupation") or "").strip()
+            interests = (ob.get("interests") or "").strip()
+            
+            if not any([full_name, gender, occupation, interests]):
+                return False
+            
+            # Ensure parent profile row exists
+            user_service = UserService(self.supabase)
+            if not user_service.ensure_profile_exists(user_id):
+                return False
+            
+            # Use pooled OpenAI client
+            pool = get_connection_pool_sync()
+            client = pool.get_openai_client() if pool else openai.OpenAI(api_key=Config.OPENAI_API_KEY)
+            
+            # Build concise prompt for <=200 chars, factual only from provided fields
+            fields_text = (
+                f"Name: {full_name}. " if full_name else ""
+            ) + (
+                f"Gender: {gender}. " if gender else ""
+            ) + (
+                f"Occupation: {occupation}. " if occupation else ""
+            ) + (
+                f"Interests: {interests}." if interests else ""
+            )
+            
+            sys_msg = (
+                "You write a single compact profile line (<=200 characters). "
+                "ONLY use the provided facts; do not infer or add information. "
+                "Return plain text without headings."
+            )
+            user_msg = (
+                "Create a concise 200-character profile that includes available fields: "
+                "name, gender, occupation, interests. Keep natural and factual.\n\n"
+                f"Facts: {fields_text}"
+            )
+            
+            resp = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": sys_msg},
+                    {"role": "user", "content": user_msg},
+                ],
+                max_tokens=120,
+                temperature=0.2,
+            )
+            profile_text = (resp.choices[0].message.content or "").strip()
+            if len(profile_text) > 200:
+                profile_text = profile_text[:200]
+            if not profile_text:
+                return False
+            
+            # Save to user_profiles.profile_text (async, cached)
+            saved = await self.save_profile_async(profile_text, user_id)
+            return saved
+        except Exception as e:
+            print(f"[PROFILE SERVICE] create_profile_from_onboarding_async failed: {e}")
+            return False
+    
     def get_profile(self, user_id: Optional[str] = None) -> str:
         """
         Get user profile from Supabase (sync version).

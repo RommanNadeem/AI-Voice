@@ -1181,6 +1181,15 @@ async def entrypoint(ctx: agents.JobContext):
                 print(f"[CONTEXT] ⚠️ Failed to calculate time: {e}")
                 user_time_context = None
             
+            # If no profile exists yet, try creating one from onboarding_details
+            try:
+                prof_service_tmp = ProfileService(supabase)
+                created = await prof_service_tmp.create_profile_from_onboarding_async(user_id)
+                if created:
+                    print("[PROFILE] ✓ Initial 200-char profile created from onboarding_details")
+            except Exception as e:
+                print(f"[PROFILE] ⚠️ Failed to create profile from onboarding_details: {e}")
+
             # Load profile and memories for initial context
             print("[CONTEXT] Loading user data for initial context...")
             profile_service = ProfileService(supabase)
