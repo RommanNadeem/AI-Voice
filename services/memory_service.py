@@ -51,41 +51,69 @@ class MemoryService:
                 "key": key,
                 "value": value,
             }
+            logger.info(f"[MEMORY SERVICE] 💾 Saving memory (sync): [{category}] {key}")
+            logger.debug(f"[MEMORY SERVICE]    User: {uid[:8]}... Value: {value[:50]}...")
             print(f"[MEMORY SERVICE] 💾 Saving memory: [{category}] {key}")
             print(f"[MEMORY SERVICE]    Value: {value[:100]}{'...' if len(value) > 100 else ''}")
             print(f"[MEMORY SERVICE]    User: {uid[:8]}...")
             
             # Upsert with conflict resolution on unique constraint (user_id, category, key)
-            resp = self.supabase.table("memory").upsert(
-                memory_data,
-                on_conflict="user_id,category,key"
-            ).execute()
-            if getattr(resp, "error", None):
-                # Handle possible FK error to profiles by ensuring parent exists, then retry once
-                err = resp.error
-                err_str = str(err)
-                if isinstance(err, dict):
-                    err_code = err.get("code")
-                else:
-                    err_code = None
-                if err_code == "23503" or ("violates foreign key constraint" in err_str and "profiles" in err_str.lower()):
-                    print(f"[MEMORY SERVICE] ⚠️  FK error, ensuring profiles row exists then retrying once...")
+            try:
+                resp = self.supabase.table("memory").upsert(
+                    memory_data,
+                    on_conflict="user_id,category,key"
+                ).execute()
+            except Exception as db_error:
+                # Handle FK constraint errors from Postgrest exceptions
+                err_str = str(db_error)
+                logger.error(f"[MEMORY SERVICE] ❌ Database error (sync): {err_str}")
+                
+                # Check if it's a FK constraint violation
+                if "23503" in err_str or ("violates foreign key constraint" in err_str.lower() and "profiles" in err_str.lower()):
+                    logger.warning(f"[MEMORY SERVICE] ⚠️  FK error detected (sync), ensuring profiles row exists...")
+                    print(f"[MEMORY SERVICE] ⚠️  FK error detected, ensuring profiles row exists then retrying once...")
+                    
+                    # Ensure profile exists and retry
                     user_service = UserService(self.supabase)
-                    if user_service.ensure_profile_exists(uid):
-                        retry = self.supabase.table("memory").upsert(
-                            memory_data,
-                            on_conflict="user_id,category,key"
-                        ).execute()
-                        if not getattr(retry, "error", None):
+                    profile_created = user_service.ensure_profile_exists(uid)
+                    
+                    if profile_created:
+                        logger.info(f"[MEMORY SERVICE] ✓ Profile exists (sync), retrying memory save...")
+                        print(f"[MEMORY SERVICE] ✓ Profile exists, retrying...")
+                        try:
+                            retry = self.supabase.table("memory").upsert(
+                                memory_data,
+                                on_conflict="user_id,category,key"
+                            ).execute()
+                            logger.info(f"[MEMORY SERVICE] ✅ Saved successfully after ensuring profiles parent (sync)")
                             print(f"[MEMORY SERVICE] ✅ Saved successfully after ensuring profiles parent")
                             return True
-                    print(f"[MEMORY SERVICE] ❌ Save error persists after retry: {resp.error}")
+                        except Exception as retry_error:
+                            logger.error(f"[MEMORY SERVICE] ❌ Retry failed (sync): {retry_error}")
+                            print(f"[MEMORY SERVICE] ❌ Retry failed: {retry_error}")
+                            return False
+                    else:
+                        logger.error(f"[MEMORY SERVICE] ❌ Failed to ensure profile exists (sync)")
+                        print(f"[MEMORY SERVICE] ❌ Failed to ensure profile exists")
+                        return False
+                else:
+                    # Some other database error
+                    logger.error(f"[MEMORY SERVICE] ❌ Non-FK database error (sync): {err_str}")
+                    print(f"[MEMORY SERVICE] ❌ Save error: {err_str}")
                     return False
-                print(f"[MEMORY SERVICE] ❌ Save error: {resp.error}")
+            
+            # Check response for errors (old error handling pattern)
+            if getattr(resp, "error", None):
+                err = resp.error
+                logger.error(f"[MEMORY SERVICE] ❌ Save error in response (sync): {err}")
+                print(f"[MEMORY SERVICE] ❌ Save error: {err}")
                 return False
+            
+            logger.info(f"[MEMORY SERVICE] ✅ Saved successfully (sync): [{category}] {key}")
             print(f"[MEMORY SERVICE] ✅ Saved successfully: [{category}] {key}")
             return True
         except Exception as e:
+            logger.error(f"[MEMORY SERVICE] save_memory failed: {e}", exc_info=True)
             print(f"[MEMORY SERVICE] save_memory failed: {e}")
             return False
     
