@@ -191,9 +191,9 @@ def extract_memory_key_value(user_text: str, category: str):
             f"Category hint: {category}.\n"
             f"User text: {user_text}\n\n"
             "Examples that SHOULD produce a key:\n"
-            "- 'مجھے چکن قورمہ بہت پسند ہے' -> key: favorite_food, value: چکن قورمہ\n"
-            "- 'میری بہن کا نام عائشہ ہے' -> key: sister_name, value: عائشہ\n"
-            "- 'میں کراچی میں رہتا ہوں' -> key: location, value: کراچی\n\n"
+            "- 'مجھے چکن قورمہ بہت پسند ہے' -> key: favorite_food, value: رومان کو چکن بریانی پسند ہے\n"
+            "- 'میری بہن کا نام عائشہ ہے' -> key: sister_name, value: رومان کی بہن کا نام عائشہ ہے۔\n"
+            "- 'میں کراچی میں رہتا ہوں' -> key: location, value: رومان کراچی میں رہتا ہے۔\n\n"
             "Examples that SHOULD be NONE (ephemeral):\n"
             "- 'میں ٹھیک ہوں'\n"
             "- 'آج میں مصروف ہوں'\n"
@@ -206,7 +206,7 @@ def extract_memory_key_value(user_text: str, category: str):
                 {"role": "user", "content": user_msg},
             ],
             max_tokens=60,
-            temperature=0.1,
+            temperature=0.5,
         )
 
         content = (resp.choices[0].message.content or "").strip()
