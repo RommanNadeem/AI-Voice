@@ -6,6 +6,7 @@ import logging
 from typing import Optional
 from supabase import Client
 from core.validators import get_current_user_id
+from core.user_id import UserId, UserIdError
 from core.config import Config
 
 logger = logging.getLogger(__name__)
