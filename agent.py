@@ -992,6 +992,9 @@ For every reply:
                             item.text_content
                         )
                         
+                        # Trigger conversation summary update in background
+                        asyncio.create_task(self._update_conversation_context_from_rag())
+                        
                 elif hasattr(item, 'content') and item.content:
                     self._last_assistant_response = item.content
                     logging.info(f"[ASSISTANT] Response captured: {item.content[:50]}...")
@@ -1003,6 +1006,9 @@ For every reply:
                             self._pending_user_message,
                             item.content
                         )
+                        
+                        # Trigger conversation summary update in background
+                        asyncio.create_task(self._update_conversation_context_from_rag())
         except Exception as e:
             logging.error(f"[ASSISTANT] Failed to capture response: {e}")
     
