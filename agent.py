@@ -257,9 +257,9 @@ class Assistant(Agent):
         self._last_assistant_response = ""  # Store last assistant response from conversation_item_added
         
         # PATCH: Store session and chat context for conversation history management
-        # NOTE: ChatContext is passed to session.start() which enables LiveKit to maintain
-        # conversation history automatically. The _conversation_history is maintained as backup
-        # and for debugging/logging purposes.
+        # NOTE: ChatContext is passed to parent Agent class (line 403) where LiveKit's framework
+        # manages it automatically. We store it here for reference and maintain _conversation_history
+        # internally for tracking, logging, and potential additional context injection if needed.
         self._session = None
         self._chat_ctx = chat_ctx if chat_ctx else ChatContext()
         self._conversation_history = []  # [(user_msg, assistant_msg), ...]
@@ -471,6 +471,11 @@ For every reply:
         
         self._conversation_history = trimmed_history
         print(f"[HISTORY] Updated: {len(self._conversation_history)} turns, ~{total_tokens} tokens")
+        
+        # Track conversation history for logging
+        # NOTE: LiveKit's Agent framework automatically manages conversation context,
+        # so we just track this internally for debugging and monitoring purposes.
+        self._inject_conversation_history_to_context()
     
     def _get_conversation_context_string(self) -> str:
         """Format conversation history as context string"""
@@ -483,6 +488,26 @@ For every reply:
             context_lines.append(f"Assistant: {asst_msg}")
         
         return "\n".join(context_lines)
+    
+    def _inject_conversation_history_to_context(self):
+        """
+        Prepare conversation history for context injection.
+        NOTE: LiveKit's Agent framework handles conversation history automatically
+        through the session. This method tracks history for logging and potential
+        future use. The actual conversation context is maintained by LiveKit.
+        """
+        try:
+            if not self._conversation_history:
+                return
+            
+            # Get conversation history string for logging
+            history_string = self._get_conversation_context_string()
+            
+            if history_string:
+                print(f"[CONTEXT] 📝 Tracked {len(self._conversation_history)} conversation turns (~{self._estimate_tokens(history_string)} tokens)")
+            
+        except Exception as e:
+            print(f"[CONTEXT] ⚠️ History tracking warning: {e}")
     
     async def broadcast_state(self, state: str):
         """
@@ -1416,6 +1441,9 @@ async def entrypoint(ctx: agents.JobContext):
     assistant.set_room(ctx.room)
     
     # Configure LLM with increased timeout for context-heavy prompts
+    # NOTE: Conversation context (initial_ctx with user profile + memories) is passed to
+    # the Agent class (line 403: super().__init__(chat_ctx=chat_ctx)), and LiveKit's
+    # framework manages it automatically. No need to pass to LLM or AgentSession.
     llm = lk_openai.LLM(
         model="gpt-4o-mini",
         temperature=0.8,  # More creative responses
@@ -1438,7 +1466,8 @@ async def entrypoint(ctx: agents.JobContext):
     # LiveKit Best Practice: Optimize VAD for real-world conditions
     # Lower activation threshold = more sensitive (might pick up background noise)
     # Higher activation threshold = less sensitive (might miss quiet speech)
-    # Pass ChatContext to AgentSession for conversation history
+    # Conversation context is managed by the Agent framework (passed to Assistant's parent
+    # Agent class). AgentSession just needs the LLM, STT, TTS, and VAD components.
     session = AgentSession(
         stt=lk_openai.STT(model="gpt-4o-transcribe", language="ur"),
         llm=llm,
@@ -1448,20 +1477,20 @@ async def entrypoint(ctx: agents.JobContext):
             activation_threshold=0.6,      # Increased from 0.5 to reduce false triggers
             min_speech_duration=0.15,      # Increased from 0.1 to ignore brief noise
         ),
-        chat_ctx=initial_ctx,  # Pass conversation context to session
     )
 
     # PATCH: Store session reference in assistant for history management
     assistant.set_session(session)
     
     # Start session with RoomInputOptions (best practice)
-    print(f"[SESSION INIT] Starting LiveKit session with {len(initial_ctx.messages)} context messages...")
+    print(f"[SESSION INIT] Starting LiveKit session...")
+    print(f"[SESSION INIT] ChatContext prepared with user profile + memories")
     await session.start(
         room=ctx.room, 
         agent=assistant,
         room_input_options=RoomInputOptions()
     )
-    print(f"[SESSION INIT] ✓ Session started with conversation context enabled")
+    print(f"[SESSION INIT] ✓ Session started successfully")
     
     # Wait for session to fully initialize
     await asyncio.sleep(0.5)
