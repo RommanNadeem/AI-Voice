@@ -1438,6 +1438,7 @@ async def entrypoint(ctx: agents.JobContext):
     # LiveKit Best Practice: Optimize VAD for real-world conditions
     # Lower activation threshold = more sensitive (might pick up background noise)
     # Higher activation threshold = less sensitive (might miss quiet speech)
+    # Pass ChatContext to AgentSession for conversation history
     session = AgentSession(
         stt=lk_openai.STT(model="gpt-4o-transcribe", language="ur"),
         llm=llm,
@@ -1447,20 +1448,20 @@ async def entrypoint(ctx: agents.JobContext):
             activation_threshold=0.6,      # Increased from 0.5 to reduce false triggers
             min_speech_duration=0.15,      # Increased from 0.1 to ignore brief noise
         ),
+        chat_ctx=initial_ctx,  # Pass conversation context to session
     )
 
     # PATCH: Store session reference in assistant for history management
     assistant.set_session(session)
     
-    # Start session with RoomInputOptions and ChatContext (best practice)
-    print("[SESSION INIT] Starting LiveKit session with conversation context...")
+    # Start session with RoomInputOptions (best practice)
+    print(f"[SESSION INIT] Starting LiveKit session with {len(initial_ctx.messages)} context messages...")
     await session.start(
         room=ctx.room, 
         agent=assistant,
-        chat_ctx=initial_ctx,
         room_input_options=RoomInputOptions()
     )
-    print(f"[SESSION INIT] ✓ Session started with {len(initial_ctx.messages)} context messages")
+    print(f"[SESSION INIT] ✓ Session started with conversation context enabled")
     
     # Wait for session to fully initialize
     await asyncio.sleep(0.5)
