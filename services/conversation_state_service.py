@@ -23,7 +23,7 @@ STAGES = [
 ]
 
 # Default trust score
-DEFAULT_TRUST_SCORE = 2.0
+DEFAULT_TRUST_SCORE = 3.0
 MIN_TRUST = 0.0
 MAX_TRUST = 10.0
 
@@ -314,6 +314,7 @@ class ConversationStateService:
             
             prompt = f"""
 Analyze if the user is ready to progress to the next conversation stage.
+BE OPTIMISTIC: When in doubt, favor progression to keep engagement high.
 
 CURRENT STATE:
 - Stage: {current_stage} - {current_stage_desc}
@@ -326,25 +327,26 @@ USER'S RECENT MESSAGE:
 NEXT STAGE:
 - {next_stage} - {next_stage_desc}
 
-ANALYSIS CRITERIA:
-1. User shows self-disclosure (sharing personal info)
-2. User accepts previous guidance or suggestions
-3. User requests deeper conversation
-4. Trust score is sufficient (>5 for GUIDANCE+)
-5. User signals comfort and openness
+ANALYSIS CRITERIA (favor YES if any apply):
+1. User shares ANY personal information (even small details)
+2. User responds with more than one word
+3. User asks questions or shows curiosity
+4. Trust score is above 3.0 for ENGAGEMENT+, above 4.0 for GUIDANCE+
+5. User continues the conversation
 
-SIGNS TO STAY:
-- User deflects or changes topic
-- Gives short/closed responses
-- Shows discomfort
-- Trust is low (<5 for deeper stages)
+ONLY STAY if ALL of these apply:
+- User gives only single-word responses repeatedly
+- User explicitly requests lighter conversation
+- User shows clear distress or discomfort
+
+When uncertain, favor transition to maintain engagement.
 
 Respond in JSON:
 {{
     "should_transition": true/false,
     "confidence": 0.0-1.0,
     "reason": "brief explanation",
-    "trust_adjustment": -2.0 to +2.0 (how much to adjust trust),
+    "trust_adjustment": -2.0 to +3.0 (how much to adjust trust, favor positive adjustments),
     "detected_signals": ["signal1", "signal2"]
 }}
 """
@@ -353,11 +355,11 @@ Respond in JSON:
                 client.chat.completions.create(
                     model="gpt-4o-mini",
                     messages=[
-                        {"role": "system", "content": "You are an expert at analyzing conversation depth and readiness for stage transitions. Respond with valid JSON."},
+                        {"role": "system", "content": "You are an expert at analyzing conversation depth and readiness for stage transitions. Be optimistic and favor progression when possible. Respond with valid JSON."},
                         {"role": "user", "content": prompt}
                     ],
                     response_format={"type": "json_object"},
-                    temperature=0.3,
+                    temperature=0.1,
                     max_tokens=200,
                     timeout=3.0
                 ),
@@ -437,7 +439,7 @@ Respond in JSON:
             
             # Apply stage transition if suggested
             action_taken = "none"
-            if suggestion["should_transition"] and suggestion["confidence"] > 0.7:
+            if suggestion["should_transition"] and suggestion["confidence"] > 0.5:
                 success = await self.update_state(
                     stage=suggestion["suggested_stage"],
                     user_id=uid
