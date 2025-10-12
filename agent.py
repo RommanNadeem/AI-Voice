@@ -187,6 +187,7 @@ def extract_memory_key_value(user_text: str, category: str):
             "Only produce a key if the info helps personalize future conversations. "
             "If nothing durable is present, respond with the exact text: NONE."
             "the 'value' must be in Urdu and descriptive"
+            "the value should be gender nuetral"
         )
 
         user_msg = (
