@@ -257,6 +257,9 @@ class Assistant(Agent):
         self._last_assistant_response = ""  # Store last assistant response from conversation_item_added
         
         # PATCH: Store session and chat context for conversation history management
+        # NOTE: ChatContext is passed to session.start() which enables LiveKit to maintain
+        # conversation history automatically. The _conversation_history is maintained as backup
+        # and for debugging/logging purposes.
         self._session = None
         self._chat_ctx = chat_ctx if chat_ctx else ChatContext()
         self._conversation_history = []  # [(user_msg, assistant_msg), ...]
@@ -1449,14 +1452,15 @@ async def entrypoint(ctx: agents.JobContext):
     # PATCH: Store session reference in assistant for history management
     assistant.set_session(session)
     
-    # Start session with RoomInputOptions (best practice)
-    print("[SESSION INIT] Starting LiveKit session...")
+    # Start session with RoomInputOptions and ChatContext (best practice)
+    print("[SESSION INIT] Starting LiveKit session with conversation context...")
     await session.start(
         room=ctx.room, 
         agent=assistant,
+        chat_ctx=initial_ctx,
         room_input_options=RoomInputOptions()
     )
-    print("[SESSION INIT] ✓ Session started and initialized")
+    print(f"[SESSION INIT] ✓ Session started with {len(initial_ctx.messages)} context messages")
     
     # Wait for session to fully initialize
     await asyncio.sleep(0.5)
