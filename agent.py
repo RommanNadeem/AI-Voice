@@ -42,6 +42,7 @@ from services import (
     ConversationStateService,
     OnboardingService,
     RAGService,
+    ConversationSummaryService,
 )
 
 # Import infrastructure
@@ -160,7 +161,7 @@ You are **Humraaz**, a warm, witty, supportive **female friend** who speaks **Ur
 
 ---
 
-## Communication Rules (B-style)
+## Communication Rules
 1. **Keep it natural:** Short sentences for casual turns (1–2). Go longer only when the user goes deeper.
 2. **Lead with emotion:** Start with a brief emotional beat, then add thoughts or a light nudge.
 3. **Vary your language:** Avoid repeating the same fillers (e.g., “کبھی کبھی”, “شاید”, “اچھا”) in back-to-back replies.
@@ -170,6 +171,56 @@ You are **Humraaz**, a warm, witty, supportive **female friend** who speaks **Ur
 7. **Cultural flavor:** Use Pakistani/Urdu context when it fits; don’t force it.
 
 ---
+## Urdu Sentence Structure (Colloquial PK–Urdu)
+
+**Script:** Only Urdu (Nastaliq). No Roman, no Hinglish unless the user uses it first.
+
+**1) Core word order (SOV)**
+- Default: **[Time/Topic] + [Subject] + [Object] + [Verb]**
+- Example: "آج میں ایک چھوٹا کام مکمل **کر** لوں گا۔"
+
+**2) Agreement & auxiliaries**
+- Gender/number agree with subject: رہا/رہی/رہے
+- Be verbs: ہوں/ہے/ہو/ہیں; Aspect: رہا/رہی/رہے + ہوں/ہے/ہیں
+- Assistant speaks as **female** → “میں گئی، میں نے کیا، میں خوش ہوں”
+- User (male default) → addressing forms masculine: “آپ نے کیا؟” but replies about him: “آپ تھکے **ہوئے** لگ رہے ہیں”
+
+**3) Natural particles & fillers (use sparingly)**
+- بھی، ہی، تو، مگر، بس، یعنی، نا، یار (light), چلو، اچھا
+- Softeners: ذرا، پلیز (1× max), شاید/ممکن ہے (avoid stacking)
+
+**4) Politeness level (informal-respectful)**
+- Use **آپ** + polite imperatives: “کر لیجیے/کیجیے/کر لیں”
+- With close vibe, keep friendly but respectful; no slang overload
+
+**5) Connectors (prefer these)**
+- لیکن/مگر، اس لیے، پھر، ویسے، تو، اسی لیے، کیونکہ، اور
+- Avoid stilted/formal chains (لہٰذا، بہرکیف) unless user is formal
+
+**6) Avoid literal calques**
+- Don’t mirror English order or idioms. Prefer Urdu idioms:
+  - “Makes sense” → “بات سمجھ میں آتی ہے”
+  - “Check in” → “ذرا خبر دے دیجیے/بتا دیجیے”
+  - “Micro-win” → “**چھوٹی کامیابی**/**مختصر قدم**”
+
+**7) Sentence length**
+- Casual: 1–2 مختصر جملے
+- Reflection: 2–4 جملے (break with commas/۔)
+- No paragraph-sized dumps
+
+**8) Question shapes (sound like a person)**
+- کیا + verb: “کیا آج کوئی چھوٹا قدم اٹھایا؟”
+- Tag: “ٹھیک ہے **نا**؟” “ایسا ہو سکتا ہے، **ہے نا**؟”
+- Either–or: “چائے بہتر لگے گی یا پانی؟”
+
+**9) Light-verb combos (native feel)**
+- کر لینا/کر دینا/ہو جانا/رکھ لینا/نکل جانا
+- “ایک لائن **لکھ لیجیے**” ، “یہ کام **کر لیں**” ، “پھر میں **یاد رکھ لوں گی**”
+
+**10) Soft closings & re-entry cues**
+- “میں یہیں **رکتی** ہوں۔ جب چاہیں ‘چائے’ لکھ دیں، ہلکی بات سے شروع کریں گے۔”
+
+---
 
 ## Response Structure (Natural, not rigid)
 - **Start:** Quick emotional reaction that mirrors their vibe.
@@ -177,6 +228,19 @@ You are **Humraaz**, a warm, witty, supportive **female friend** who speaks **Ur
 - **End:** Sometimes a question, sometimes a warm statement. Be flexible and human.
 
 ---
+### Post-processing step (must do)
+After drafting a reply, **rewrite it** into colloquial Urdu:
+- Fix to SOV, add natural particles, remove literal translations, keep tone warm.
+- Drop extra English words; if kept, put English in parentheses once.
+
+### Self-check (before sending)
+- [ ] SOV order?
+- [ ] Correct gender/number agreement?
+- [ ] ≤1 softener/emoji?
+- [ ] One clear connector (لیکن/اس لیے/پھر)?
+- [ ] If user was brief → no forced question.
+
+--
 
 ## Handling Distractions & Topic Jumps
 - **Acknowledge → Pivot Lightly:** Recognize the switch (“اچھا، یہ اچھا نیا موڑ ہے…”) and flow with it.
@@ -308,6 +372,11 @@ To avoid stiffness, prefer simpler words in everyday chat:
         self.conversation_context_service = ConversationContextService(supabase)
         self.conversation_state_service = ConversationStateService(supabase)
         self.onboarding_service = OnboardingService(supabase)
+        
+        # Initialize summary service (will be set in entrypoint with session)
+        self.summary_service = None
+        self._turn_counter = 0
+        self.SUMMARY_INTERVAL = 10  # Generate summary every 10 turns
         self.rag_service = None  # Set per-user in entrypoint
         
         # DEBUG: Log registered function tools (safely)
@@ -1029,6 +1098,9 @@ To avoid stiffness, prefer simpler words in everyday chat:
         # Track response time
         self._user_turn_time = time.time()
         
+        # Track turns for summarization
+        self._turn_counter += 1
+        
         # IMMEDIATE FEEDBACK: Broadcast thinking state so user knows they were heard
         await self.broadcast_state("thinking")
         
@@ -1037,8 +1109,15 @@ To avoid stiffness, prefer simpler words in everyday chat:
         print(f"⏰ Time: {time.time():.2f}")
         print(f"📝 Transcript: '{user_text}'")
         print(f"📊 Message type: {type(new_message).__name__}")
+        print(f"📊 Turn counter: {self._turn_counter}")
         print("🤖 LLM should now process this and generate response...")
         print("💭 [STATE] Broadcasted 'thinking' state for user feedback")
+        
+        # Check if we should generate incremental summary
+        if self._turn_counter % self.SUMMARY_INTERVAL == 0:
+            print(f"📊 [SUMMARY] Turn {self._turn_counter} - triggering incremental summary")
+            asyncio.create_task(self._generate_incremental_summary())
+        
         print("=" * 80)
         
         logging.info(f"[USER] {user_text[:80]}")
@@ -1059,6 +1138,86 @@ To avoid stiffness, prefer simpler words in everyday chat:
         task = asyncio.create_task(self._process_background(user_text))
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)
+    
+    async def _generate_incremental_summary(self):
+        """Generate incremental summary every N turns"""
+        try:
+            if not self.summary_service:
+                print("[SUMMARY] ⚠️ Service not initialized")
+                return
+            
+            # Get recent conversation turns from RAG service
+            if not self.rag_service or not hasattr(self.rag_service, '_conversation_history'):
+                print("[SUMMARY] ⚠️ No conversation history available")
+                return
+            
+            recent_turns = self.rag_service._conversation_history[-self.SUMMARY_INTERVAL:]
+            
+            if not recent_turns:
+                print("[SUMMARY] ⚠️ No recent turns to summarize")
+                return
+            
+            print(f"[SUMMARY] 🤖 Generating incremental summary...")
+            print(f"[SUMMARY]    Turns: {len(recent_turns)}")
+            print(f"[SUMMARY]    Total conversation turns: {self._turn_counter}")
+            
+            # Generate summary
+            summary_data = await self.summary_service.generate_summary(
+                conversation_turns=recent_turns,
+                existing_summary=None
+            )
+            
+            # Save to database
+            await self.summary_service.save_summary(
+                summary_data=summary_data,
+                turn_count=self._turn_counter
+            )
+            
+        except Exception as e:
+            print(f"[SUMMARY] ⚠️ Incremental summary failed: {e}")
+    
+    async def generate_final_summary(self):
+        """Generate final comprehensive summary when session ends"""
+        try:
+            if not self.summary_service:
+                print("[SUMMARY] ⚠️ Service not initialized")
+                return
+            
+            print("[SUMMARY] 📋 Generating FINAL session summary...")
+            
+            # Get all conversation turns from RAG service
+            if not self.rag_service or not hasattr(self.rag_service, '_conversation_history'):
+                print("[SUMMARY] ⚠️ No conversation history available")
+                return
+            
+            all_turns = self.rag_service._conversation_history
+            
+            if not all_turns:
+                print("[SUMMARY] ℹ️ No conversation to summarize")
+                return
+            
+            print(f"[SUMMARY]    Total turns: {len(all_turns)}")
+            
+            # Generate comprehensive summary
+            summary_data = await self.summary_service.generate_summary(
+                conversation_turns=all_turns,
+                existing_summary=None
+            )
+            
+            # Save as final summary
+            success = await self.summary_service.save_summary(
+                summary_data=summary_data,
+                turn_count=len(all_turns)
+            )
+            
+            if success:
+                print(f"[SUMMARY] ✅ Final summary saved")
+                print(f"[SUMMARY]    Summary: {summary_data['summary_text'][:80]}...")
+            else:
+                print(f"[SUMMARY] ❌ Final summary save failed")
+            
+        except Exception as e:
+            print(f"[SUMMARY] ❌ Final summary failed: {e}")
     
     async def _add_conversation_turn_to_rag(self):
         """
@@ -1526,6 +1685,12 @@ async def entrypoint(ctx: agents.JobContext):
     assistant.rag_service = rag_service
     print(f"[RAG] ✅ RAG service attached (will load in background)")
     
+    # Initialize summary service
+    summary_service = ConversationSummaryService(supabase)
+    summary_service.set_session(ctx.room.name)  # Use room name as session_id
+    assistant.summary_service = summary_service
+    print(f"[SUMMARY] ✅ Summary service initialized for session: {ctx.room.name[:20]}...")
+    
     # Load RAG and prefetch data in parallel background tasks
     # This allows the first greeting to happen immediately
     async def load_rag_background():
@@ -1659,8 +1824,16 @@ async def entrypoint(ctx: agents.JobContext):
         await asyncio.wait_for(disconnect_event.wait(), timeout=3600)  # 1 hour max
         print("[ENTRYPOINT] ✓ Session completed normally (participant disconnected)")
         
+        # Generate final summary
+        print("[ENTRYPOINT] 📝 Generating final conversation summary...")
+        await assistant.generate_final_summary()
+        
     except asyncio.TimeoutError:
         print("[ENTRYPOINT] ⚠️ Session timeout reached (1 hour)")
+        
+        # Generate final summary even on timeout
+        print("[ENTRYPOINT] 📝 Generating final conversation summary (timeout)...")
+        await assistant.generate_final_summary()
         
     except Exception as e:
         print(f"[ENTRYPOINT] ⚠️ Session ended with exception: {e}")
