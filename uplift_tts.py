@@ -205,10 +205,11 @@ class WebSocketClient:
                     logger.debug(f"Old socket cleanup: {e}")
                 self.sio = None
             
+            # OPTIMIZATION: Increase reconnection attempts and reduce delay for better reliability
             self.sio = socketio.AsyncClient(
                 reconnection=True,
-                reconnection_attempts=3,
-                reconnection_delay=1,
+                reconnection_attempts=5,  # Increased from 3 to 5
+                reconnection_delay=0.5,   # Reduced from 1s to 0.5s for faster recovery
                 logger=False,
                 engineio_logger=False
             )
@@ -375,18 +376,20 @@ class ChunkedStream(tts.ChunkedStream):
             # Get audio queue
             audio_queue = await self._tts._client.synthesize(self._input_text, request_id)
             
-            # Stream audio
+            # Stream audio with reduced timeout for faster failure detection
             while True:
                 try:
-                    audio_data = await asyncio.wait_for(audio_queue.get(), timeout=30.0)
+                    # Reduced timeout: 10s (was 30s) for faster stuttering detection
+                    audio_data = await asyncio.wait_for(audio_queue.get(), timeout=10.0)
                     
                     if audio_data is None:
                         break
                     
+                    # Push audio immediately to reduce latency
                     output_emitter.push(audio_data)
                 
                 except asyncio.TimeoutError:
-                    logger.warning("Audio timeout")
+                    logger.error("Audio chunk timeout after 10s - TTS may be stalled")
                     break
             
             output_emitter.flush()

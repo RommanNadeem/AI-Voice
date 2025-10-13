@@ -1118,8 +1118,15 @@ async def entrypoint(ctx: agents.JobContext):
         print("[TTS] 💡 Set UPLIFTAI_API_KEY environment variable")
     
     try:
-        tts = TTS(voice_id="v_8eelc901", output_format="MP3_22050_32")
-        print("[TTS] ✓ TTS instance created successfully")
+        # OPTIMIZATION: Use PCM format for lower latency (no MP3 encoding overhead)
+        # PCM_22050_16 is faster than MP3_22050_32 for real-time streaming
+        tts = TTS(
+            voice_id="v_8eelc901", 
+            output_format="PCM_22050_16",  # Changed from MP3 to PCM for speed
+            sample_rate=22050,
+            num_channels=1
+        )
+        print("[TTS] ✓ TTS instance created (PCM format for low latency)")
     except Exception as e:
         print(f"[TTS] ❌ TTS initialization failed: {e}")
         print("[TTS] 🔄 Attempting fallback TTS configuration...")
@@ -1127,11 +1134,13 @@ async def entrypoint(ctx: agents.JobContext):
         try:
             tts = TTS(
                 voice_id="v_8eelc901", 
-                output_format="MP3_22050_32",
+                output_format="PCM_22050_16",  # PCM for speed
                 base_url=uplift_base_url,
-                api_key=uplift_api_key
+                api_key=uplift_api_key,
+                sample_rate=22050,
+                num_channels=1
             )
-            print("[TTS] ✓ Fallback TTS created successfully")
+            print("[TTS] ✓ Fallback TTS created successfully (PCM)")
         except Exception as e2:
             print(f"[TTS] ❌ Fallback TTS also failed: {e2}")
             raise e2
@@ -1327,13 +1336,13 @@ async def entrypoint(ctx: agents.JobContext):
     # Set room reference for state broadcasting
     assistant.set_room(ctx.room)
     
-    # Configure LLM with increased timeout for context-heavy prompts
+    # Configure LLM with optimized settings for speed
     # NOTE: Conversation context (initial_ctx with user profile + memories) is passed to
     # the Agent class (line 403: super().__init__(chat_ctx=chat_ctx)), and LiveKit's
     # framework manages it automatically. No need to pass to LLM or AgentSession.
     llm = lk_openai.LLM(
         model="gpt-4o-mini",
-        temperature=0.8,  # More creative responses
+        temperature=0.7,  # Balanced: creative but faster (reduced from 0.8)
     )
     
     # Pre-warm TTS connection in background (non-blocking)
