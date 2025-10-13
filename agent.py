@@ -376,7 +376,7 @@ To avoid stiffness, prefer simpler words in everyday chat:
         # Initialize summary service (will be set in entrypoint with session)
         self.summary_service = None
         self._turn_counter = 0
-        self.SUMMARY_INTERVAL = 10  # Generate summary every 10 turns
+        self.SUMMARY_INTERVAL = 5  # Generate summary every 10 turns
         self.rag_service = None  # Set per-user in entrypoint
         
         # DEBUG: Log registered function tools (safely)
@@ -1147,11 +1147,19 @@ To avoid stiffness, prefer simpler words in everyday chat:
                 return
             
             # Get recent conversation turns from RAG service
-            if not self.rag_service or not hasattr(self.rag_service, '_conversation_history'):
+            rag_system = self.rag_service.get_rag_system() if self.rag_service else None
+            if not rag_system:
+                print("[SUMMARY] ⚠️ No RAG system available")
+                return
+            
+            conversation_turns = rag_system.get_conversation_turns()
+            if not conversation_turns:
                 print("[SUMMARY] ⚠️ No conversation history available")
                 return
             
-            recent_turns = self.rag_service._conversation_history[-self.SUMMARY_INTERVAL:]
+            # Convert RAG conversation_turns to summary format
+            all_turns = [(turn['user'], turn['assistant']) for turn in conversation_turns]
+            recent_turns = all_turns[-self.SUMMARY_INTERVAL:]
             
             if not recent_turns:
                 print("[SUMMARY] ⚠️ No recent turns to summarize")
@@ -1186,11 +1194,18 @@ To avoid stiffness, prefer simpler words in everyday chat:
             print("[SUMMARY] 📋 Generating FINAL session summary...")
             
             # Get all conversation turns from RAG service
-            if not self.rag_service or not hasattr(self.rag_service, '_conversation_history'):
+            rag_system = self.rag_service.get_rag_system() if self.rag_service else None
+            if not rag_system:
+                print("[SUMMARY] ⚠️ No RAG system available")
+                return
+            
+            conversation_turns = rag_system.get_conversation_turns()
+            if not conversation_turns:
                 print("[SUMMARY] ⚠️ No conversation history available")
                 return
             
-            all_turns = self.rag_service._conversation_history
+            # Convert RAG conversation_turns to summary format
+            all_turns = [(turn['user'], turn['assistant']) for turn in conversation_turns]
             
             if not all_turns:
                 print("[SUMMARY] ℹ️ No conversation to summarize")
