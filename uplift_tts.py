@@ -508,3 +508,4 @@ class SynthesizeStream(tts.SynthesizeStream):
         except Exception as e:
             logger.error(f"Segment synthesis error: {e}")
             raise APIError(f"Segment synthesis failed: {str(e)}")
+

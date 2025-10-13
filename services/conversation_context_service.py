@@ -249,7 +249,7 @@ class ConversationContextService:
         try:
             result = await asyncio.to_thread(
                 lambda: self.supabase.table("conversation_state")
-                .select("stage, trust_score, updated_at, last_summary, last_topics, last_user_message, last_assistant_message, last_conversation_at")
+                .select("stage, trust_score, updated_at")
                 .eq("user_id", user_id)
                 .execute()
             )
@@ -406,89 +406,6 @@ class ConversationContextService:
             print(f"[CONTEXT] Redis invalidation failed: {e}")
         
         print(f"[CONTEXT] Cache invalidated for user {user_id}")
-    
-    def format_context_for_instructions(self, context: Dict[str, Any]) -> str:
-        """
-        Format context into a string that can be injected into assistant instructions.
-        This is automatically included in every AI response.
-        Prioritizes critical info like name, then recent context.
-        """
-        parts = []
-        
-        # USER'S NAME - TOP PRIORITY (if available)
-        user_name = context.get("user_name")
-        if user_name:
-            print(f"[CONTEXT FORMAT] 👤 Injecting user's name into context: '{user_name}'")
-            parts.append(f"## User's Name\n**{user_name}**\n")
-        else:
-            print(f"[CONTEXT FORMAT] ℹ️  No user name available for context injection")
-        
-        # Extract critical info first (gender, key preferences)
-        memories = context.get("recent_memories", [])
-        critical_info = []
-        other_memories = []
-        
-        for m in memories:
-            # Check if this is critical info (gender, key facts, preferences)
-            key_lower = m.get('key', '').lower()
-            category = m.get('category', '')
-            value = m.get('value', '')
-            
-            # Skip name (already shown above)
-            if 'name' in key_lower:
-                continue
-                
-            if ('gender' in key_lower or 
-                category in ['FACT', 'PRESENTATION'] and len(value) < 100):
-                critical_info.append(m)
-            else:
-                other_memories.append(m)
-        
-        # User Profile
-        if context.get("user_profile"):
-            parts.append(f"## User Profile\n{context['user_profile']}\n")
-        
-        # Critical Info (gender, key facts) - ALWAYS show full value
-        if critical_info:
-            critical_text = "\n".join([
-                f"- {m['key']}: {m['value']}"  # Full value, no truncation
-                for m in critical_info[:5]
-            ])
-            parts.append(f"## Key Information\n{critical_text}\n")
-        
-        # Conversation State
-        state = context.get("conversation_state", {})
-        if state:
-            stage = state.get("stage", "ORIENTATION")
-            trust = state.get("trust_score", 5.0)
-            parts.append(f"## Current Stage\nStage: {stage} | Trust Level: {trust:.1f}/10\n")
-        
-        # Recent Memories (other context, can be truncated)
-        if other_memories:
-            memory_text = "\n".join([
-                f"- {m['category']}: {m['value'][:150]}"  # Increased from 100 to 150
-                for m in other_memories[:5]
-            ])
-            parts.append(f"## Recent Context\n{memory_text}\n")
-        
-        # Last Conversation
-        last_conv = context.get("last_conversation", {})
-        if last_conv.get("has_history"):
-            hours = last_conv.get("time_since_last_hours", 999)
-            if hours < 24:
-                parts.append(f"## Conversation Continuity\nLast interaction: {hours:.1f} hours ago\n")
-        
-        # Onboarding Data
-        onboarding = context.get("onboarding_data", {})
-        if onboarding:
-            goals = onboarding.get("goals", "")
-            if goals:
-                parts.append(f"## User Goals\n{goals}\n")
-        
-        if not parts:
-            return ""
-        
-        return "# AUTOMATIC CONTEXT (Updated Each Message)\n\n" + "\n".join(parts)
     
     def _get_empty_context(self) -> Dict[str, Any]:
         """Return empty context structure"""

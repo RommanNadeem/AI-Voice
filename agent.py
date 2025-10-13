@@ -997,8 +997,8 @@ For every reply:
         """
         logging.info(f"[AGENT] Speech committed - transitioning to listening")
         
-        # Update conversation context in database using RAG context
-        await self._update_conversation_context_from_rag()
+        # Add conversation turn to RAG for semantic search
+        await self._add_conversation_turn_to_rag()
         
         await self.broadcast_state("listening")
     
@@ -1023,8 +1023,8 @@ For every reply:
                             item.text_content
                         )
                         
-                        # Trigger conversation summary update in background
-                        asyncio.create_task(self._update_conversation_context_from_rag())
+                        # Trigger RAG indexing in background
+                        asyncio.create_task(self._add_conversation_turn_to_rag())
                         
                 elif hasattr(item, 'content') and item.content:
                     self._last_assistant_response = item.content
@@ -1038,8 +1038,8 @@ For every reply:
                             item.content
                         )
                         
-                        # Trigger conversation summary update in background
-                        asyncio.create_task(self._update_conversation_context_from_rag())
+                        # Trigger RAG indexing in background
+                        asyncio.create_task(self._add_conversation_turn_to_rag())
         except Exception as e:
             logging.error(f"[ASSISTANT] Failed to capture response: {e}")
     
@@ -1075,9 +1075,9 @@ For every reply:
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)
     
-    async def _update_conversation_context_from_rag(self):
+    async def _add_conversation_turn_to_rag(self):
         """
-        Update conversation context in database using captured assistant response.
+        Add conversation turn to RAG for semantic search.
         Uses the assistant response from on_conversation_item_added callback.
         """
         try:
@@ -1093,29 +1093,13 @@ For every reply:
                 assistant_message=assistant_message
             )
             
-            # Update database with conversation context
-            user_id = get_current_user_id()
-            if user_id:
-                print(f"[CONTEXT] Updating conversation context...")
-                print(f"[CONTEXT] User: {self._pending_user_message[:50]}...")
-                print(f"[CONTEXT] Assistant: {assistant_message[:50]}...")
-                
-                await self.conversation_state_service.update_conversation_context(
-                    user_message=self._pending_user_message,
-                    assistant_message=assistant_message,
-                    user_id=user_id
-                )
-                
-                logging.info(f"[CONTEXT] ✅ Updated conversation context with summary")
-                print(f"[CONTEXT] ✅ Summary saved to last_summary column")
-                
-                # Clear pending messages after processing
-                self._pending_user_message = ""
-                self._last_assistant_response = ""
+            # Clear pending messages after processing
+            self._pending_user_message = ""
+            self._last_assistant_response = ""
                 
         except Exception as e:
-            logging.error(f"[CONTEXT] Failed to update conversation context: {e}")
-            print(f"[CONTEXT] ❌ Error: {e}")
+            logging.error(f"[RAG] Failed to add conversation turn: {e}")
+            print(f"[RAG] ❌ Error: {e}")
     
     async def cleanup(self):
         """Cleanup background tasks on shutdown"""
