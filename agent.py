@@ -286,7 +286,7 @@ For every reply:
         
         # CRITICAL: Pass chat_ctx to parent Agent class for initial context
         print(f"[AGENT INIT] 📝 Instructions length: {len(self._base_instructions)} chars")
-        print(f"[AGENT INIT] 📝 ChatContext messages: {len(chat_ctx.messages) if chat_ctx else 0}")
+        print(f"[AGENT INIT] 📝 ChatContext provided: {'Yes' if chat_ctx else 'No'}")
         super().__init__(instructions=self._base_instructions, chat_ctx=chat_ctx)
         print(f"[AGENT INIT] ✅ Agent initialized with instructions + chat context")
         
@@ -1310,7 +1310,7 @@ async def entrypoint(ctx: agents.JobContext):
     
     # STEP 3: Create assistant WITH context, gender, and time
     print(f"[AGENT CREATE] Creating Assistant with:")
-    print(f"[AGENT CREATE]   - ChatContext: {len(initial_ctx.messages) if initial_ctx else 0} messages")
+    print(f"[AGENT CREATE]   - ChatContext: {'Provided' if initial_ctx else 'Empty'}")
     print(f"[AGENT CREATE]   - Gender: {user_gender or 'Not set'}")
     print(f"[AGENT CREATE]   - Time: {user_time_context or 'Not set'}")
     assistant = Assistant(chat_ctx=initial_ctx, user_gender=user_gender, user_time=user_time_context)
