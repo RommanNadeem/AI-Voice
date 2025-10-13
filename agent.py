@@ -285,7 +285,10 @@ For every reply:
             print(f"[AGENT INIT] ✅ Time context added: {user_time}")
         
         # CRITICAL: Pass chat_ctx to parent Agent class for initial context
+        print(f"[AGENT INIT] 📝 Instructions length: {len(self._base_instructions)} chars")
+        print(f"[AGENT INIT] 📝 ChatContext messages: {len(chat_ctx.messages) if chat_ctx else 0}")
         super().__init__(instructions=self._base_instructions, chat_ctx=chat_ctx)
+        print(f"[AGENT INIT] ✅ Agent initialized with instructions + chat context")
         
         # Initialize services
         self.memory_service = MemoryService(supabase)
@@ -1145,7 +1148,15 @@ async def entrypoint(ctx: agents.JobContext):
     print(f"[ENTRYPOINT] ✓ Participant joined: sid={participant.sid}, identity={participant.identity}")
     
     # Extract user_id early to load context
+    print(f"[DEBUG][IDENTITY] Extracting user_id from identity: '{participant.identity}'")
     user_id = extract_uuid_from_identity(participant.identity)
+    
+    if user_id:
+        print(f"[DEBUG][USER_ID] ✅ Successfully extracted user_id: {UserId.format_for_display(user_id)}")
+    else:
+        print(f"[DEBUG][USER_ID] ❌ CRITICAL: Failed to extract user_id from '{participant.identity}'")
+        print(f"[DEBUG][USER_ID] → This will cause AI to not use any user data!")
+        print(f"[DEBUG][USER_ID] → Expected format: 'user-<uuid>' or '<uuid>'")
     
     # STEP 1: Create initial ChatContext
     initial_ctx = ChatContext()
@@ -1293,10 +1304,17 @@ async def entrypoint(ctx: agents.JobContext):
             print(f"[CONTEXT] ⚠️ Failed to load initial context: {e}")
             print("[CONTEXT] Continuing with empty context")
     else:
-        print("[CONTEXT] No valid user_id, creating assistant with empty context")
+        print("[CONTEXT] ⚠️  WARNING: No valid user_id extracted from participant identity")
+        print("[CONTEXT] → Creating assistant with ONLY base personality (no user data)")
+        print("[CONTEXT] → AI will work but won't have personalization")
     
     # STEP 3: Create assistant WITH context, gender, and time
+    print(f"[AGENT CREATE] Creating Assistant with:")
+    print(f"[AGENT CREATE]   - ChatContext: {len(initial_ctx.messages) if initial_ctx else 0} messages")
+    print(f"[AGENT CREATE]   - Gender: {user_gender or 'Not set'}")
+    print(f"[AGENT CREATE]   - Time: {user_time_context or 'Not set'}")
     assistant = Assistant(chat_ctx=initial_ctx, user_gender=user_gender, user_time=user_time_context)
+    print(f"[AGENT CREATE] ✅ Assistant created successfully")
     
     # Set room reference for state broadcasting
     assistant.set_room(ctx.room)
