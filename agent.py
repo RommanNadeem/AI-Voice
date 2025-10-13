@@ -1167,15 +1167,6 @@ For every reply:
                     await self.profile_service.save_profile_async(generated_profile, user_id)
                     logging.info(f"[PROFILE] ✅ Updated")
             
-            # Update conversation state with last user message
-            try:
-                await self.conversation_state_service.update_state(
-                    last_user_message=user_text,
-                    user_id=user_id
-                )
-            except Exception as e:
-                print(f"[BACKGROUND] Last conversation update failed: {e}")
-            
             # Update conversation state automatically
             try:
                 state_update_result = await self.conversation_state_service.auto_update_from_interaction(
