@@ -594,27 +594,36 @@ For every reply:
             return {"message": "No active user"}
         
         try:
-            # Fetch everything in parallel
+            # OPTIMIZED: Fetch everything in parallel using batch queries
             profile_task = self.profile_service.get_profile_async(user_id)
             name_task = self.conversation_context_service.get_context(user_id)
             state_task = self.conversation_state_service.get_state(user_id)
             
-            profile, context_data, state = await asyncio.gather(
-                profile_task, name_task, state_task,
+            # Use batch query for all categories at once (OPTIMIZATION!)
+            categories = ['FACT', 'GOAL', 'INTEREST', 'EXPERIENCE', 'PREFERENCE', 'RELATIONSHIP', 'PLAN', 'OPINION']
+            memories_task = asyncio.to_thread(
+                self.memory_service.get_memories_by_categories_batch,
+                categories=categories,
+                limit_per_category=5,
+                user_id=user_id
+            )
+            
+            # Gather all data in parallel (1 query instead of 8!)
+            profile, context_data, state, memories_by_category = await asyncio.gather(
+                profile_task, name_task, state_task, memories_task,
                 return_exceptions=True
             )
             
-            # Get memories by category
-            memories_by_category = {}
-            categories = ['FACT', 'GOAL', 'INTEREST', 'EXPERIENCE', 'PREFERENCE', 'RELATIONSHIP', 'PLAN', 'OPINION']
+            # Handle exceptions
+            if isinstance(memories_by_category, Exception):
+                print(f"[TOOL] Error fetching memories: {memories_by_category}")
+                memories_by_category = {}
             
-            for category in categories:
-                try:
-                    mems = self.memory_service.get_memories_by_category(category, limit=5, user_id=user_id)
-                    if mems:
-                        memories_by_category[category] = [m['value'] for m in mems]
-                except Exception as e:
-                    print(f"[TOOL] Error fetching {category}: {e}")
+            # Convert to value lists
+            memories_dict = {}
+            for cat, mems in memories_by_category.items():
+                if mems:
+                    memories_dict[cat] = [m['value'] for m in mems]
             
             # Extract name
             user_name = None
@@ -627,8 +636,8 @@ For every reply:
                 "profile": profile if not isinstance(profile, Exception) else None,
                 "conversation_stage": state.get("stage") if not isinstance(state, Exception) else "ORIENTATION",
                 "trust_score": state.get("trust_score") if not isinstance(state, Exception) else 2.0,
-                "memories_by_category": memories_by_category,
-                "total_memories": sum(len(v) for v in memories_by_category.values()),
+                "memories_by_category": memories_dict,
+                "total_memories": sum(len(v) for v in memories_dict.values()),
                 "message": "Complete user information retrieved"
             }
             
@@ -636,7 +645,7 @@ For every reply:
             print(f"[TOOL]    Name: {user_name}")
             print(f"[TOOL]    Profile: {'Yes' if result['profile'] else 'No'} ({len(result['profile']) if result['profile'] else 0} chars)")
             print(f"[TOOL]    Stage: {result['conversation_stage']}, Trust: {result['trust_score']:.1f}")
-            print(f"[TOOL]    Memories: {result['total_memories']} across {len(memories_by_category)} categories")
+            print(f"[TOOL]    Memories: {result['total_memories']} across {len(memories_dict)} categories (BATCHED)")
             
             return result
             
@@ -1002,19 +1011,26 @@ For every reply:
             # No need to index user messages separately here
             
             # Update profile - use async method with explicit user_id
-            existing_profile = await self.profile_service.get_profile_async(user_id)
-            
-            # Skip only very short inputs (reduced from 15 to 5 chars)
-            if len(user_text.strip()) > 5:
+            # OPTIMIZATION: Only update profile on meaningful messages (>20 chars)
+            # and when profile actually changes significantly
+            if len(user_text.strip()) > 20:
+                existing_profile = await self.profile_service.get_profile_async(user_id)
+                
                 generated_profile = await asyncio.to_thread(
                     self.profile_service.generate_profile,
                     user_text,
                     existing_profile
                 )
                 
+                # Only save if profile changed by more than 10 chars (avoid micro-updates)
                 if generated_profile and generated_profile != existing_profile:
-                    await self.profile_service.save_profile_async(generated_profile, user_id)
-                    logging.info(f"[PROFILE] ✅ Updated")
+                    if abs(len(generated_profile) - len(existing_profile or "")) > 10:
+                        await self.profile_service.save_profile_async(generated_profile, user_id)
+                        logging.info(f"[PROFILE] ✅ Updated ({len(generated_profile)} chars)")
+                    else:
+                        logging.info(f"[PROFILE] Skipped minor update (< 10 char difference)")
+            else:
+                logging.info(f"[PROFILE] Skipped update (message too short: {len(user_text)} chars)")
             
             # Update conversation state automatically
             try:
@@ -1390,13 +1406,19 @@ async def entrypoint(ctx: agents.JobContext):
     # No need to manually wait - the session's VAD will activate when audio is ready
     print("[AUDIO] ✓ AgentSession managing audio subscription automatically")
     
-    # Brief delay to allow WebRTC connection to stabilize (optional, but helps)
-    await asyncio.sleep(0.5)
-
-    # Generate greeting with optimized context (fast greeting)
-    print("[GREETING] Generating optimized greeting...")
-    await assistant.generate_greeting(session)
-    print("[GREETING] ✅ Greeting sent!")
+    # OPTIMIZATION: Ensure WebRTC connection is stable before greeting
+    # Brief delay to allow WebRTC connection + audio subscription
+    print("[ENTRYPOINT] Waiting for audio connection stability...")
+    await asyncio.sleep(1.0)  # Increased from 0.5s to 1.0s for better stability
+    
+    # Verify participant is still connected before greeting
+    if participant.sid not in ctx.room.remote_participants:
+        print("[GREETING] ⚠️ Participant disconnected before greeting, skipping...")
+    else:
+        # Generate greeting with optimized context (fast greeting)
+        print("[GREETING] Generating optimized greeting...")
+        await assistant.generate_greeting(session)
+        print("[GREETING] ✅ Greeting sent!")
     
     # LiveKit Best Practice: Use event-based disconnection detection
     # Set up disconnection event handler
