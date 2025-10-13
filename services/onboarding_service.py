@@ -15,6 +15,9 @@ logger = logging.getLogger(__name__)
 class OnboardingService:
     """Service for user onboarding operations"""
     
+    # Class-level cache to track which users have been initialized this session
+    _initialized_users = set()
+    
     def __init__(self, supabase_client: Optional[Client] = None):
         self.supabase = supabase_client
     
@@ -23,6 +26,8 @@ class OnboardingService:
         Initialize new user profile and memories from onboarding_details table.
         Creates initial profile and categorized memories for name, occupation, and interests.
         
+        OPTIMIZED: Uses session-level cache to skip DB checks for already-initialized users.
+        
         Args:
             user_id: User UUID
         """
@@ -30,6 +35,11 @@ class OnboardingService:
             return
         
         try:
+            # OPTIMIZATION: Check session cache first (instant, no DB query)
+            if user_id in self._initialized_users:
+                logger.info(f"✓ User {UserId.format_for_display(user_id)} already checked this session (cached), skipping")
+                return
+            
             logger.info(f"🔄 Checking if user {UserId.format_for_display(user_id)} needs initialization...")
             
             # Check if profile already exists
@@ -44,6 +54,8 @@ class OnboardingService:
             
             if has_profile and has_memories:
                 logger.info(f"✓ User already fully initialized, skipping")
+                # Add to cache so we don't check again this session
+                self._initialized_users.add(user_id)
                 return
             
             if not has_profile:
@@ -154,6 +166,9 @@ class OnboardingService:
                 logger.info(f"✓ Created {memories_added} memories from onboarding data")
             
             logger.info(f"✓ User initialization complete")
+            
+            # Add to session cache after successful initialization
+            self._initialized_users.add(user_id)
             
         except Exception as e:
             logger.error(f"initialize_user_from_onboarding failed: {e}", exc_info=True)

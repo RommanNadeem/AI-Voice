@@ -37,7 +37,7 @@ CACHE_EMBEDDINGS = True
 MAX_CACHE_SIZE = 1000
 
 # Advanced RAG Configuration
-ENABLE_QUERY_EXPANSION = True
+ENABLE_QUERY_EXPANSION = False  # DISABLED: Adds 1-3s LLM call per search - too slow for real-time
 ENABLE_TEMPORAL_FILTERING = True
 ENABLE_IMPORTANCE_SCORING = True
 ENABLE_CONVERSATION_CONTEXT = True
@@ -112,7 +112,7 @@ class RAGMemorySystem:
         text_hash = hash(text)
         if use_cache and CACHE_EMBEDDINGS and text_hash in self.embedding_cache:
             self.stats["cache_hits"] += 1
-            logging.debug(f"[RAG] Cache hit for text: {text[:50]}...")
+            # Removed debug log for performance
             return self.embedding_cache[text_hash]
         
         # Create embedding
@@ -121,7 +121,7 @@ class RAGMemorySystem:
             response = await self.client.embeddings.create(
                 model=EMBEDDING_MODEL,
                 input=text,
-                timeout=5.0  # Fast timeout
+                timeout=3.0  # Reduced from 5s to 3s for faster failure
             )
             
             embedding = np.array(response.data[0].embedding, dtype=np.float32)
@@ -135,7 +135,7 @@ class RAGMemorySystem:
                 self.embedding_cache[text_hash] = embedding
             
             self.stats["embeddings_created"] += 1
-            logging.debug(f"[RAG] Created embedding for: {text[:50]}...")
+            # Removed debug log for performance
             return embedding
             
         except Exception as e:
@@ -594,30 +594,47 @@ class RAGMemorySystem:
                 from core.user_id import UserId
                 print(f"[DEBUG][DB] ⚠️  No memories found in database for user {UserId.format_for_display(self.user_id)}")
             
-            # Create embeddings in parallel (batched for efficiency)
-            embedding_tasks = []
-            for mem in memories_data:
+            # OPTIMIZED: Batch create all embeddings in ONE API call
+            texts_to_embed = []
+            valid_indices = []
+            for i, mem in enumerate(memories_data):
                 text = mem.get("value", "")
-                if text:
-                    embedding_tasks.append(self.create_embedding(text))
+                if text and text.strip():
+                    texts_to_embed.append(text)
+                    valid_indices.append(i)
             
-            print(f"[DEBUG][DB] Creating embeddings for {len(embedding_tasks)} memories...")
+            print(f"[DEBUG][DB] Creating embeddings for {len(texts_to_embed)} memories in SINGLE batch call...")
             
-            if embedding_tasks:
-                embeddings = await asyncio.gather(*embedding_tasks, return_exceptions=True)
+            embeddings = []
+            if texts_to_embed:
+                try:
+                    # BATCH API call - all texts at once!
+                    response = await self.client.embeddings.create(
+                        model=EMBEDDING_MODEL,
+                        input=texts_to_embed,
+                        timeout=10.0
+                    )
+                    
+                    # Extract embeddings in order
+                    embeddings = [np.array(item.embedding, dtype=np.float32) for item in response.data]
+                    
+                    print(f"[DEBUG][DB] ✅ Batch embeddings created: {len(embeddings)} total")
+                    print(f"[DEBUG][DB] Successful: {len(embeddings)}, Failed: 0")
+                    
+                    # Update stats
+                    self.stats["embeddings_created"] += len(embeddings)
+                    
+                except Exception as e:
+                    logging.error(f"[RAG] Batch embedding failed: {e}")
+                    print(f"[DEBUG][DB] ❌ Batch embedding failed: {e}")
+                    print(f"[DEBUG][DB] Successful: 0, Failed: {len(texts_to_embed)}")
                 
-                print(f"[DEBUG][DB] Embeddings created: {len(embeddings)} total")
-                
-                # Count successful embeddings
-                successful = sum(1 for e in embeddings if not isinstance(e, Exception))
-                failed = len(embeddings) - successful
-                print(f"[DEBUG][DB] Successful: {successful}, Failed: {failed}")
-                
-                # Add to FAISS index
+                # Add to FAISS index - match embeddings with valid memories
                 added_count = 0
-                for i, mem in enumerate(memories_data):
-                    if i < len(embeddings) and not isinstance(embeddings[i], Exception):
-                        embedding = embeddings[i]
+                for embed_idx, mem_idx in enumerate(valid_indices):
+                    if embed_idx < len(embeddings):
+                        embedding = embeddings[embed_idx]
+                        mem = memories_data[mem_idx]
                         
                         # Add to index
                         self.index.add(embedding.reshape(1, -1))

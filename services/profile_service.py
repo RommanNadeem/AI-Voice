@@ -157,11 +157,15 @@ class ProfileService:
             True if successful, False otherwise
         """
         if not can_write_for_current_user():
+            print(f"[PROFILE SERVICE] ❌ Write permission denied - can_write_for_current_user() returned False")
             return False
         
         uid = user_id or get_current_user_id()
         if not uid:
+            print(f"[PROFILE SERVICE] ❌ No user_id available for profile save")
             return False
+        
+        print(f"[PROFILE SERVICE] ✓ Write permissions OK, proceeding with save for user {UserId.format_for_display(uid)}")
         
         try:
             # 🚀 OPTIMIZATION: Check if profile actually changed before saving
@@ -169,11 +173,17 @@ class ProfileService:
             cache_key = f"user:{uid}:profile"
             cached_profile = await redis_cache.get(cache_key)
             
+            print(f"[PROFILE SERVICE] 🔍 Checking cache for profile changes...")
+            print(f"[PROFILE SERVICE]    Cached: {len(cached_profile) if cached_profile else 0} chars")
+            print(f"[PROFILE SERVICE]    New: {len(profile_text)} chars")
+            
             # Compare profiles - skip if identical or trivially different
             if cached_profile and self._is_profile_unchanged(cached_profile, profile_text):
                 print(f"[PROFILE SERVICE] ℹ️  Profile unchanged, skipping save (smart cache)")
                 print(f"[PROFILE SERVICE]    Similarity: 95%+, avoiding unnecessary DB write")
                 return True
+            
+            print(f"[PROFILE SERVICE] ✓ Profile changed significantly, proceeding with DB save...")
             
             # Ensure FK parent exists in profiles table before saving to user_profiles
             user_service = UserService(self.supabase)

@@ -132,6 +132,7 @@ class Assistant(Agent):
         self._last_processed_context = ""
         self._pending_user_message = ""  # Store user message until we get assistant response
         self._last_assistant_response = ""  # Store last assistant response from conversation_item_added
+        self._user_turn_time = None  # Track when user finished speaking for response time measurement
         
         # PATCH: Store session and chat context for conversation history management
         # NOTE: ChatContext is passed to parent Agent class (line 403) where LiveKit's framework
@@ -290,6 +291,10 @@ For every reply:
         super().__init__(instructions=self._base_instructions, chat_ctx=chat_ctx)
         print(f"[AGENT INIT] ✅ Agent initialized with instructions + chat context")
         
+        # Debug: List all callback methods
+        callbacks = [m for m in dir(self) if m.startswith('on_')]
+        print(f"[AGENT INIT] 🔍 Registered callbacks: {', '.join(callbacks)}")
+        
         # Initialize services
         self.memory_service = MemoryService(supabase)
         self.profile_service = ProfileService(supabase)
@@ -399,7 +404,7 @@ For every reply:
     
     async def broadcast_state(self, state: str):
         """
-        Broadcast agent state to frontend via LiveKit data channel.
+        Broadcast agent state to frontend via LiveKit data channel (NON-BLOCKING).
         States: 'idle', 'listening', 'thinking', 'speaking'
         """
         if not self._room:
@@ -411,18 +416,25 @@ For every reply:
             print(f"[STATE] ⏭️  Skipping duplicate state: {state}")
             return
         
-        try:
-            message = state.encode('utf-8')
-            await self._room.local_participant.publish_data(
-                message,
-                reliable=True,
-                destination_identities=[]  # Broadcast to all
-            )
-            old_state = self._current_state
-            self._current_state = state
-            print(f"[STATE] 📡 Broadcasted: {old_state} → {state}")
-        except Exception as e:
-            print(f"[STATE] ❌ Failed to broadcast '{state}': {e}")
+        # Update state immediately (before async broadcast)
+        old_state = self._current_state
+        self._current_state = state
+        
+        # OPTIMIZATION: Run broadcast in background to avoid blocking conversation flow
+        async def _publish():
+            try:
+                message = state.encode('utf-8')
+                await self._room.local_participant.publish_data(
+                    message,
+                    reliable=True,
+                    destination_identities=[]  # Broadcast to all
+                )
+                print(f"[STATE] 📡 Broadcasted: {old_state} → {state}")
+            except Exception as e:
+                print(f"[STATE] ❌ Failed to broadcast '{state}': {e}")
+        
+        # Fire and forget - don't wait for network call
+        asyncio.create_task(_publish())
 
     @function_tool()
     async def storeInMemory(self, context: RunContext, category: str, key: str, value: str):
@@ -441,6 +453,13 @@ For every reply:
         Returns:
             Success status and confirmation message
         """
+        print("=" * 80)
+        print(f"🔥 [MEMORY TOOL CALLED] storeInMemory")
+        print(f"🔥 Category: {category}")
+        print(f"🔥 Key: {key}")
+        print(f"🔥 Value: {value[:100]}{'...' if len(value) > 100 else ''}")
+        print("=" * 80)
+        
         logging.info(f"[TOOL] 💾 storeInMemory called: [{category}] {key}")
         logging.info(f"[TOOL]    Value: {value[:100]}{'...' if len(value) > 100 else ''}")
         print(f"[TOOL] 💾 storeInMemory called: [{category}] {key}")
@@ -487,6 +506,12 @@ For every reply:
         Returns:
             The stored value or empty string if not found
         """
+        print("=" * 80)
+        print(f"🔥 [MEMORY TOOL CALLED] retrieveFromMemory")
+        print(f"🔥 Category: {category}")
+        print(f"🔥 Key: {key}")
+        print("=" * 80)
+        
         print(f"[TOOL] 🔍 retrieveFromMemory called: [{category}] {key}")
         user_id = get_current_user_id()
         memory = self.memory_service.get_memory(category, key, user_id)
@@ -595,6 +620,11 @@ For every reply:
         Returns:
             Complete user profile, all memories by category, conversation state, and trust score
         """
+        print("=" * 80)
+        print(f"🔥 [INFO TOOL CALLED] getCompleteUserInfo")
+        print(f"🔥 Fetching: Profile + Name + State + ALL Memories (BATCHED)")
+        print("=" * 80)
+        
         print(f"[TOOL] 📋 getCompleteUserInfo called - retrieving ALL user data")
         user_id = get_current_user_id()
         
@@ -678,6 +708,12 @@ For every reply:
         Returns:
             List of relevant memories with similarity scores
         """
+        print("=" * 80)
+        print(f"🔥 [MEMORY TOOL CALLED] searchMemories")
+        print(f"🔥 Query: {query}")
+        print(f"🔥 Limit: {limit}")
+        print("=" * 80)
+        
         print(f"[TOOL] 🔍 searchMemories called: query='{query}', limit={limit}")
         user_id = get_current_user_id()
         
@@ -794,94 +830,104 @@ For every reply:
             print(f"[TOOL] ❌ Error: {e}")
             return {"success": False, "message": f"Error: {e}"}
 
-    async def generate_greeting(self, session):
+    async def generate_greeting(self, session, user_name: str = None):
         """
-        Initial greeting (fast path)
-        - Validates session (≤2s wait)
-        - Fetches user's full name from onboarding_details only
-        - Sends a brief, warm Urdu greeting (no memories/profile/context)
+        ULTRA-FAST greeting using pre-generated text (no LLM call)
+        - Quick session check (≤1s)
+        - Hardcoded Urdu greeting (instant)
+        - TTS only (no LLM delay)
+        - Accepts pre-loaded user_name to avoid DB query
+        
+        Returns an Event that signals when greeting playback is complete.
         """
-
-        async def _safe_generic_reply(reason: str):
-            logging.info(f"[GREETING] Fallback generic reply: {reason}")
-            try:
-                minimal_fallback = (
-                    "You are Humraaz, a warm, friendly Urdu-speaking companion.\n"
-                    "Task: Say a brief, warm Urdu greeting (1 sentence only).\n"
-                    "Language: Respond in Urdu only. No English words.\n"
-                )
-                await session.generate_reply(instructions=minimal_fallback)
-            except Exception as inner_e:
-                logging.error(f"[GREETING] Fallback reply failed: {inner_e}")
-
         await self.broadcast_state("thinking")
+        greeting_complete = asyncio.Event()
 
         try:
-            # 1) Fast session readiness check (≤2s)
+            # 1) Fast session readiness check (≤1s)
             if not getattr(session, "_started", False):
-                for _ in range(10):  # 10 * 0.2s = 2.0s
+                for _ in range(5):  # 5 * 0.2s = 1.0s
                     await asyncio.sleep(0.2)
                     if getattr(session, "_started", False):
                         break
                 else:
-                    logging.warning("[GREETING] Session not ready after 2s; aborting.")
-                    return
+                    logging.warning("[GREETING] Session not ready after 1s; aborting.")
+                    greeting_complete.set()  # Signal completion even on error
+                    return greeting_complete
 
-            # 2) Get user id or fall back to generic greeting
-            user_id = get_current_user_id()
-            if not user_id:
-                return await _safe_generic_reply("no user_id")
+            # 2) Use provided name (already loaded) or fallback to generic
+            # NO DATABASE QUERY - name should be passed from entrypoint
+            if not user_name:
+                logging.info("[GREETING] No name provided, using generic greeting")
 
-            # 3) Fetch user's name and gender from context
-            user_name = None
-            user_gender = None
-            try:
-                ctx = await self.conversation_context_service.get_context(user_id)
-                if ctx and not isinstance(ctx, Exception):
-                    user_name = ctx.get("user_name")
-                    user_gender = ctx.get("user_gender")
-            except Exception as lookup_e:
-                logging.warning(f"[GREETING] Context lookup failed: {lookup_e}")
+            # 3) HARDCODED greeting (no LLM) - instant!
+            if user_name:
+                greeting_text = f"السلام علیکم {user_name}! آج کیسے ہیں؟"
+            else:
+                greeting_text = "السلام علیکم! کیسے ہیں آپ؟"
 
-            # 4) Minimal greeting instruction - no base instructions for speed
-            name_text = user_name or "دوست"  # Urdu fallback display only
+            logging.info(f"[GREETING] Sending instant hardcoded greeting (user={user_name or 'unknown'})")
             
-            # Gender-specific pronoun instructions
-            gender_instruction = ""
-            if user_gender:
-                if user_gender.lower() == "male":
-                    gender_instruction = "Use masculine pronouns (آپ/تم) when addressing the user.\n"
-                elif user_gender.lower() == "female":
-                    gender_instruction = "Use feminine pronouns (آپ/تم) when addressing the user.\n"
+            # 4) Play greeting and signal completion
+            async def _play_greeting():
+                try:
+                    print(f"[GREETING] 🔊 Starting TTS playback at {time.time():.2f}")
+                    await session.say(greeting_text)
+                    print(f"[GREETING] ✅ Playback complete at {time.time():.2f}")
+                    logging.info("[GREETING] Playback complete.")
+                except Exception as e:
+                    print(f"[GREETING] ❌ Playback error: {e}")
+                    logging.error(f"[GREETING] Playback error: {e}")
+                finally:
+                    # Signal that greeting is done (success or failure)
+                    greeting_complete.set()
             
-            greeting_instruction = (
-                "You are Humraaz, a warm, friendly Urdu-speaking companion.\n"
-                f"User's name: {name_text}\n"
-                + (f"User's gender: {user_gender}\n" if user_gender else "")
-                + gender_instruction
-                + "Task: Say a brief, warm Urdu greeting (1 sentence only).\n"
-                + (f"Rule: Use the name '{name_text}' naturally in your greeting.\n" if user_name else "Rule: Greet warmly without using any name.\n")
-                + "Language: Respond in Urdu only. No English words.\n"
-                "Keep it simple and friendly.\n"
-            )
-
-            logging.info(f"[GREETING] Sending simple greeting (user={user_name or 'unknown'})")
-            await session.generate_reply(instructions=greeting_instruction)
-            logging.info("[GREETING] Done.")
+            # Start greeting playback in background
+            asyncio.create_task(_play_greeting())
+            print(f"[GREETING] 🎬 Greeting started (will signal when complete)")
 
         except Exception as e:
             msg = str(e)
             logging.error(f"[GREETING] Error: {e}")
             print(f"[GREETING] ❌ Exception: {type(e).__name__}: {msg}")
-            if "isn't running" not in msg.casefold():
-                await _safe_generic_reply("exception caught")
+            greeting_complete.set()  # Signal completion even on error
+            # Fallback to simplest possible greeting
+            try:
+                asyncio.create_task(session.say("السلام علیکم!"))
+            except:
+                pass
+        
+        return greeting_complete
 
+    
+    async def on_agent_turn_started(self, turn_ctx):
+        """
+        LiveKit Callback: Called when agent turn starts (if supported)
+        """
+        current_time = time.time()
+        response_delay = current_time - self._user_turn_time if self._user_turn_time else 0
+        
+        print("=" * 80)
+        print("🤖 [AGENT TURN STARTED] Agent starting response")
+        print(f"⏰ Time: {current_time:.2f}")
+        if response_delay > 0:
+            print(f"⚡ Response delay: {response_delay:.2f}s from user finishing")
+        print("=" * 80)
     
     async def on_agent_speech_started(self, turn_ctx):
         """
         LiveKit Callback: Called when agent starts speaking (TTS playback begins)
         Best Practice: Update UI state to show agent is speaking
         """
+        current_time = time.time()
+        response_delay = current_time - self._user_turn_time if self._user_turn_time else 0
+        
+        print("=" * 80)
+        print("🗣️  [AGENT SPEECH STARTED] Agent is now speaking")
+        print(f"⏰ Time: {current_time:.2f}")
+        if response_delay > 0:
+            print(f"⚡ Response time: {response_delay:.2f}s from user finishing")
+        print("=" * 80)
         logging.info(f"[AGENT] Started speaking")
         await self.broadcast_state("speaking")
     
@@ -892,8 +938,8 @@ For every reply:
         """
         logging.info(f"[AGENT] Speech committed - transitioning to listening")
         
-        # Add conversation turn to RAG for semantic search
-        await self._add_conversation_turn_to_rag()
+        # Add conversation turn to RAG for semantic search (non-blocking)
+        asyncio.create_task(self._add_conversation_turn_to_rag())
         
         await self.broadcast_state("listening")
     
@@ -905,6 +951,15 @@ For every reply:
         try:
             # Check if this is an assistant message
             if hasattr(item, 'role') and item.role == 'assistant':
+                # Track LLM response time
+                if self._user_turn_time:
+                    llm_time = time.time() - self._user_turn_time
+                    print(f"[LLM] 🤖 Response generated in {llm_time:.2f}s")
+                
+                # IMMEDIATE FEEDBACK: Broadcast speaking state when agent starts responding
+                await self.broadcast_state("speaking")
+                print(f"💭 [STATE] Broadcasted 'speaking' state - agent is responding")
+                
                 # Get the text content
                 if hasattr(item, 'text_content') and item.text_content:
                     self._last_assistant_response = item.text_content
@@ -943,8 +998,21 @@ For every reply:
         LiveKit Callback: Called when user starts speaking (VAD detected speech)
         Best Practice: Update UI to show user is speaking (stops "listening" animation)
         """
+        print("=" * 80)
+        print("🎤 [USER SPEECH STARTED] VAD detected user speaking")
+        print(f"⏰ Time: {time.time():.2f}")
+        print("=" * 80)
         logging.info(f"[USER] Started speaking")
         # Note: We don't broadcast state here to avoid flickering on short utterances
+    
+    async def on_user_turn_started(self, turn_ctx):
+        """
+        LiveKit Callback: Called when user turn starts (if supported)
+        """
+        print("=" * 80)
+        print("🎤 [USER TURN STARTED] User started their turn")
+        print(f"⏰ Time: {time.time():.2f}")
+        print("=" * 80)
     
     async def on_user_turn_completed(self, turn_ctx, new_message):
         """
@@ -952,8 +1020,25 @@ For every reply:
         Best Practice: Non-blocking background processing for zero latency
         """
         user_text = new_message.text_content or ""
+        
+        # Track response time
+        self._user_turn_time = time.time()
+        
+        # IMMEDIATE FEEDBACK: Broadcast thinking state so user knows they were heard
+        await self.broadcast_state("thinking")
+        
+        print("=" * 80)
+        print("🎤 [USER TURN COMPLETED] User finished speaking")
+        print(f"⏰ Time: {time.time():.2f}")
+        print(f"📝 Transcript: '{user_text}'")
+        print(f"📊 Message type: {type(new_message).__name__}")
+        print("🤖 LLM should now process this and generate response...")
+        print("💭 [STATE] Broadcasted 'thinking' state for user feedback")
+        print("=" * 80)
+        
         logging.info(f"[USER] {user_text[:80]}")
         print(f"[STATE] 🎤 User finished speaking")
+        print(f"[USER INPUT] 💬 '{user_text}'")
         
         # Store user message for later conversation turn completion
         self._pending_user_message = user_text
@@ -1019,33 +1104,53 @@ For every reply:
             # This indexes complete conversation turns (user + assistant) for better semantic search
             # No need to index user messages separately here
             
-            # OPTIMIZATION: Fetch profile once for both update and state management
-            existing_profile = await self.profile_service.get_profile_async(user_id)
+            # OPTIMIZATION: Profile is already in initial chat context (loaded at startup)
+            # Only fetch here if we need to UPDATE it (meaningful messages >20 chars)
+            # This saves unnecessary Redis/DB calls on every turn
+            existing_profile = None
             
             # Update profile only on meaningful messages (>20 chars)
-            # and when profile actually changes significantly
             if len(user_text.strip()) > 20:
+                # Fetch profile only when we need to update it
+                existing_profile = await self.profile_service.get_profile_async(user_id)
+                print(f"[PROFILE] 📥 Fetched existing profile: {len(existing_profile) if existing_profile else 0} chars")
+                
                 generated_profile = await asyncio.to_thread(
                     self.profile_service.generate_profile,
                     user_text,
                     existing_profile
                 )
+                print(f"[PROFILE] 🤖 Generated profile: {len(generated_profile) if generated_profile else 0} chars")
                 
                 # Only save if profile changed by more than 10 chars (avoid micro-updates)
                 if generated_profile and generated_profile != existing_profile:
-                    if abs(len(generated_profile) - len(existing_profile or "")) > 10:
-                        await self.profile_service.save_profile_async(generated_profile, user_id)
-                        logging.info(f"[PROFILE] ✅ Updated ({len(generated_profile)} chars)")
+                    char_diff = abs(len(generated_profile) - len(existing_profile or ""))
+                    print(f"[PROFILE] 📊 Profile changed - diff: {char_diff} chars")
+                    
+                    if char_diff > 10:
+                        print(f"[PROFILE] 💾 Saving updated profile to DB...")
+                        save_result = await self.profile_service.save_profile_async(generated_profile, user_id)
+                        if save_result:
+                            logging.info(f"[PROFILE] ✅ Updated ({len(generated_profile)} chars)")
+                            print(f"[PROFILE] ✅ Successfully saved to Supabase + Redis")
+                        else:
+                            logging.error(f"[PROFILE] ❌ Save failed!")
+                            print(f"[PROFILE] ❌ Save to DB FAILED - check permissions/connection")
                     else:
                         logging.info(f"[PROFILE] ⏭️  Skipped minor update (< 10 char difference)")
+                        print(f"[PROFILE] ⏭️  Minor change ({char_diff} chars) - not saving")
+                else:
+                    print(f"[PROFILE] ℹ️  Profile unchanged - no save needed")
             else:
                 logging.info(f"[PROFILE] ⏭️  Skipped update (message too short: {len(user_text)} chars)")
+                print(f"[PROFILE] ⏭️  Message too short ({len(user_text)} chars) - no profile update")
             
             # Update conversation state automatically
+            # State updates can work with cached profile or None (service handles it)
             try:
                 state_update_result = await self.conversation_state_service.auto_update_from_interaction(
                     user_input=user_text,
-                    user_profile=existing_profile or "",
+                    user_profile=existing_profile or "",  # Use fetched profile or empty
                     user_id=user_id
                 )
                 
@@ -1071,11 +1176,15 @@ async def entrypoint(ctx: agents.JobContext):
     """
     LiveKit agent entrypoint - simplified pattern
     """
+    import time
+    start_time = time.time()
+    
     print("=" * 80)
     print(f"[ENTRYPOINT] 🚀 NEW JOB RECEIVED")
     print(f"[ENTRYPOINT] Room: {ctx.room.name}")
     print(f"[ENTRYPOINT] Job ID: {ctx.job.id if ctx.job else 'N/A'}")
     print("=" * 80)
+    print(f"[TIMER] ⏱️  Start time: 0.00s")
 
     # Initialize infrastructure
     try:
@@ -1096,11 +1205,14 @@ async def entrypoint(ctx: agents.JobContext):
         print("[ENTRYPOINT] ✓ Database batcher initialized")
     except Exception as e:
         print(f"[ENTRYPOINT] Warning: Database batcher initialization failed: {e}")
+    
+    print(f"[TIMER] ⏱️  Infrastructure ready: {time.time() - start_time:.2f}s")
 
     # CRITICAL: Connect to the room first
     print("[ENTRYPOINT] Connecting to LiveKit room...")
     await ctx.connect()
     print("[ENTRYPOINT] ✓ Connected to room")
+    print(f"[TIMER] ⏱️  Room connected: {time.time() - start_time:.2f}s")
 
     # Initialize media + agent with enhanced debugging
     print("[TTS] 🎤 Initializing TTS with voice: v_8eelc901")
@@ -1146,6 +1258,7 @@ async def entrypoint(ctx: agents.JobContext):
         return
 
     print(f"[ENTRYPOINT] ✓ Participant joined: sid={participant.sid}, identity={participant.identity}")
+    print(f"[TIMER] ⏱️  Participant joined: {time.time() - start_time:.2f}s")
     
     # Extract user_id early to load context
     print(f"[DEBUG][IDENTITY] Extracting user_id from identity: '{participant.identity}'")
@@ -1172,51 +1285,50 @@ async def entrypoint(ctx: agents.JobContext):
     # STEP 2: Load user context BEFORE creating assistant (if we have valid user_id)
     user_gender = None  # Initialize gender
     user_time_context = None  # Initialize time context
+    user_name = None  # Initialize name for greeting
     
     if user_id:
         set_current_user_id(user_id)
         print(f"[DEBUG][USER_ID] ✅ Set current user_id to: {user_id}")
         
         try:
-            # Ensure user profile exists (parent table) - CRITICAL for FK constraints
-            user_service = UserService(supabase)
-            profile_exists = await asyncio.to_thread(user_service.ensure_profile_exists, user_id)
-            
-            if not profile_exists:
-                logging.error(f"[PROFILE] ❌ CRITICAL: Failed to ensure profile exists for {UserId.format_for_display(user_id)}")
-                logging.error(f"[PROFILE] This will cause ALL memory and profile saves to fail!")
-                print(f"[PROFILE] ❌ CRITICAL: Failed to ensure profile exists for {UserId.format_for_display(user_id)}")
-            else:
-                logging.info(f"[PROFILE] ✅ Profile exists in database for {UserId.format_for_display(user_id)}")
-                print(f"[PROFILE] ✅ Profile exists in database for {UserId.format_for_display(user_id)}")
-            
-            # Initialize user from onboarding data (creates profile + memories)
+            # OPTIMIZED: Combined profile check + initialization (single operation)
+            # This replaces: ensure_profile_exists + initialize_user_from_onboarding
+            # initialize_user_from_onboarding already ensures profile exists internally
             try:
                 logging.info(f"[ONBOARDING] Initializing user {UserId.format_for_display(user_id)} from onboarding data...")
                 onboarding_service_tmp = OnboardingService(supabase)
                 await onboarding_service_tmp.initialize_user_from_onboarding(user_id)
                 logging.info("[ONBOARDING] ✓ User initialization complete (profile + memories created)")
+                print(f"[PROFILE] ✅ Profile ready for {UserId.format_for_display(user_id)}")
             except Exception as e:
                 logging.error(f"[ONBOARDING] ⚠️ Failed to initialize user from onboarding: {e}", exc_info=True)
+                print(f"[PROFILE] ⚠️ Initialization warning: {e}")
             
-            # Load gender directly from onboarding_details table
-            print(f"[CONTEXT] 🔍 Fetching gender from onboarding_details...")
+            # Load gender AND name from onboarding_details table (single query)
+            print(f"[CONTEXT] 🔍 Fetching user data from onboarding_details...")
             onboarding_result = await asyncio.to_thread(
                 lambda: supabase.table("onboarding_details")
-                .select("gender")
+                .select("gender, full_name")
                 .eq("user_id", user_id)
                 .limit(1)
                 .execute()
             )
             
+            user_name = None
             if onboarding_result and onboarding_result.data:
                 user_gender = onboarding_result.data[0].get("gender")
+                user_name = onboarding_result.data[0].get("full_name")
                 if user_gender:
-                    print(f"[CONTEXT] ✅ User gender loaded from onboarding_details: {user_gender}")
-                else:
-                    print(f"[CONTEXT] ℹ️ No gender found in onboarding_details")
+                    print(f"[CONTEXT] ✅ User gender loaded: {user_gender}")
+                if user_name:
+                    print(f"[CONTEXT] ✅ User name loaded: {user_name}")
+                if not user_gender and not user_name:
+                    print(f"[CONTEXT] ℹ️ No gender or name found in onboarding_details")
             else:
                 print(f"[CONTEXT] ℹ️ No onboarding data found")
+            
+            print(f"[TIMER] ⏱️  User data loaded: {time.time() - start_time:.2f}s")
             
             # Calculate user time using default timezone
             user_time_context = None
@@ -1249,21 +1361,26 @@ async def entrypoint(ctx: agents.JobContext):
                 user_time_context = None
             
             # If no profile exists yet, try creating one from onboarding_details
-            try:
-                prof_service_tmp = ProfileService(supabase)
-                created = await prof_service_tmp.create_profile_from_onboarding_async(user_id)
-                if created:
-                    print("[PROFILE] ✓ Initial 250-char profile created from onboarding_details")
-            except Exception as e:
-                print(f"[PROFILE] ⚠️ Failed to create profile from onboarding_details: {e}")
-
-            # Load profile and memories for initial context
             print("[CONTEXT] Loading user data for initial context...")
             profile_service = ProfileService(supabase)
             memory_service = MemoryService(supabase)
             
-            # Load profile
-            profile = await asyncio.to_thread(profile_service.get_profile, user_id)
+            # OPTIMIZED: Load profile once, create if missing (single call path)
+            profile = None
+            try:
+                # First try to get existing profile
+                profile = await profile_service.get_profile_async(user_id)
+                
+                # If empty/missing, create from onboarding (this will also cache it)
+                if not profile or not profile.strip():
+                    await profile_service.create_profile_from_onboarding_async(user_id)
+                    profile = await profile_service.get_profile_async(user_id)
+                    print(f"[PROFILE] ✓ Profile created and loaded ({len(profile) if profile else 0} chars)")
+                else:
+                    print(f"[PROFILE] ✓ Profile loaded from cache/DB ({len(profile)} chars)")
+            except Exception as e:
+                print(f"[PROFILE] ⚠️ Failed to load profile: {e}")
+                profile = None
             
             # OPTIMIZED: Load memories from key categories with priority order
             # FACT first (name, gender, location), then preferences, goals, etc.
@@ -1316,6 +1433,8 @@ async def entrypoint(ctx: agents.JobContext):
         print("[CONTEXT] → Creating assistant with ONLY base personality (no user data)")
         print("[CONTEXT] → AI will work but won't have personalization")
     
+    print(f"[TIMER] ⏱️  Context loaded: {time.time() - start_time:.2f}s")
+    
     # STEP 3: Create assistant WITH context, gender, and time
     print(f"[AGENT CREATE] Creating Assistant with:")
     print(f"[AGENT CREATE]   - ChatContext: {'Provided' if initial_ctx else 'Empty'}")
@@ -1323,6 +1442,7 @@ async def entrypoint(ctx: agents.JobContext):
     print(f"[AGENT CREATE]   - Time: {user_time_context or 'Not set'}")
     assistant = Assistant(chat_ctx=initial_ctx, user_gender=user_gender, user_time=user_time_context)
     print(f"[AGENT CREATE] ✅ Assistant created successfully")
+    print(f"[TIMER] ⏱️  Agent created: {time.time() - start_time:.2f}s")
     
     # Set room reference for state broadcasting
     assistant.set_room(ctx.room)
@@ -1361,8 +1481,8 @@ async def entrypoint(ctx: agents.JobContext):
         tts=tts,
         vad=silero.VAD.load(
             min_silence_duration=0.5,      # Time to wait before considering speech ended
-            activation_threshold=0.6,      # Increased from 0.5 to reduce false triggers
-            min_speech_duration=0.15,      # Increased from 0.1 to ignore brief noise
+            activation_threshold=0.3,      # Lower = more sensitive (detects quieter speech)
+            min_speech_duration=0.1,       # Minimum speech duration to trigger (100ms)
         ),
     )
 
@@ -1372,16 +1492,24 @@ async def entrypoint(ctx: agents.JobContext):
     # Start session with RoomInputOptions (best practice)
     print(f"[SESSION INIT] Starting LiveKit session...")
     print(f"[SESSION INIT] ChatContext prepared with user profile + memories")
+    
+    # Configure room input with noise cancellation
+    room_input = RoomInputOptions(
+        noise_cancellation=True,  # Enable noise suppression for cleaner audio
+    )
+    print("[AUDIO] 🎧 Noise cancellation enabled for cleaner voice input")
+    
     await session.start(
         room=ctx.room, 
         agent=assistant,
-        room_input_options=RoomInputOptions()
+        room_input_options=room_input
     )
     print(f"[SESSION INIT] ✓ Session started successfully")
     
     # Wait for session to fully initialize
     await asyncio.sleep(0.5)
     print("[SESSION INIT] ✓ Session initialization complete")
+    print(f"[TIMER] ⏱️  Session ready: {time.time() - start_time:.2f}s")
 
     # Check if we have a valid user (already extracted and set earlier)
     if not user_id:
@@ -1404,6 +1532,7 @@ async def entrypoint(ctx: agents.JobContext):
     async def load_rag_background():
         """Load RAG memories in background"""
         try:
+            rag_start = time.time()
             print(f"[RAG_BG] Loading memories in background...")
             await asyncio.wait_for(
                 rag_service.load_from_database(supabase, limit=500),
@@ -1411,7 +1540,8 @@ async def entrypoint(ctx: agents.JobContext):
             )
             rag_system = rag_service.get_rag_system()
             if rag_system:
-                print(f"[RAG_BG] ✅ Loaded {len(rag_system.memories)} memories in background")
+                rag_elapsed = time.time() - rag_start
+                print(f"[RAG_BG] ✅ Loaded {len(rag_system.memories)} memories in {rag_elapsed:.2f}s")
         except Exception as e:
             print(f"[RAG_BG] ⚠️ Background load failed: {e}")
     
@@ -1442,14 +1572,42 @@ async def entrypoint(ctx: agents.JobContext):
     # Don't wait too long or participant might disconnect
     await asyncio.sleep(0.3)  # Minimal delay - just enough for session readiness
     
-    # Generate greeting immediately - LiveKit ensures delivery when ready
-    print("[GREETING] Generating optimized greeting...")
-    await assistant.generate_greeting(session)
-    print("[GREETING] ✅ Greeting sent!")
+    # Simple approach: Play greeting with session.say() and ensure listening state after
+    if user_name:
+        greeting_msg = f"السلام علیکم {user_name}! آج کیسے ہیں؟"
+    else:
+        greeting_msg = "السلام علیکم! کیسے ہیں آپ؟"
+    
+    print("=" * 80)
+    print(f"[GREETING] 📢 Playing: {greeting_msg}")
+    print("=" * 80)
+    
+    try:
+        # Play greeting and wait for it to finish
+        await session.say(greeting_msg)
+        print("[GREETING] ✅ Greeting playback complete")
+    except Exception as e:
+        print(f"[GREETING] ⚠️ Greeting failed: {e}")
+    
+    greeting_time = time.time() - start_time
+    print(f"[TIMER] ⏱️  Greeting finished: {greeting_time:.2f}s")
+    
+    # CRITICAL: Set to listening state and ensure VAD is ready
+    await assistant.broadcast_state("listening")
+    print("💭 [STATE] Broadcasted 'listening' state")
+    
+    # Extra delay to ensure VAD activates properly
+    await asyncio.sleep(0.5)
+    print("👂 [VAD] Waiting for VAD to activate...")
     
     # LiveKit Best Practice: Use event-based disconnection detection
     # Set up disconnection event handler
-    print("[ENTRYPOINT] 🎧 Agent is now listening and ready for conversation...")
+    setup_start = time.time()
+    print("=" * 80)
+    print("[ENTRYPOINT] 🎧 Agent is NOW READY TO LISTEN")
+    print("[ENTRYPOINT] ✅ Greeting playback finished - user can now speak")
+    print("[ENTRYPOINT] 👂 VAD is ACTIVE and listening for user voice")
+    print("=" * 80)
     print("[ENTRYPOINT] Setting up event handlers...")
     
     # Create an event to signal when participant disconnects
@@ -1480,9 +1638,24 @@ async def entrypoint(ctx: agents.JobContext):
     ctx.room.on("track_subscribed", on_track_subscribed)
     ctx.room.on("track_unsubscribed", on_track_unsubscribed)
     print("[ENTRYPOINT] ✓ Event handlers registered (disconnect, track_subscribed, track_unsubscribed)")
+    setup_elapsed = time.time() - setup_start
+    print(f"[TIMER] ⚡ Setup completed in {setup_elapsed:.3f}s")
+    
+    print("")
+    print("=" * 80)
+    print("📋 EXPECTED FLOW:")
+    print("   1. ✅ Greeting playback complete (already done)")
+    print("   2. 🎤 User speaks → VAD detects → 'USER SPEECH STARTED' log")
+    print("   3. 🗣️  User finishes → 'USER TURN COMPLETED' log")
+    print("   4. 🤖 LLM processes → Tool calls (if needed) → Response generated")
+    print("   5. 🔊 'AGENT SPEECH STARTED' → Agent responds")
+    print("=" * 80)
+    print("")
     
     try:
-        print("[ENTRYPOINT] Waiting for participant to disconnect...")
+        ready_time = time.time()
+        print(f"[ENTRYPOINT] 👂 Waiting for user to speak or disconnect...")
+        print(f"[TIMER] ⏰ Ready at: {ready_time:.2f} (Total: {ready_time - start_time:.2f}s from start)")
 
         await asyncio.wait_for(disconnect_event.wait(), timeout=3600)  # 1 hour max
         print("[ENTRYPOINT] ✓ Session completed normally (participant disconnected)")

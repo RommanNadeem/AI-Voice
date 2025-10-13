@@ -36,20 +36,20 @@ class RedisCache:
         try:
             print(f"[REDIS] Connecting to {self.redis_url}...")
             
-            # Create Redis client with connection pooling
+            # Create Redis client with connection pooling (faster timeout)
             self._client = redis.from_url(
                 self.redis_url,
                 encoding="utf-8",
                 decode_responses=True,
                 max_connections=50,  # Connection pool size
-                socket_connect_timeout=5,
-                socket_timeout=5,
-                retry_on_timeout=True,
+                socket_connect_timeout=1,  # Reduced from 5s to 1s (fail fast)
+                socket_timeout=1,  # Reduced from 5s to 1s
+                retry_on_timeout=False,  # Don't retry on timeout (faster failure)
                 health_check_interval=30,
             )
             
-            # Test connection
-            await self._client.ping()
+            # Test connection with timeout
+            await asyncio.wait_for(self._client.ping(), timeout=1.0)
             print("[REDIS] ✓ Connected successfully with connection pooling")
             
         except Exception as e:
