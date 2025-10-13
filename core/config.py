@@ -40,6 +40,10 @@ class Config:
     TIME_DECAY_HOURS: int = 24
     RECENCY_WEIGHT: float = 0.3
     
+    # Testing/Development Configuration
+    TEST_USER_ID: Optional[str] = os.getenv("TEST_USER_ID", "4e3efa3d-d8fe-431e-a78f-4efffb0cf43a")
+    USE_TEST_USER: bool = os.getenv("USE_TEST_USER", "false").lower() == "true"
+    
     @classmethod
     def validate(cls) -> bool:
         """Validate required configuration"""

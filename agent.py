@@ -1154,9 +1154,17 @@ async def entrypoint(ctx: agents.JobContext):
     if user_id:
         print(f"[DEBUG][USER_ID] ✅ Successfully extracted user_id: {UserId.format_for_display(user_id)}")
     else:
-        print(f"[DEBUG][USER_ID] ❌ CRITICAL: Failed to extract user_id from '{participant.identity}'")
-        print(f"[DEBUG][USER_ID] → This will cause AI to not use any user data!")
-        print(f"[DEBUG][USER_ID] → Expected format: 'user-<uuid>' or '<uuid>'")
+        print(f"[DEBUG][USER_ID] ❌ Failed to extract user_id from '{participant.identity}'")
+        
+        # Use test user ID if configured (for development/testing)
+        if Config.USE_TEST_USER and Config.TEST_USER_ID:
+            user_id = Config.TEST_USER_ID
+            print(f"[DEBUG][USER_ID] 🧪 Using TEST_USER_ID: {UserId.format_for_display(user_id)}")
+            print(f"[DEBUG][USER_ID] → Set USE_TEST_USER=false to disable test mode")
+        else:
+            print(f"[DEBUG][USER_ID] → No user data will be available")
+            print(f"[DEBUG][USER_ID] → Expected format: 'user-<uuid>' or '<uuid>'")
+            print(f"[DEBUG][USER_ID] → To enable test mode: set USE_TEST_USER=true")
     
     # STEP 1: Create initial ChatContext
     initial_ctx = ChatContext()
