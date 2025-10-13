@@ -1493,16 +1493,10 @@ async def entrypoint(ctx: agents.JobContext):
     print(f"[SESSION INIT] Starting LiveKit session...")
     print(f"[SESSION INIT] ChatContext prepared with user profile + memories")
     
-    # Configure room input with noise cancellation
-    room_input = RoomInputOptions(
-        noise_cancellation=True,  # Enable noise suppression for cleaner audio
-    )
-    print("[AUDIO] 🎧 Noise cancellation enabled for cleaner voice input")
-    
     await session.start(
         room=ctx.room, 
         agent=assistant,
-        room_input_options=room_input
+        room_input_options=RoomInputOptions()
     )
     print(f"[SESSION INIT] ✓ Session started successfully")
     
