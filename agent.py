@@ -116,129 +116,6 @@ async def wait_for_participant(room, *, target_identity: Optional[str] = None, t
         await asyncio.sleep(0.5)
     return None
 
-def categorize_user_input(user_text: str, memory_service: MemoryService) -> str:
-    """Categorize user input for memory storage using OpenAI"""
-    if not user_text or not user_text.strip():
-        return "FACT"
-    
-    try:
-        pool = get_connection_pool_sync()
-        import openai
-        client = pool.get_openai_client() if pool else openai.OpenAI(api_key=Config.OPENAI_API_KEY)
-        
-        prompt = f"""
-        Analyze the following user input and categorize it into one of these categories:
-        
-        GOAL - Aspirations, dreams, things they want to achieve
-        INTEREST - Things they like, hobbies, passions, preferences
-        OPINION - Thoughts, beliefs, views, judgments
-        EXPERIENCE - Past events, things that happened to them, memories
-        PREFERENCE - Choices, likes vs dislikes, preferences
-        PLAN - Future intentions, upcoming events, scheduled activities
-        RELATIONSHIP - People in their life, family, friends, colleagues
-        FACT - General information, facts, neutral statements
-        
-        User input: "{user_text}"
-        
-        Return only the category name (e.g., GOAL, INTEREST, etc.) - no other text.
-        """
-        
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": "You are a helpful assistant that categorizes user input into memory categories. Always respond with just the category name."},
-                {"role": "user", "content": prompt}
-            ],
-            max_tokens=10,
-            temperature=0.1
-        )
-        
-        category = response.choices[0].message.content.strip().upper()
-        valid_categories = ["GOAL", "INTEREST", "OPINION", "EXPERIENCE", "PREFERENCE", "PLAN", "RELATIONSHIP", "FACT"]
-        
-        if category in valid_categories:
-            print(f"[CATEGORIZATION] '{user_text[:50]}...' -> {category}")
-            return category
-        else:
-            return "FACT"
-            
-    except Exception as e:
-        print(f"[CATEGORIZATION ERROR] {e}")
-        return "FACT"
-
-
-# Heuristic extraction of a stable (key, value) pair for memory persistence
-def extract_memory_key_value(user_text: str, category: str):
-    """Return (key, value) suitable for saving to the memory table or None.
-
-    The key must be English snake_case and stable across updates (e.g., "favorite_food").
-    Only produce a pair for durable, user-related information. Skip ephemeral status.
-    """
-    try:
-        import re
-        pool = get_connection_pool_sync()
-        import openai
-        client = pool.get_openai_client() if pool else openai.OpenAI(api_key=Config.OPENAI_API_KEY)
-
-        system_msg = (
-            "You extract durable, user-specific facts or preferences from a single user utterance. "
-            "Respond ONLY as compact JSON with keys 'key' and 'value'. "
-            "The 'key' MUST be English snake_case (e.g., favorite_food, sister_name, hobby). "
-            "Only produce a key if the info helps personalize future conversations. "
-            "If nothing durable is present, respond with the exact text: NONE."
-            "the 'value' must be in Urdu and descriptive"
-            "the value should be gender nuetral"
-        )
-
-        user_msg = (
-            f"Category hint: {category}.\n"
-            f"User text: {user_text}\n\n"
-            "Examples that SHOULD produce a key:\n"
-            "- 'مجھے چکن قورمہ بہت پسند ہے' -> key: favorite_food, value:ر کو چکن بریانی پسند ہے\n"
-            "- 'میری بہن کا نام عائشہ ہے' -> key: sister_name, value:  کی بہن کا نام عائشہ ہے۔\n"
-            "- 'میں کراچی میں رہتا ہوں' -> key: location, value: کراچی میں رہتا ہے۔\n\n"
-            "Examples that SHOULD be NONE (ephemeral):\n"
-            "- 'میں ٹھیک ہوں'\n"
-            "- 'آج میں مصروف ہوں'\n"
-        )
-
-        resp = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": system_msg},
-                {"role": "user", "content": user_msg},
-            ],
-            max_tokens=60,
-            temperature=0.5,
-        )
-
-        content = (resp.choices[0].message.content or "").strip()
-        if content.upper() == "NONE":
-            return None
-
-        # Parse minimal JSON without importing heavy deps
-        # Expecting: {"key": "favorite_food", "value": "بریانی"}
-        import json
-        data = json.loads(content)
-        key = str(data.get("key", "")).strip()
-        value = str(data.get("value", "")).strip()
-
-        if not key or not value:
-            return None
-
-        # Normalize key strictly to English snake_case
-        key_norm = key.lower().strip()
-        key_norm = re.sub(r"[^a-z0-9_]+", "_", key_norm)
-        key_norm = re.sub(r"_+", "_", key_norm).strip("_")
-        if not key_norm or key_norm.startswith("user_input_"):
-            return None
-
-        return (key_norm, value)
-    except Exception as e:
-        logging.error(f"[MEMORY EXTRACTION] Failed to extract memory from text: {e}")
-        logging.error(f"[MEMORY EXTRACTION] User text: {user_text[:100]}")
-        return None
-
 # ---------------------------
 # Assistant Agent - Simplified Pattern
 # ---------------------------
@@ -312,16 +189,16 @@ Begin with a concise checklist (3–7 bullets) of what you will do; keep items c
 - **Pivot Lightly:** Change topics using recent user words, time of day, or callback information.
 - **Micro-Stories:** Occasionally share brief, fictional life slices to make the exchange two-way.
 - **Mood-Mirroring:** Match your tone to the user’s expressed energy.
-- **Mini-Challenges:** Offer playful, small tasks (e.g., “۵ منٹ بغیر فون کے کوشش کرو”) to spark self-reflection.
+- **Mini-Challenges:** Offer playful, small tasks to spark self-reflection.
 - **Humor Beats:** Insert light jokes or absurd twists – never make fun of the user.
 - **Cultural Anchors:** Reference relatable Urdu/Pakistani context.
 - **Self-Hints/Persona Flavors:** Drop subtle quirks about yourself to enhance relatability.
 - **“Why Not” Pivots:** If the conversation stalls, explore a casual detail with curiosity.
 - **Insight Finder:** Highlight small insights only when they emerge naturally.
 - **Frictionless Pacing:** Short replies for casual talk, longer ones as the user opens up.
-- **Time Awareness:** Tie responses to time of day or typical life rhythms (“شام کا وقت سوچنے پر مجبور کرتا ہے”).
+- **Time Awareness:** Tie responses to time of day or typical life rhythms.
 - **Earned Memory:** Use recalled user details to show care, never to pressure.
-- **Light Meta-Awareness:** Sometimes comment on how the conversation is going (e.g., “ارے، ہم کتنی گھوم پھر کے باتیں کر رہے ہیں، مزے کی بات ہے نا؟”).
+- **Light Meta-Awareness:** Sometimes comment on how the conversation is going.
 
 ---
 
@@ -1120,37 +997,9 @@ For every reply:
             
             logging.info(f"[BACKGROUND] Processing: {user_text[:50] if len(user_text) > 50 else user_text}...")
             
-            # Categorize for RAG metadata (previously we didn't auto-save to DB)
-            category = await asyncio.to_thread(categorize_user_input, user_text, self.memory_service)
-            ts_ms = int(time.time() * 1000)
-            
-            # NEW: Heuristic auto-save to memory table if a durable (key, value) can be extracted
-            # This complements the LLM tool call and ensures persistence when the model doesn't call tools
-            try:
-                logging.info(f"[MEMORY] Attempting to extract memory from: '{user_text[:80]}...'")
-                kv = await asyncio.to_thread(extract_memory_key_value, user_text, category)
-                if kv:
-                    key, normalized_value = kv
-                    logging.info(f"[MEMORY] ✅ Extracted: [{category}] {key} = {normalized_value[:50]}...")
-                    saved = await self.memory_service.store_memory_async(category, key, normalized_value, user_id)
-                    if saved:
-                        logging.info(f"[MEMORY] ✅ Auto-saved to database: [{category}] {key}")
-                    else:
-                        logging.error(f"[MEMORY] ❌ Auto-save to database failed: [{category}] {key}")
-                else:
-                    logging.info(f"[MEMORY] ℹ️  No durable memory detected in user text")
-            except Exception as e:
-                logging.error(f"[MEMORY] Auto-save error: {e}", exc_info=True)
-
-            # ✅ Index in RAG for semantic search (without storing in memory table)
-            # LLM will use storeInMemory() tool with consistent keys when needed
-            if self.rag_service:
-                self.rag_service.add_memory_background(
-                    text=user_text,
-                    category=category,
-                    metadata={"timestamp": ts_ms}
-                )
-                logging.info(f"[RAG] ✅ Indexed for search (memory storage handled by LLM tools)")
+            # NOTE: RAG indexing happens in _add_conversation_turn_to_rag (after assistant response)
+            # This indexes complete conversation turns (user + assistant) for better semantic search
+            # No need to index user messages separately here
             
             # Update profile - use async method with explicit user_id
             existing_profile = await self.profile_service.get_profile_async(user_id)
@@ -1375,34 +1224,47 @@ async def entrypoint(ctx: agents.JobContext):
             # Load profile
             profile = await asyncio.to_thread(profile_service.get_profile, user_id)
             
-            # Load recent memories from key categories
-            categories = ['FACT', 'GOAL', 'INTEREST', 'PREFERENCE', 'RELATIONSHIP']
+            # OPTIMIZED: Load memories from key categories with priority order
+            # FACT first (name, gender, location), then preferences, goals, etc.
+            categories = ['FACT', 'PREFERENCE', 'GOAL', 'INTEREST', 'RELATIONSHIP', 'PLAN']
             recent_memories = memory_service.get_memories_by_categories_batch(
                 categories=categories,
-                limit_per_category=3,
+                limit_per_category=5,  # Increased from 3 to 5 for better context
                 user_id=user_id
             )
             
-            # Build initial context message
+            # Build optimized initial context message with better structure
             context_parts = []
             
             if profile and len(profile.strip()) > 0:
-                context_parts.append(f"User profile: {profile[:300]}...")
+                context_parts.append(f"## User Profile\n{profile[:400]}...")  # Increased from 300
                 print(f"[CONTEXT]   ✓ Profile loaded ({len(profile)} chars)")
             
+            # Add memories by category with clear structure
+            memory_count = 0
             for category, mems in recent_memories.items():
                 if mems:
-                    mem_values = [m['value'] for m in mems[:3]]
-                    context_parts.append(f"{category}: {', '.join(mem_values)}")
-                    print(f"[CONTEXT]   ✓ {category}: {len(mems)} memories")
+                    # Create readable memory strings
+                    mem_strings = []
+                    for mem in mems[:5]:  # Limit to 5 per category
+                        key = mem.get('key', 'unknown')
+                        value = mem.get('value', '')
+                        if value:
+                            mem_strings.append(f"- {value}")
+                            memory_count += 1
+                    
+                    if mem_strings:
+                        context_parts.append(f"## {category}\n" + "\n".join(mem_strings))
+                        print(f"[CONTEXT]   ✓ {category}: {len(mem_strings)} memories")
             
             if context_parts:
                 # Add as assistant message (internal context, not shown to user)
+                context_message = "[Internal Context - User Information]\n\n" + "\n\n".join(context_parts)
                 initial_ctx.add_message(
                     role="assistant",
-                    content="[Internal context - User information loaded]\n" + "\n".join(context_parts)
+                    content=context_message
                 )
-                print(f"[CONTEXT] ✅ Loaded {len(context_parts)} context items into ChatContext")
+                print(f"[CONTEXT] ✅ Loaded profile + {memory_count} memories across {len(recent_memories)} categories")
             else:
                 print("[CONTEXT] ℹ️  No existing user data found, starting fresh")
         except Exception as e:
