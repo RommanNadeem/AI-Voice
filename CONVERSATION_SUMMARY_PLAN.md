@@ -28,37 +28,26 @@ Next Session: Load summary + recent memories
 
 ## 🗄️ Database Schema
 
-### New Table: `conversation_summaries`
+### ✅ Use Existing `conversation_state` Table
+
+**Good news!** The required columns already exist in `conversation_state`:
 
 ```sql
-CREATE TABLE conversation_summaries (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id UUID NOT NULL REFERENCES profiles(user_id) ON DELETE CASCADE,
-    session_id TEXT NOT NULL,  -- LiveKit room name or unique session ID
-    
-    -- Summary content
-    summary_text TEXT NOT NULL,  -- The actual summary
-    key_topics TEXT[],  -- Array of main topics discussed
-    important_facts TEXT[],  -- Key facts shared in this session
-    emotional_tone TEXT,  -- Overall mood (happy, stressed, reflective, etc.)
-    
-    -- Metadata
-    turn_count INTEGER,  -- How many turns summarized
-    start_time TIMESTAMPTZ,
-    end_time TIMESTAMPTZ,
-    is_final BOOLEAN DEFAULT FALSE,  -- True when session ends
-    
-    -- Linkage
-    previous_summary_id UUID REFERENCES conversation_summaries(id),  -- Link to previous incremental summary
-    
-    created_at TIMESTAMPTZ DEFAULT NOW(),
-    updated_at TIMESTAMPTZ DEFAULT NOW()
-);
-
--- Index for fast retrieval
-CREATE INDEX idx_conv_summaries_user_time ON conversation_summaries(user_id, created_at DESC);
-CREATE INDEX idx_conv_summaries_session ON conversation_summaries(session_id);
+-- Already exists from add_conversation_state_context_columns.sql migration:
+ALTER TABLE conversation_state
+    ADD COLUMN IF NOT EXISTS last_summary TEXT,
+    ADD COLUMN IF NOT EXISTS last_topics JSONB DEFAULT '[]',
+    ADD COLUMN IF NOT EXISTS last_user_message TEXT,
+    ADD COLUMN IF NOT EXISTS last_assistant_message TEXT,
+    ADD COLUMN IF NOT EXISTS last_conversation_at TIMESTAMPTZ;
 ```
+
+**Benefits of using existing table:**
+- ✅ No new table needed
+- ✅ Summary stored with stage/trust_score
+- ✅ Single query to get state + summary
+- ✅ Simpler architecture
+- ✅ No migration required
 
 ---
 

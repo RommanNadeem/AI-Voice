@@ -2,11 +2,16 @@
 
 ## Quick Start
 
-### Step 1: Run Database Migration
+### Step 1: Verify Database Schema
 
+**Good news!** The required columns already exist in `conversation_state` table:
+- ✅ `last_summary` (TEXT) - Stores conversation summary
+- ✅ `last_topics` (JSONB) - Array of key topics
+- ✅ `last_conversation_at` (TIMESTAMPTZ) - Last conversation timestamp
+
+**No migration needed!** If these columns don't exist, run:
 ```bash
-# Connect to your Supabase project and run:
-psql $DATABASE_URL -f migrations/create_conversation_summaries_table.sql
+psql $DATABASE_URL -f migrations/add_conversation_state_context_columns.sql
 ```
 
 ### Step 2: Add Service Import to agent.py
@@ -182,25 +187,22 @@ except asyncio.TimeoutError:
     await assistant.generate_final_summary()
 ```
 
-### Step 8: Load Summaries on Next Session
+### Step 8: Load Summary on Next Session
 
 ```python
 # In entrypoint, when building initial context (around line 1430):
 
 if context_parts:
-    # ADD THIS - Load recent summaries:
+    # ADD THIS - Load last conversation summary:
     from services.conversation_summary_service import ConversationSummaryService
     summary_service_temp = ConversationSummaryService(supabase)
-    recent_summaries = await summary_service_temp.get_recent_summaries(
-        user_id=user_id,
-        limit=2,  # Last 2 sessions
-        final_only=True  # Only final summaries
-    )
+    last_summary = await summary_service_temp.get_last_summary(user_id)
     
-    if recent_summaries:
-        summary_context = summary_service_temp.format_summaries_for_context(recent_summaries)
-        context_parts.insert(0, summary_context)  # Add at beginning
-        print(f"[CONTEXT]   ✓ Loaded {len(recent_summaries)} conversation summaries")
+    if last_summary:
+        summary_context = summary_service_temp.format_summary_for_context(last_summary)
+        if summary_context:
+            context_parts.insert(0, summary_context)  # Add at beginning
+            print(f"[CONTEXT]   ✓ Loaded last conversation summary")
     
     # Add as assistant message (internal context, not shown to user)
     context_message = "[Internal Context - User Information]\n\n" + "\n\n".join(context_parts)

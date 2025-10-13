@@ -1,6 +1,13 @@
 """
 Conversation Summary Service
-Generates and manages progressive conversation summaries using RAG and LLM
+Generates and manages conversation summaries using existing conversation_state table.
+
+Uses columns:
+- last_summary (TEXT): Most recent conversation summary
+- last_topics (JSONB): Array of key topics discussed
+- last_user_message (TEXT): Most recent user message
+- last_assistant_message (TEXT): Most recent assistant message  
+- last_conversation_at (TIMESTAMPTZ): Timestamp of last exchange
 """
 
 import asyncio
@@ -194,16 +201,15 @@ Be specific and concise."""
         self,
         summary_data: Dict,
         turn_count: int,
-        is_final: bool = False,
         user_id: Optional[str] = None
     ) -> bool:
         """
-        Save conversation summary to database.
+        Save conversation summary to conversation_state table.
+        Updates last_summary, last_topics, and last_conversation_at columns.
         
         Args:
             summary_data: Summary dict from generate_summary()
             turn_count: Number of turns in this summary
-            is_final: True if this is the final session summary
             user_id: User ID (uses current user if not provided)
             
         Returns:
@@ -215,142 +221,107 @@ Be specific and concise."""
         
         uid = user_id or get_current_user_id()
         
-        if not uid or not self.current_session_id:
-            print(f"[SUMMARY] ⚠️ Missing user_id or session_id")
+        if not uid:
+            print(f"[SUMMARY] ⚠️ Missing user_id")
             return False
         
         try:
-            data = {
-                "user_id": uid,
-                "session_id": self.current_session_id,
-                "summary_text": summary_data["summary_text"],
-                "key_topics": summary_data.get("key_topics", []),
-                "important_facts": summary_data.get("important_facts", []),
-                "emotional_tone": summary_data.get("emotional_tone", "neutral"),
-                "turn_count": turn_count,
-                "is_final": is_final,
-                "previous_summary_id": self.last_summary_id
+            # Update conversation_state with summary
+            update_data = {
+                "last_summary": summary_data["summary_text"],
+                "last_topics": json.dumps(summary_data.get("key_topics", [])),  # JSONB format
+                "last_conversation_at": datetime.utcnow().isoformat()
             }
             
-            # Set end_time if final
-            if is_final:
-                data["end_time"] = datetime.utcnow().isoformat()
-            
-            # Save to database
+            # Upsert to conversation_state
             resp = await asyncio.to_thread(
-                lambda: self.supabase.table("conversation_summaries").insert(data).execute()
+                lambda: self.supabase.table("conversation_state")
+                    .update(update_data)
+                    .eq("user_id", uid)
+                    .execute()
             )
             
             if resp.data:
-                summary_id = resp.data[0]["id"]
-                self.last_summary_id = summary_id
-                
-                summary_type = "FINAL" if is_final else "INCREMENTAL"
-                print(f"[SUMMARY] ✅ {summary_type} summary saved")
-                print(f"[SUMMARY]    ID: {summary_id[:8]}...")
+                print(f"[SUMMARY] ✅ Summary saved to conversation_state")
                 print(f"[SUMMARY]    User: {UserId.format_for_display(uid)}")
                 print(f"[SUMMARY]    Turns: {turn_count}")
+                print(f"[SUMMARY]    Topics: {', '.join(summary_data.get('key_topics', [])[:3])}")
                 
                 return True
             
-            print("[SUMMARY] ⚠️ No data returned from insert")
+            print("[SUMMARY] ⚠️ No rows updated - state may not exist")
             return False
             
         except Exception as e:
             print(f"[SUMMARY] ❌ Save failed: {e}")
             return False
     
-    async def get_recent_summaries(
-        self,
-        user_id: str,
-        limit: int = 3,
-        final_only: bool = False
-    ) -> List[Dict]:
+    async def get_last_summary(self, user_id: str) -> Optional[Dict]:
         """
-        Get recent conversation summaries for a user.
+        Get the last conversation summary from conversation_state table.
         
         Args:
             user_id: User ID
-            limit: Maximum number of summaries to return
-            final_only: If True, only return final session summaries
             
         Returns:
-            List of summary dicts ordered by most recent first
+            Dict with last_summary, last_topics, last_conversation_at or None
         """
-        try:
-            query = self.supabase.table("conversation_summaries").select("*").eq("user_id", user_id)
-            
-            if final_only:
-                query = query.eq("is_final", True)
-            
-            resp = await asyncio.to_thread(
-                lambda: query.order("created_at", desc=True).limit(limit).execute()
-            )
-            
-            summaries = resp.data if resp.data else []
-            
-            if summaries:
-                print(f"[SUMMARY] 📥 Loaded {len(summaries)} summaries for {UserId.format_for_display(user_id)}")
-            
-            return summaries
-            
-        except Exception as e:
-            print(f"[SUMMARY] ❌ Fetch failed: {e}")
-            return []
-    
-    async def get_session_summary(self, session_id: str) -> Optional[Dict]:
-        """Get final summary for a specific session"""
         try:
             resp = await asyncio.to_thread(
                 lambda: self.supabase
-                    .table("conversation_summaries")
-                    .select("*")
-                    .eq("session_id", session_id)
-                    .eq("is_final", True)
+                    .table("conversation_state")
+                    .select("last_summary, last_topics, last_conversation_at")
+                    .eq("user_id", user_id)
                     .single()
                     .execute()
             )
             
-            return resp.data if resp.data else None
+            if resp.data and resp.data.get("last_summary"):
+                print(f"[SUMMARY] 📥 Loaded summary for {UserId.format_for_display(user_id)}")
+                return resp.data
+            
+            return None
             
         except Exception as e:
-            print(f"[SUMMARY] ⚠️ Session summary not found: {session_id[:20]}...")
+            print(f"[SUMMARY] ℹ️ No previous summary found: {e}")
             return None
     
-    def format_summaries_for_context(self, summaries: List[Dict]) -> str:
+    def format_summary_for_context(self, summary_data: Dict) -> str:
         """
-        Format summaries for ChatContext injection.
+        Format summary for ChatContext injection.
         
         Args:
-            summaries: List of summary dicts from database
+            summary_data: Dict from conversation_state (last_summary, last_topics, last_conversation_at)
             
         Returns:
             Formatted string ready for ChatContext.add_message()
         """
-        if not summaries:
+        if not summary_data or not summary_data.get("last_summary"):
             return ""
         
-        context_parts = ["## Recent Conversation History\n"]
+        parts = ["## Last Conversation Summary\n"]
         
-        for summ in summaries:
-            # Format date
-            created = summ.get("created_at", "")
-            date_str = created[:10] if created else "Unknown date"
-            
-            # Build summary section
-            context_parts.append(f"**Session: {date_str}** ({summ.get('turn_count', 0)} turns)")
-            context_parts.append(summ.get("summary_text", ""))
-            
-            # Add topics and tone if available
-            topics = summ.get("key_topics", [])
-            if topics:
-                context_parts.append(f"Topics: {', '.join(topics[:4])}")
-            
-            tone = summ.get("emotional_tone")
-            if tone and tone != "neutral":
-                context_parts.append(f"Mood: {tone}")
-            
-            context_parts.append("")  # Blank line between summaries
+        # Add timestamp if available
+        last_convo = summary_data.get("last_conversation_at")
+        if last_convo:
+            date_str = last_convo[:10] if isinstance(last_convo, str) else str(last_convo)[:10]
+            parts.append(f"**Last conversation:** {date_str}\n")
         
-        return "\n".join(context_parts)
+        # Add summary
+        parts.append(summary_data["last_summary"])
+        
+        # Add topics if available
+        topics = summary_data.get("last_topics")
+        if topics:
+            # Handle both JSONB (list) and string formats
+            if isinstance(topics, str):
+                try:
+                    topics = json.loads(topics)
+                except:
+                    pass
+            
+            if isinstance(topics, list) and topics:
+                parts.append(f"\n**Topics:** {', '.join(topics[:5])}")
+        
+        return "\n".join(parts)
 
