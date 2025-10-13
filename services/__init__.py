@@ -11,6 +11,7 @@ from .conversation_context_service import ConversationContextService
 from .conversation_state_service import ConversationStateService
 from .onboarding_service import OnboardingService
 from .rag_service import RAGService
+from .conversation_summary_service import ConversationSummaryService
 
 __all__ = [
     'UserService',
@@ -21,5 +22,6 @@ __all__ = [
     'ConversationStateService',
     'OnboardingService',
     'RAGService',
+    'ConversationSummaryService',
 ]
 
