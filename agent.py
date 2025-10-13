@@ -1412,19 +1412,14 @@ async def entrypoint(ctx: agents.JobContext):
     # No need to manually wait - the session's VAD will activate when audio is ready
     print("[AUDIO] ✓ AgentSession managing audio subscription automatically")
     
-    # OPTIMIZATION: Ensure WebRTC connection is stable before greeting
-    # Brief delay to allow WebRTC connection + audio subscription
-    print("[ENTRYPOINT] Waiting for audio connection stability...")
-    await asyncio.sleep(1.0)  # Increased from 0.5s to 1.0s for better stability
+    # OPTIMIZATION: Minimal delay to ensure session is ready (LiveKit handles the rest)
+    # Don't wait too long or participant might disconnect
+    await asyncio.sleep(0.3)  # Minimal delay - just enough for session readiness
     
-    # Verify participant is still connected before greeting
-    if participant.sid not in ctx.room.remote_participants:
-        print("[GREETING] ⚠️ Participant disconnected before greeting, skipping...")
-    else:
-        # Generate greeting with optimized context (fast greeting)
-        print("[GREETING] Generating optimized greeting...")
-        await assistant.generate_greeting(session)
-        print("[GREETING] ✅ Greeting sent!")
+    # Generate greeting immediately - LiveKit ensures delivery when ready
+    print("[GREETING] Generating optimized greeting...")
+    await assistant.generate_greeting(session)
+    print("[GREETING] ✅ Greeting sent!")
     
     # LiveKit Best Practice: Use event-based disconnection detection
     # Set up disconnection event handler
