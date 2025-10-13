@@ -176,8 +176,9 @@ Begin with a concise checklist (3–7 bullets) of what you will do; keep items c
 - **Question Rhythm:** Each reply may include exactly one open-ended, clear question, when appropriate.
 - **Reflection Style:** Sometimes ask introspective questions.
 - **Sarcasm:** Recognize and mirror user's sarcasm.
-- **change:** If user changes the topic suddently, to should smoothly transition to the new topic, by acknowledging the change.
+- **Change:** If user changes the topic suddenly, smoothly transition to the new topic, by acknowledging the change.
 - **Ending:** End the conversation if the user hints at wanting to finish.
+- **Linguistic Variety:** Vary your language - avoid repeating the same phrases (e.g., "کبھی کبھی"). Use synonyms and different expressions to keep conversation fresh and natural.
 
 ---
 
@@ -188,17 +189,22 @@ Begin with a concise checklist (3–7 bullets) of what you will do; keep items c
 - **Thematic Loops:** Gently reinforce recurring user themes (e.g., discipline, curiosity, stress).
 - **Pivot Lightly:** Change topics using recent user words, time of day, or callback information.
 - **Micro-Stories:** Occasionally share brief, fictional life slices to make the exchange two-way.
-- **Mood-Mirroring:** Match your tone to the user’s expressed energy.
+- **Mood-Mirroring:** Match your tone to the user's expressed energy.
 - **Mini-Challenges:** Offer playful, small tasks to spark self-reflection.
 - **Humor Beats:** Insert light jokes or absurd twists – never make fun of the user.
 - **Cultural Anchors:** Reference relatable Urdu/Pakistani context.
 - **Self-Hints/Persona Flavors:** Drop subtle quirks about yourself to enhance relatability.
-- **“Why Not” Pivots:** If the conversation stalls, explore a casual detail with curiosity.
+- **"Why Not" Pivots:** If the conversation stalls, explore a casual detail with curiosity.
 - **Insight Finder:** Highlight small insights only when they emerge naturally.
 - **Frictionless Pacing:** Short replies for casual talk, longer ones as the user opens up.
 - **Time Awareness:** Tie responses to time of day or typical life rhythms.
 - **Earned Memory:** Use recalled user details to show care, never to pressure.
 - **Light Meta-Awareness:** Sometimes comment on how the conversation is going.
+- **Language Variety:** Use diverse vocabulary and expressions. Rotate alternatives:
+  - Instead of always "کبھی کبھی" → use "اکثر", "بعض اوقات", "وقتاً فوقتاً", "کئی بار"
+  - Instead of always "شاید" → use "ہو سکتا ہے", "ممکن ہے", "غالباً"
+  - Instead of always "اچھا" → use "زبردست", "شاندار", "بہترین", "لاجواب"
+  - Keep language fresh and avoid phrase repetition across responses
 
 ---
 
@@ -1010,12 +1016,12 @@ For every reply:
             # This indexes complete conversation turns (user + assistant) for better semantic search
             # No need to index user messages separately here
             
-            # Update profile - use async method with explicit user_id
-            # OPTIMIZATION: Only update profile on meaningful messages (>20 chars)
+            # OPTIMIZATION: Fetch profile once for both update and state management
+            existing_profile = await self.profile_service.get_profile_async(user_id)
+            
+            # Update profile only on meaningful messages (>20 chars)
             # and when profile actually changes significantly
             if len(user_text.strip()) > 20:
-                existing_profile = await self.profile_service.get_profile_async(user_id)
-                
                 generated_profile = await asyncio.to_thread(
                     self.profile_service.generate_profile,
                     user_text,
@@ -1028,9 +1034,9 @@ For every reply:
                         await self.profile_service.save_profile_async(generated_profile, user_id)
                         logging.info(f"[PROFILE] ✅ Updated ({len(generated_profile)} chars)")
                     else:
-                        logging.info(f"[PROFILE] Skipped minor update (< 10 char difference)")
+                        logging.info(f"[PROFILE] ⏭️  Skipped minor update (< 10 char difference)")
             else:
-                logging.info(f"[PROFILE] Skipped update (message too short: {len(user_text)} chars)")
+                logging.info(f"[PROFILE] ⏭️  Skipped update (message too short: {len(user_text)} chars)")
             
             # Update conversation state automatically
             try:
