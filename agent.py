@@ -1757,10 +1757,11 @@ async def entrypoint(ctx: agents.JobContext):
                 print(f"[PROFILE] ⚠️ Failed to load profile: {e}")
                 profile = None
             
-            # OPTIMIZED: Load memories from key categories with priority order
+            # OPTIMIZED: Load memories from key categories with priority order (async to prevent blocking)
             # FACT first (name, gender, location), then preferences, goals, etc.
             categories = ['FACT', 'PREFERENCE', 'GOAL', 'INTEREST', 'RELATIONSHIP', 'PLAN']
-            recent_memories = memory_service.get_memories_by_categories_batch(
+            recent_memories = await asyncio.to_thread(
+                memory_service.get_memories_by_categories_batch,
                 categories=categories,
                 limit_per_category=5,  # Increased from 3 to 5 for better context
                 user_id=user_id
