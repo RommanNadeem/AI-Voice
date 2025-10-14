@@ -317,11 +317,6 @@ Use the last conversation **smartly and naturally**—never like a log.
 - **searchMemories(query, limit)**: When topic is mentioned, find related memories
 - **retrieveFromMemory(category, key)**: When you need exact info (name, preference)
 
-**Examples:**
-- User: "مجھے کون سا کھانا پسند ہے؟" → retrieveFromMemory("PREFERENCE", "favorite_food")
-- User mentions کرکٹ → searchMemories("کرکٹ", 3) to find related memories
-- User: "میری بہن کا نام کیا ہے؟" → retrieveFromMemory("RELATIONSHIP", "sister_name")
-
 ---
 
 ### **Categories:**
@@ -1944,11 +1939,50 @@ async def entrypoint(ctx: agents.JobContext):
     # Don't wait too long or participant might disconnect
     await asyncio.sleep(0.3)  # Minimal delay - just enough for session readiness
     
-    # Simple approach: Play greeting with session.say() and ensure listening state after
-    if user_name:
-        greeting_msg = f"السلام علیکم {user_name}! آج کیسے ہیں؟"
-    else:
-        greeting_msg = "السلام علیکم! کیسے ہیں آپ؟"
+    # Load last conversation summary to personalize greeting
+    greeting_msg = None
+    try:
+        last_summary = await summary_service.get_last_summary(user_id)
+        
+        if last_summary and last_summary.get('last_conversation_at'):
+            from datetime import datetime, timezone
+            
+            # Calculate time since last conversation (reuse logic from format_summary_for_context)
+            last_convo = last_summary.get('last_conversation_at')
+            last_time = datetime.fromisoformat(last_convo.replace('Z', '+00:00'))
+            now = datetime.now(timezone.utc)
+            delta = now - last_time
+            
+            days = delta.days
+            hours = delta.seconds // 3600
+            
+            # Generate context-aware greeting based on time
+            if days == 0 and hours < 4:
+                # Very recent (< 4 hours) - acknowledge continuity
+                greeting_msg = f"السلام علیکم {user_name}! واپس آ گئے؟ کیسے ہیں؟" if user_name else "السلام علیکم! واپس آ گئے؟"
+            elif days == 0:
+                # Same day but hours ago - warm acknowledgment
+                greeting_msg = f"السلام علیکم {user_name}! کیسے ہیں؟" if user_name else "السلام علیکم! کیسے ہیں؟"
+            elif days == 1:
+                # Yesterday - acknowledge gap
+                greeting_msg = f"السلام علیکم {user_name}! کل کے بعد کیسے ہیں؟" if user_name else "السلام علیکم! کل کے بعد کیسے ہیں؟"
+            elif days < 7:
+                # Few days - gentle reconnection
+                greeting_msg = f"السلام علیکم {user_name}! کچھ دنوں بعد! کیسے ہیں؟" if user_name else "السلام علیکم! کچھ دنوں بعد! کیسے ہیں؟"
+            else:
+                # Week+ - warm return
+                greeting_msg = f"السلام علیکم {user_name}! بہت دنوں بعد! کیا حال ہے؟" if user_name else "السلام علیکم! بہت دنوں بعد! کیا حال ہے؟"
+            
+            print(f"[GREETING] Using context-aware greeting (last chat: {days}d {hours}h ago)")
+    except Exception as e:
+        print(f"[GREETING] ⚠️ Summary check failed, using default: {e}")
+    
+    # Fallback to default greeting if summary not available or error
+    if not greeting_msg:
+        if user_name:
+            greeting_msg = f"السلام علیکم {user_name}! آج کیسے ہیں؟"
+        else:
+            greeting_msg = "السلام علیکم! کیسے ہیں آپ؟"
     
     print(f"[GREETING] Playing: {greeting_msg}")
     
