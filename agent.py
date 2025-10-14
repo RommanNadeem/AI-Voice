@@ -1012,8 +1012,31 @@ To avoid stiffness, prefer simpler words in everyday chat:
         """
         logging.info(f"[AGENT] Speech committed - transitioning to listening")
         
-        # Add conversation turn to RAG for semantic search (non-blocking)
-        asyncio.create_task(self._add_conversation_turn_to_rag())
+        # Update conversation history for summary generation
+        if self._pending_user_message:
+            assistant_msg = self._last_assistant_response
+            
+            # Fallback: Get from ChatContext if callback didn't capture response
+            if not assistant_msg:
+                turns = self._get_conversation_turns_from_chat_context()
+                if turns:
+                    assistant_msg = turns[-1][1]
+            
+            # Update conversation history if we have both messages
+            if assistant_msg and self._pending_user_message:
+                # Print the complete conversation turn
+                print("\n" + "=" * 80)
+                print("💬 CONVERSATION TURN:")
+                print(f"👤 USER: {self._pending_user_message}")
+                print(f"🤖 ASSISTANT: {assistant_msg}")
+                print("=" * 80 + "\n")
+                
+                self._update_conversation_history(self._pending_user_message, assistant_msg)
+        
+        # Add conversation turn to RAG for semantic search (non-blocking background task)
+        rag_task = asyncio.create_task(self._add_conversation_turn_to_rag())
+        self._background_tasks.add(rag_task)
+        rag_task.add_done_callback(self._background_tasks.discard)
         
         await self.broadcast_state("listening")
     
@@ -1022,6 +1045,7 @@ To avoid stiffness, prefer simpler words in everyday chat:
         PATCH: Capture assistant responses and update conversation history.
         This ensures the model has stable context across turns.
         """
+        
         try:
             # Check if this is an assistant message
             if hasattr(item, 'role') and item.role == 'assistant':
@@ -1038,7 +1062,6 @@ To avoid stiffness, prefer simpler words in everyday chat:
                 if hasattr(item, 'text_content') and item.text_content:
                     self._last_assistant_response = item.text_content
                     logging.info(f"[ASSISTANT] Response captured: {item.text_content[:50]}...")
-                    print(f"[ASSISTANT] Response: {item.text_content[:80]}...")
                     
                     # PATCH: Update conversation history when we have both user and assistant messages
                     if self._pending_user_message:
@@ -1047,13 +1070,14 @@ To avoid stiffness, prefer simpler words in everyday chat:
                             item.text_content
                         )
                         
-                        # Trigger RAG indexing in background
-                        asyncio.create_task(self._add_conversation_turn_to_rag())
+                        # Trigger RAG indexing in background (non-blocking)
+                        rag_task = asyncio.create_task(self._add_conversation_turn_to_rag())
+                        self._background_tasks.add(rag_task)
+                        rag_task.add_done_callback(self._background_tasks.discard)
                         
                 elif hasattr(item, 'content') and item.content:
                     self._last_assistant_response = item.content
                     logging.info(f"[ASSISTANT] Response captured: {item.content[:50]}...")
-                    print(f"[ASSISTANT] Response: {item.content[:80]}...")
                     
                     # PATCH: Update conversation history
                     if self._pending_user_message:
@@ -1062,8 +1086,10 @@ To avoid stiffness, prefer simpler words in everyday chat:
                             item.content
                         )
                         
-                        # Trigger RAG indexing in background
-                        asyncio.create_task(self._add_conversation_turn_to_rag())
+                        # Trigger RAG indexing in background (non-blocking)
+                        rag_task = asyncio.create_task(self._add_conversation_turn_to_rag())
+                        self._background_tasks.add(rag_task)
+                        rag_task.add_done_callback(self._background_tasks.discard)
         except Exception as e:
             logging.error(f"[ASSISTANT] Failed to capture response: {e}")
     
@@ -1108,17 +1134,16 @@ To avoid stiffness, prefer simpler words in everyday chat:
         print("🎤 [USER TURN COMPLETED] User finished speaking")
         print(f"⏰ Time: {time.time():.2f}")
         print(f"📝 Transcript: '{user_text}'")
-        print(f"📊 Message type: {type(new_message).__name__}")
         print(f"📊 Turn counter: {self._turn_counter}")
-        print("🤖 LLM should now process this and generate response...")
-        print("💭 [STATE] Broadcasted 'thinking' state for user feedback")
-        
-        # Check if we should generate incremental summary
-        if self._turn_counter % self.SUMMARY_INTERVAL == 0:
-            print(f"📊 [SUMMARY] Turn {self._turn_counter} - triggering incremental summary")
-            asyncio.create_task(self._generate_incremental_summary())
-        
         print("=" * 80)
+        
+        # Check if we should generate incremental summary (non-blocking background task)
+        if self._turn_counter % self.SUMMARY_INTERVAL == 0:
+            print(f"[SUMMARY] 🔔 Triggering incremental summary (turn {self._turn_counter}) - background")
+            # Create non-blocking background task and track it
+            summary_task = asyncio.create_task(self._generate_incremental_summary())
+            self._background_tasks.add(summary_task)
+            summary_task.add_done_callback(self._background_tasks.discard)
         
         logging.info(f"[USER] {user_text[:80]}")
         print(f"[STATE] 🎤 User finished speaking")
@@ -1140,34 +1165,49 @@ To avoid stiffness, prefer simpler words in everyday chat:
         task.add_done_callback(self._background_tasks.discard)
     
     async def _generate_incremental_summary(self):
-        """Generate incremental summary every N turns"""
+        """Generate incremental summary every N turns (runs in background, non-blocking)"""
         try:
             if not self.summary_service:
                 print("[SUMMARY] ⚠️ Service not initialized")
                 return
             
-            # Get recent conversation turns from RAG service
-            rag_system = self.rag_service.get_rag_system() if self.rag_service else None
-            if not rag_system:
-                print("[SUMMARY] ⚠️ No RAG system available")
-                return
+            # Get conversation turns from multiple sources (fallback chain)
+            conversation_turns = []
             
-            conversation_turns = rag_system.get_conversation_turns()
+            # Try RAG system first
+            if self.rag_service:
+                rag_system = self.rag_service.get_rag_system()
+                if rag_system:
+                    conversation_turns = rag_system.get_conversation_turns()
+            
+            # Fallback to ChatContext
+            if not conversation_turns:
+                conversation_turns = self._get_conversation_turns_from_chat_context()
+            
+            # Fallback to internal conversation history
+            if not conversation_turns and self._conversation_history:
+                conversation_turns = self._conversation_history.copy()
+            
+            # Check if we have any turns
             if not conversation_turns:
                 print("[SUMMARY] ⚠️ No conversation history available")
                 return
             
-            # Convert RAG conversation_turns to summary format
-            all_turns = [(turn['user'], turn['assistant']) for turn in conversation_turns]
+            # Convert to unified format (list of tuples)
+            all_turns = []
+            for turn in conversation_turns:
+                if isinstance(turn, dict):
+                    all_turns.append((turn['user'], turn['assistant']))
+                elif isinstance(turn, tuple) and len(turn) >= 2:
+                    all_turns.append(turn)
+            
             recent_turns = all_turns[-self.SUMMARY_INTERVAL:]
             
             if not recent_turns:
                 print("[SUMMARY] ⚠️ No recent turns to summarize")
                 return
             
-            print(f"[SUMMARY] 🤖 Generating incremental summary...")
-            print(f"[SUMMARY]    Turns: {len(recent_turns)}")
-            print(f"[SUMMARY]    Total conversation turns: {self._turn_counter}")
+            print(f"[SUMMARY] Generating summary for {len(recent_turns)} turns...")
             
             # Generate summary
             summary_data = await self.summary_service.generate_summary(
@@ -1181,8 +1221,10 @@ To avoid stiffness, prefer simpler words in everyday chat:
                 turn_count=self._turn_counter
             )
             
+            print(f"[SUMMARY] ✅ Incremental summary saved (turn {self._turn_counter})")
+            
         except Exception as e:
-            print(f"[SUMMARY] ⚠️ Incremental summary failed: {e}")
+            print(f"[SUMMARY] ❌ Incremental summary failed: {e}")
     
     async def generate_final_summary(self):
         """Generate final comprehensive summary when session ends"""
@@ -1191,27 +1233,42 @@ To avoid stiffness, prefer simpler words in everyday chat:
                 print("[SUMMARY] ⚠️ Service not initialized")
                 return
             
-            print("[SUMMARY] 📋 Generating FINAL session summary...")
+            print("[SUMMARY] Generating final session summary...")
             
-            # Get all conversation turns from RAG service
-            rag_system = self.rag_service.get_rag_system() if self.rag_service else None
-            if not rag_system:
-                print("[SUMMARY] ⚠️ No RAG system available")
-                return
+            # Get conversation turns from multiple sources
+            conversation_turns = []
             
-            conversation_turns = rag_system.get_conversation_turns()
+            # Try RAG system
+            if self.rag_service:
+                rag_system = self.rag_service.get_rag_system()
+                if rag_system:
+                    conversation_turns = rag_system.get_conversation_turns()
+            
+            # Fallback to ChatContext
+            if not conversation_turns:
+                conversation_turns = self._get_conversation_turns_from_chat_context()
+            
+            # Fallback to internal history
+            if not conversation_turns and self._conversation_history:
+                conversation_turns = self._conversation_history.copy()
+            
             if not conversation_turns:
                 print("[SUMMARY] ⚠️ No conversation history available")
                 return
             
-            # Convert RAG conversation_turns to summary format
-            all_turns = [(turn['user'], turn['assistant']) for turn in conversation_turns]
+            # Convert to unified format
+            all_turns = []
+            for turn in conversation_turns:
+                if isinstance(turn, dict):
+                    all_turns.append((turn['user'], turn['assistant']))
+                elif isinstance(turn, tuple) and len(turn) >= 2:
+                    all_turns.append(turn)
             
             if not all_turns:
                 print("[SUMMARY] ℹ️ No conversation to summarize")
                 return
             
-            print(f"[SUMMARY]    Total turns: {len(all_turns)}")
+            print(f"[SUMMARY] Generating final summary for {len(all_turns)} turns...")
             
             # Generate comprehensive summary
             summary_data = await self.summary_service.generate_summary(
@@ -1234,17 +1291,92 @@ To avoid stiffness, prefer simpler words in everyday chat:
         except Exception as e:
             print(f"[SUMMARY] ❌ Final summary failed: {e}")
     
+    def _get_conversation_turns_from_chat_context(self) -> list:
+        """
+        Extract conversation turns from LiveKit's ChatContext.
+        Returns list of (user_message, assistant_message) tuples.
+        """
+        turns = []
+        try:
+            # Access the parent Agent's ChatContext (managed by LiveKit)
+            chat_ctx = None
+            
+            if hasattr(self, 'chat_ctx'):
+                chat_ctx = self.chat_ctx
+            elif hasattr(self, '_llm') and hasattr(self._llm, 'chat_ctx'):
+                chat_ctx = self._llm.chat_ctx
+            elif self._chat_ctx:
+                chat_ctx = self._chat_ctx
+            else:
+                return turns
+            
+            # Access items (property or method)
+            messages = None
+            if hasattr(chat_ctx, 'items'):
+                try:
+                    items_prop = chat_ctx.items
+                    messages = items_prop() if callable(items_prop) else items_prop
+                except Exception:
+                    pass
+            
+            if not messages and hasattr(chat_ctx, '_items'):
+                messages = chat_ctx._items
+            
+            if not messages:
+                return turns
+            
+            # Group messages into turns (user + assistant pairs)
+            i = 0
+            while i < len(messages) - 1:
+                msg = messages[i]
+                next_msg = messages[i + 1]
+                
+                # Look for user -> assistant pairs
+                if hasattr(msg, 'role') and hasattr(next_msg, 'role'):
+                    if msg.role == 'user' and next_msg.role == 'assistant':
+                        user_text = msg.content if hasattr(msg, 'content') else ""
+                        asst_text = next_msg.content if hasattr(next_msg, 'content') else ""
+                        
+                        if user_text and asst_text:
+                            turns.append((user_text, asst_text))
+                        i += 2
+                        continue
+                
+                i += 1
+            
+            return turns
+            
+        except Exception as e:
+            print(f"[CHAT_CTX] ⚠️ Error extracting turns: {e}")
+            return turns
+    
     async def _add_conversation_turn_to_rag(self):
         """
-        Add conversation turn to RAG for semantic search.
-        Uses the assistant response from on_conversation_item_added callback.
+        Add conversation turn to RAG for semantic search (runs in background, non-blocking).
+        Uses multiple fallback sources: callback → conversation_history → ChatContext.
         """
         try:
             if not self.rag_service or not self._pending_user_message:
                 return
             
-            # Use captured assistant response or placeholder
-            assistant_message = self._last_assistant_response or "Assistant provided a response to the user"
+            # Get assistant message from multiple sources
+            assistant_message = self._last_assistant_response
+            
+            if not assistant_message and self._conversation_history:
+                try:
+                    last_turn = self._conversation_history[-1]
+                    if isinstance(last_turn, tuple) and len(last_turn) >= 2:
+                        assistant_message = last_turn[1]
+                except (IndexError, TypeError):
+                    pass
+            
+            if not assistant_message:
+                turns_from_ctx = self._get_conversation_turns_from_chat_context()
+                if turns_from_ctx:
+                    assistant_message = turns_from_ctx[-1][1]
+            
+            if not assistant_message:
+                assistant_message = "Assistant provided a response to the user"
             
             # Add the conversation turn to RAG
             self.rag_service.add_conversation_turn(
@@ -1258,7 +1390,6 @@ To avoid stiffness, prefer simpler words in everyday chat:
                 
         except Exception as e:
             logging.error(f"[RAG] Failed to add conversation turn: {e}")
-            print(f"[RAG] ❌ Error: {e}")
     
     async def cleanup(self):
         """Cleanup background tasks on shutdown"""

@@ -112,6 +112,7 @@ class ConversationSummaryService:
             lines.append(f"U: {user_msg}")
             lines.append(f"A: {asst_msg}")
             lines.append("")
+        
         return "\n".join(lines)
     
     def _build_prompt(self, previous_summary: Optional[str]) -> str:
@@ -215,61 +216,26 @@ Be specific and concise."""
         Returns:
             True if successful, False otherwise
         """
-        print("=" * 80)
-        print("🔥 [SUMMARY SAVE] Starting save_summary process")
-        print("=" * 80)
-        
         # Check write permissions
         if not can_write_for_current_user():
-            print("[SUMMARY SAVE] ❌ Write permission denied - can_write_for_current_user() returned False")
+            print("[SUMMARY] ❌ Write permission denied")
             return False
         
         uid = user_id or get_current_user_id()
-        print(f"[SUMMARY SAVE] 🔍 User ID resolved: {UserId.format_for_display(uid) if uid else 'None'}")
         
         if not uid:
-            print("[SUMMARY SAVE] ❌ Missing user_id - cannot proceed")
+            print("[SUMMARY] ❌ Missing user_id")
             return False
-        
-        # Log summary data
-        print(f"[SUMMARY SAVE] 📊 Summary data:")
-        print(f"   Summary text length: {len(summary_data.get('summary_text', ''))} chars")
-        print(f"   Summary preview: {summary_data.get('summary_text', '')[:100]}...")
-        print(f"   Key topics: {summary_data.get('key_topics', [])}")
-        print(f"   Turn count: {turn_count}")
         
         try:
             # Update conversation_state with summary
             update_data = {
                 "last_summary": summary_data["summary_text"],
-                "last_topics": summary_data.get("key_topics", []),  # Direct array, not JSON string
+                "last_topics": summary_data.get("key_topics", []),
                 "last_conversation_at": datetime.utcnow().isoformat()
             }
             
-            print(f"[SUMMARY SAVE] 📝 Update data prepared:")
-            print(f"   last_summary: {len(update_data['last_summary'])} chars")
-            print(f"   last_topics: {update_data['last_topics']}")
-            print(f"   last_conversation_at: {update_data['last_conversation_at']}")
-            
-            # Check if conversation_state exists first
-            print(f"[SUMMARY SAVE] 🔍 Checking if conversation_state exists for user...")
-            check_resp = await asyncio.to_thread(
-                lambda: self.supabase.table("conversation_state")
-                    .select("id, user_id, stage, trust_score")
-                    .eq("user_id", uid)
-                    .execute()
-            )
-            
-            if check_resp.data:
-                print(f"[SUMMARY SAVE] ✅ Found existing conversation_state:")
-                print(f"   ID: {check_resp.data[0].get('id')}")
-                print(f"   Stage: {check_resp.data[0].get('stage')}")
-                print(f"   Trust Score: {check_resp.data[0].get('trust_score')}")
-            else:
-                print(f"[SUMMARY SAVE] ⚠️ No existing conversation_state found - will need to create one")
-            
             # Perform update
-            print(f"[SUMMARY SAVE] 🔄 Executing update query...")
             resp = await asyncio.to_thread(
                 lambda: self.supabase.table("conversation_state")
                     .update(update_data)
@@ -277,47 +243,15 @@ Be specific and concise."""
                     .execute()
             )
             
-            print(f"[SUMMARY SAVE] 📋 Update response:")
-            print(f"   Status code: {getattr(resp, 'status_code', 'Unknown')}")
-            print(f"   Has data: {bool(resp.data)}")
-            print(f"   Data length: {len(resp.data) if resp.data else 0}")
-            print(f"   Error: {getattr(resp, 'error', None)}")
-            
             if resp.data:
-                print(f"[SUMMARY SAVE] ✅ Summary saved successfully!")
-                print(f"   User: {UserId.format_for_display(uid)}")
-                print(f"   Turns: {turn_count}")
-                print(f"   Topics: {', '.join(summary_data.get('key_topics', [])[:3])}")
-                
-                # Verify the save
-                print(f"[SUMMARY SAVE] 🔍 Verifying save...")
-                verify_resp = await asyncio.to_thread(
-                    lambda: self.supabase.table("conversation_state")
-                        .select("last_summary, last_topics, last_conversation_at")
-                        .eq("user_id", uid)
-                        .single()
-                        .execute()
-                )
-                
-                if verify_resp.data:
-                    saved_summary = verify_resp.data.get('last_summary', '')
-                    print(f"[SUMMARY SAVE] ✅ Verification successful:")
-                    print(f"   Saved summary length: {len(saved_summary)} chars")
-                    print(f"   Saved summary preview: {saved_summary[:100]}...")
-                    print(f"   Saved topics: {verify_resp.data.get('last_topics', [])}")
-                else:
-                    print(f"[SUMMARY SAVE] ❌ Verification failed - could not retrieve saved data")
-                
+                print(f"[SUMMARY] ✅ Saved ({len(summary_data['summary_text'])} chars, {turn_count} turns)")
                 return True
             else:
-                print("[SUMMARY SAVE] ❌ No rows updated - check error details above")
+                print("[SUMMARY] ❌ Save failed - no rows updated")
                 return False
             
         except Exception as e:
-            print(f"[SUMMARY SAVE] ❌ Exception during save: {e}")
-            print(f"[SUMMARY SAVE] ❌ Exception type: {type(e).__name__}")
-            import traceback
-            print(f"[SUMMARY SAVE] ❌ Traceback: {traceback.format_exc()}")
+            print(f"[SUMMARY] ❌ Exception during save: {e}")
             return False
     
     async def get_last_summary(self, user_id: str) -> Optional[Dict]:
@@ -330,11 +264,6 @@ Be specific and concise."""
         Returns:
             Dict with last_summary, last_topics, last_conversation_at or None
         """
-        print("=" * 80)
-        print("🔥 [SUMMARY LOAD] Starting get_last_summary process")
-        print("=" * 80)
-        print(f"[SUMMARY LOAD] 🔍 Looking for user: {UserId.format_for_display(user_id)}")
-        
         try:
             resp = await asyncio.to_thread(
                 lambda: self.supabase
@@ -345,34 +274,14 @@ Be specific and concise."""
                     .execute()
             )
             
-            print(f"[SUMMARY LOAD] 📋 Query response:")
-            print(f"   Status code: {getattr(resp, 'status_code', 'Unknown')}")
-            print(f"   Has data: {bool(resp.data)}")
-            print(f"   Error: {getattr(resp, 'error', None)}")
-            
-            if resp.data:
-                print(f"[SUMMARY LOAD] 📊 Retrieved data:")
-                print(f"   Has last_summary: {bool(resp.data.get('last_summary'))}")
-                print(f"   Summary length: {len(resp.data.get('last_summary', ''))} chars")
-                print(f"   Summary preview: {resp.data.get('last_summary', '')[:100]}...")
-                print(f"   Topics: {resp.data.get('last_topics', [])}")
-                print(f"   Last conversation: {resp.data.get('last_conversation_at', 'N/A')}")
-                
-                if resp.data.get("last_summary"):
-                    print(f"[SUMMARY LOAD] ✅ Found valid summary for {UserId.format_for_display(user_id)}")
-                    return resp.data
-                else:
-                    print(f"[SUMMARY LOAD] ⚠️ Found record but no summary text")
-                    return None
+            if resp.data and resp.data.get("last_summary"):
+                print(f"[SUMMARY] ✅ Loaded summary ({len(resp.data.get('last_summary', ''))} chars)")
+                return resp.data
             else:
-                print(f"[SUMMARY LOAD] ⚠️ No data returned from query")
                 return None
             
         except Exception as e:
-            print(f"[SUMMARY LOAD] ❌ Exception during load: {e}")
-            print(f"[SUMMARY LOAD] ❌ Exception type: {type(e).__name__}")
-            import traceback
-            print(f"[SUMMARY LOAD] ❌ Traceback: {traceback.format_exc()}")
+            print(f"[SUMMARY] ❌ Load failed: {e}")
             return None
     
     def format_summary_for_context(self, summary_data: Dict) -> str:
