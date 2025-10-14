@@ -124,16 +124,17 @@ class ConversationSummaryService:
 Previous Summary:
 {previous_summary}
 
-Task: Summarize the NEW conversation segment and MERGE it with the previous summary.
+Task: Summarize the NEW conversation segment in and MERGE it with the previous summary.
 
 Focus on:
 1. Key topics discussed (list 2-4 main themes)
 2. Important facts the user shared
 3. Overall emotional tone
 4. Any changes or progression from previous summary
+5. Conversation hook for next session
 
 Output Format:
-Summary: [Concise 100-150 word overview in Urdu where natural]
+Summary: [Concise 100-150 word overview in English where natural]
 Topics: [topic1, topic2, topic3]
 Tone: [emotional_tone]
 Facts: [fact1, fact2, fact3]
@@ -148,9 +149,10 @@ Focus on:
 2. Important personal facts the user shared
 3. Overall emotional tone (happy, stressed, reflective, excited, etc.)
 4. User's goals or plans mentioned
+5. Conversation hook for next session
 
 Output Format:
-Summary: [Concise 100-150 word overview, use Urdu where natural]
+Summary: [Concise 100-150 word overview, use English where natural]
 Topics: [topic1, topic2, topic3]  
 Tone: [emotional_tone]
 Facts: [important_fact1, important_fact2]
