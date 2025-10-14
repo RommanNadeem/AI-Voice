@@ -2005,9 +2005,8 @@ async def entrypoint(ctx: agents.JobContext):
             # Load user gender from onboarding
             user_gender_value = 'unknown'
             try:
-                from services.onboarding_service import OnboardingService
-                onboarding_service = OnboardingService(supabase)
-                onboarding_result = await onboarding_service.get_onboarding_async(user_id)
+                onboarding_svc = OnboardingService(supabase)
+                onboarding_result = await onboarding_svc.get_onboarding_async(user_id)
                 if onboarding_result and onboarding_result.data:
                     user_gender_value = onboarding_result.data[0].get("gender", "unknown")
             except Exception as e:
