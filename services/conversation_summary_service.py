@@ -131,7 +131,6 @@ Focus on:
 2. Important facts the user shared
 3. Overall emotional tone
 4. Any changes or progression from previous summary
-5. Conversation hook for next session
 
 Output Format:
 Summary: [Concise 100-150 word overview in English where natural]
