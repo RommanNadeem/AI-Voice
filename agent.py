@@ -1979,24 +1979,45 @@ async def entrypoint(ctx: agents.JobContext):
             
             openai_client = OpenAI(api_key=Config.OPENAI_API_KEY)
             
-            prompt = f"""Generate a warm, natural Urdu greeting for a returning user.
+            prompt = f"""You are generating the FIRST greeting for a returning user as their close friend. Use your judgment to create the most natural opening.
 
-Context:
+**Context:**
 - User's name: {user_name or 'User'}
-- Last conversation: {time_context}
-- Recency level: {recency}
-- What was discussed: {last_summary.get('last_summary', '')[:150]}
-- Key topics: {', '.join(last_summary.get('last_topics', [])[:3])}
+- Time since last chat: {time_context} ({days} days, {hours} hours ago)
+- Date of last chat: {last_convo[:10] if isinstance(last_convo, str) else 'Unknown'}
 
-Instructions:
-- Start with السلام علیکم{' ' + user_name if user_name else ''}!
-- Acknowledge the time gap naturally (e.g., واپس آ گئے for recent, بہت دنوں بعد for long gap)
-- Keep it brief (1-2 sentences max)
-- Warm and friendly tone
-- DON'T mention specific topics unless very recent (< 1 day)
-- End with a general check-in like کیسے ہیں or کیا حال ہے
+**What they discussed last time:**
+{last_summary.get('last_summary', 'No previous conversation')}
 
-Output ONLY the Urdu greeting, nothing else."""
+**Topics:** {', '.join(last_summary.get('last_topics', [])[:5]) if last_summary.get('last_topics') else 'None'}
+
+**Your Task:**
+Generate a natural, warm Urdu greeting. YOU DECIDE:
+- How to start (السلام علیکم, or casual like آئیں، ہیلو، or کیسے ہیں straight)
+- Whether to use their name or not
+- Whether to reference past conversation
+- Tone based on time gap and content
+
+**Smart Decision Making:**
+- Very recent (< 4h): Can be casual, maybe reference ongoing topic
+- Yesterday: Standard warm greeting, optional subtle reference
+- Few days: Usually just reconnect warmly
+- Week+: Acknowledge gap, don't force old topics
+
+**Guidelines:**
+- Natural and varied (not always السلام علیکم!)
+- Brief: 1-2 sentences max
+- Warm, like a close friend
+- Simple Urdu, no complex words
+- If referencing past: be subtle and natural
+
+**Examples of good greetings:**
+- "ہیلو! کیسے ہیں؟" (casual, simple)
+- "آئیں {user_name}! کیا حال ہے؟" (warm, uses name)
+- "واپس آ گئے؟ سب ٹھیک؟" (very recent return)
+- "بہت دنوں بعد! کیسے گزر رہے ہیں؟" (after long gap)
+
+Output ONLY the Urdu greeting text, nothing else."""
 
             response = await asyncio.to_thread(
                 openai_client.chat.completions.create,
