@@ -27,6 +27,13 @@ ENV/
 # ---- Logs ----
 *.log
 
+# ---- Temporary Test Files ----
+test_*.py
+check_*.py
+qa_*.py
+*_analysis.txt
+*_test_results.json
+
 # ---- Supabase (local dev) ----
 supabase/.temp/
 supabase/.branches/
