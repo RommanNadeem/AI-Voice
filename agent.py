@@ -205,15 +205,19 @@ async def generate_context_aware_greeting(summary_service, user_id: str, user_na
         user_name: User's name (optional)
     
     Returns:
-        Personalized Urdu greeting or default if summary unavailable
+        Personalized Urdu greeting (always returns a valid string, never None)
     """
+    # Default fallback greeting
+    default_greeting = f"السلام علیکم {user_name}! آج کیسے ہیں؟" if user_name else "السلام علیکم! کیسے ہیں آپ؟"
+    
     try:
         # Load last conversation summary
         last_summary = await summary_service.get_last_summary(user_id)
         
         if not last_summary or not last_summary.get('last_conversation_at'):
             # No previous conversation, return default
-            return f"السلام علیکم {user_name}! آج کیسے ہیں؟" if user_name else "السلام علیکم! کیسے ہیں آپ؟"
+            print("[GREETING] No summary available, using default greeting")
+            return default_greeting
         
         from datetime import datetime, timezone
         from openai import OpenAI
@@ -288,13 +292,19 @@ Output ONLY the Urdu greeting."""
         )
         
         greeting_msg = response.choices[0].message.content.strip()
+        
+        # Validate the greeting is not empty
+        if not greeting_msg:
+            print(f"[GREETING] ⚠️ AI returned empty greeting, using default")
+            return default_greeting
+        
         print(f"[GREETING] AI-generated: {greeting_msg}")
         return greeting_msg
         
     except Exception as e:
         print(f"[GREETING] ⚠️ AI greeting generation failed: {e}")
-        # Fallback to default
-        return f"السلام علیکم {user_name}! آج کیسے ہیں؟" if user_name else "السلام علیکم! کیسے ہیں آپ؟"
+        # Fallback to default (guaranteed non-None)
+        return default_greeting
 
 # ---------------------------
 # Assistant Agent - Simplified Pattern
@@ -2139,6 +2149,12 @@ async def entrypoint(ctx: agents.JobContext):
     
     # Get greeting from user_context (already prepared) or generate default
     greeting_msg = user_context.get("greeting") if user_context else "السلام علیکم! کیسے ہیں آپ؟"
+    
+    # Safety check: Ensure greeting is never None or empty
+    if not greeting_msg:
+        greeting_msg = "السلام علیکم! کیسے ہیں آپ؟"
+        print(f"[GREETING] ⚠️ Empty greeting detected, using fallback")
+    
     print(f"[GREETING] Playing: {greeting_msg}")
     
     try:
