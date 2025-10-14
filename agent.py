@@ -117,16 +117,205 @@ async def wait_for_participant(room, *, target_identity: Optional[str] = None, t
         await asyncio.sleep(0.5)
     return None
 
+async def prepare_user_context(supabase, user_id: str, summary_service = None) -> dict:
+    """
+    Prepare all user context data (gender, time, name, greeting) as a single JSON object.
+    All calculations done here for clean separation from entrypoint.
+    
+    Args:
+        supabase: Supabase client
+        user_id: User ID
+        summary_service: ConversationSummaryService instance (optional)
+    
+    Returns:
+        Dict with user_context: {gender, time_of_day, full_name, greeting}
+    """
+    context = {
+        "gender": None,
+        "time_of_day": None,
+        "current_hour": None,
+        "timezone": "Asia/Karachi",
+        "full_name": None,
+        "greeting": None
+    }
+    
+    try:
+        # Load gender and name from onboarding
+        from services.onboarding_service import OnboardingService
+        onboarding_service = OnboardingService(supabase)
+        onboarding_result = await onboarding_service.get_onboarding_async(user_id)
+        
+        if onboarding_result and onboarding_result.data:
+            context["gender"] = onboarding_result.data[0].get("gender")
+            context["full_name"] = onboarding_result.data[0].get("full_name")
+            print(f"[USER_CONTEXT] Gender: {context['gender']}, Name: {context['full_name']}")
+        
+        # Calculate time of day
+        try:
+            import pytz
+            from datetime import datetime
+            
+            user_timezone = pytz.timezone(context["timezone"])
+            user_local_time = datetime.now(user_timezone)
+            current_hour = user_local_time.hour
+            context["current_hour"] = current_hour
+            
+            # Determine time of day
+            if 5 <= current_hour < 12:
+                time_of_day = "morning"
+            elif 12 <= current_hour < 17:
+                time_of_day = "afternoon"
+            elif 17 <= current_hour < 21:
+                time_of_day = "evening"
+            else:
+                time_of_day = "night"
+            
+            context["time_of_day"] = time_of_day
+            print(f"[USER_CONTEXT] Time: {time_of_day}, Hour: {current_hour}:00 ({context['timezone']})")
+            
+        except Exception as e:
+            print(f"[USER_CONTEXT] ⚠️ Time calculation failed: {e}")
+        
+        # Generate personalized greeting if summary service available
+        if summary_service and context["full_name"]:
+            context["greeting"] = await generate_context_aware_greeting(
+                summary_service, user_id, context["full_name"]
+            )
+        elif context["full_name"]:
+            # Default greeting with name
+            context["greeting"] = f"السلام علیکم {context['full_name']}! آج کیسے ہیں؟"
+        else:
+            # Default greeting without name
+            context["greeting"] = "السلام علیکم! کیسے ہیں آپ؟"
+        
+        print(f"[USER_CONTEXT] ✅ Context prepared: {context}")
+        
+    except Exception as e:
+        print(f"[USER_CONTEXT] ⚠️ Context preparation failed: {e}")
+    
+    return context
+
+async def generate_context_aware_greeting(summary_service, user_id: str, user_name: str = None) -> str:
+    """
+    Generate AI-powered greeting based on last conversation summary.
+    
+    Args:
+        summary_service: ConversationSummaryService instance
+        user_id: User ID to load summary for
+        user_name: User's name (optional)
+    
+    Returns:
+        Personalized Urdu greeting or default if summary unavailable
+    """
+    try:
+        # Load last conversation summary
+        last_summary = await summary_service.get_last_summary(user_id)
+        
+        if not last_summary or not last_summary.get('last_conversation_at'):
+            # No previous conversation, return default
+            return f"السلام علیکم {user_name}! آج کیسے ہیں؟" if user_name else "السلام علیکم! کیسے ہیں آپ؟"
+        
+        from datetime import datetime, timezone
+        from openai import OpenAI
+        
+        # Calculate time since last conversation
+        last_convo = last_summary.get('last_conversation_at')
+        last_time = datetime.fromisoformat(last_convo.replace('Z', '+00:00'))
+        now = datetime.now(timezone.utc)
+        delta = now - last_time
+        
+        days = delta.days
+        hours = delta.seconds // 3600
+        
+        # Determine time context
+        if days == 0 and hours < 4:
+            time_context = "a few hours ago"
+        elif days == 0:
+            time_context = "earlier today"
+        elif days == 1:
+            time_context = "yesterday"
+        elif days < 7:
+            time_context = f"{days} days ago"
+        else:
+            time_context = f"over a week ago"
+        
+        # Generate AI greeting
+        print(f"[GREETING] Generating AI greeting (last chat: {time_context})")
+        
+        openai_client = OpenAI(api_key=Config.OPENAI_API_KEY)
+        
+        prompt = f"""You are greeting a returning user as their close friend. Based on context, DECIDE: follow up on last conversation OR ask open-ended question.
+
+**Context:**
+- User: {user_name or 'User'}
+- Last chat: {time_context} ({days} days, {hours} hours ago)
+- Date: {last_convo[:10] if isinstance(last_convo, str) else 'Unknown'}
+
+**Summary of last conversation:**
+{last_summary.get('last_summary', 'No previous conversation')}
+
+**Topics:** {', '.join(last_summary.get('last_topics', [])[:5]) if last_summary.get('last_topics') else 'None'}
+
+**YOUR DECISION: Follow-up OR Open-ended?**
+
+**FOLLOW-UP greeting** (when to use):
+✅ Very recent (< 6 hours) → Check on ongoing situation
+✅ They shared a concern/goal → Natural to ask about progress
+✅ Specific event was discussed → Appropriate to reference
+Example: "واپس آ گئے؟ وہ پروجیکٹ کیسا چل رہا ہے؟"
+
+**OPEN-ENDED greeting** (when to use):
+✅ Been a while (days/weeks) → Fresh start feels better
+✅ Casual topics (not urgent concerns) → No need to follow up
+✅ Want to see where they are now → Let them lead.
+
+**Guidelines:**
+- Greeting style: Vary naturally (السلام علیکم, ہیلو, آئیں, or direct)
+- Length: 1-2 sentences maximum
+- Tone: Warm, casual, like close friend
+- Simple Urdu only
+- If follow-up: Be specific but brief
+- If open-ended: Keep it fresh and inviting
+
+Output ONLY the Urdu greeting."""
+
+        response = await asyncio.to_thread(
+            openai_client.chat.completions.create,
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.7,
+            max_tokens=100
+        )
+        
+        greeting_msg = response.choices[0].message.content.strip()
+        print(f"[GREETING] AI-generated: {greeting_msg}")
+        return greeting_msg
+        
+    except Exception as e:
+        print(f"[GREETING] ⚠️ AI greeting generation failed: {e}")
+        # Fallback to default
+        return f"السلام علیکم {user_name}! آج کیسے ہیں؟" if user_name else "السلام علیکم! کیسے ہیں آپ؟"
+
 # ---------------------------
 # Assistant Agent - Simplified Pattern
 # ---------------------------
 class Assistant(Agent):
-    def __init__(self, chat_ctx: Optional[ChatContext] = None, user_gender: str = None, user_time: str = None):
+    def __init__(self, chat_ctx: Optional[ChatContext] = None, user_context: dict = None):
+        """
+        Initialize Assistant with ChatContext and user context.
+        
+        Args:
+            chat_ctx: Optional ChatContext with initial conversation state
+            user_context: Dict with user context {gender, time_of_day, current_hour, full_name}
+        """
         # Track background tasks to prevent memory leaks
         self._background_tasks = set()
         
         # Store room reference for state broadcasting
         self._room = None
+        
+        # Store user context for reference
+        self._user_context = user_context or {}
         self._current_state = "idle"
         
         # Track last processed conversation context for database updates
@@ -390,22 +579,27 @@ Assistant is **female** in first person (میں گئی/میں خوش ہوں/می
 
 """
         
-        # Add gender context if available
-        if user_gender:
-            gender_context = f"\n\n---\n\n## User Gender Context\n\n**User's Gender**: {user_gender}\n"
-            if user_gender.lower() == "male":
-                gender_context += "- Use masculine pronouns when addressing the user in Urdu\n"
-            elif user_gender.lower() == "female":
-                gender_context += "- Use feminine pronouns when addressing the user in Urdu\n"
+        # Add user context (gender, time) if available
+        if user_context:
+            context_additions = "\n\n---\n\n## User Context\n\n"
             
-            self._base_instructions += gender_context
-            print(f"[AGENT INIT] ✅ Gender context added to instructions: {user_gender}")
-        
-        # Add time context if available
-        if user_time:
-            time_context = f"\n\n---\n\n## Current Time\n\n{user_time}\n"
-            self._base_instructions += time_context
-            print(f"[AGENT INIT] ✅ Time context added: {user_time}")
+            # Gender context
+            if user_context.get("gender"):
+                gender = user_context["gender"]
+                context_additions += f"**User's Gender**: {gender}\n"
+                if gender.lower() == "male":
+                    context_additions += "- Use masculine pronouns when addressing the user in Urdu\n"
+                elif gender.lower() == "female":
+                    context_additions += "- Use feminine pronouns when addressing the user in Urdu\n"
+                print(f"[AGENT INIT] ✅ Gender context added: {gender}")
+            
+            # Time context
+            if user_context.get("time_of_day"):
+                time_info = f"{user_context['time_of_day']}, {user_context.get('current_hour', '?')}:00"
+                context_additions += f"**Current Time**: {time_info} ({user_context.get('timezone', 'PKT')})\n"
+                print(f"[AGENT INIT] ✅ Time context added: {time_info}")
+            
+            self._base_instructions += context_additions
         
         # CRITICAL: Pass chat_ctx to parent Agent class for initial context
         print(f"[AGENT INIT] 📝 Instructions length: {len(self._base_instructions)} chars")
@@ -1638,10 +1832,8 @@ async def entrypoint(ctx: agents.JobContext):
     # STEP 1: Create initial ChatContext
     initial_ctx = ChatContext()
     
-    # STEP 2: Load user context BEFORE creating assistant (if we have valid user_id)
-    user_gender = None  # Initialize gender
-    user_time_context = None  # Initialize time context
-    user_name = None  # Initialize name for greeting
+    # STEP 2: Prepare user context (gender, time, name, greeting) as single JSON object
+    user_context = {}  # Initialize empty context
     
     if user_id:
         set_current_user_id(user_id)
@@ -1802,12 +1994,11 @@ async def entrypoint(ctx: agents.JobContext):
     
     print(f"[TIMER] ⏱️  Context loaded: {time.time() - start_time:.2f}s")
     
-    # STEP 3: Create assistant WITH context, gender, and time
+    # STEP 3: Create assistant WITH context and user_context JSON
     print(f"[AGENT CREATE] Creating Assistant with:")
     print(f"[AGENT CREATE]   - ChatContext: {'Provided' if initial_ctx else 'Empty'}")
-    print(f"[AGENT CREATE]   - Gender: {user_gender or 'Not set'}")
-    print(f"[AGENT CREATE]   - Time: {user_time_context or 'Not set'}")
-    assistant = Assistant(chat_ctx=initial_ctx, user_gender=user_gender, user_time=user_time_context)
+    print(f"[AGENT CREATE]   - User Context: {user_context}")
+    assistant = Assistant(chat_ctx=initial_ctx, user_context=user_context)
     print(f"[AGENT CREATE] ✅ Assistant created successfully")
     print(f"[TIMER] ⏱️  Agent created: {time.time() - start_time:.2f}s")
     
@@ -1894,6 +2085,13 @@ async def entrypoint(ctx: agents.JobContext):
     assistant.summary_service = summary_service
     print(f"[SUMMARY] ✅ Summary service initialized for session: {ctx.room.name[:20]}...")
     
+    # Prepare full user context (gender, time, name, greeting) if not already prepared
+    if user_id and not user_context:
+        print(f"[USER_CONTEXT] Preparing user context...")
+        user_context = await prepare_user_context(supabase, user_id, summary_service)
+        # Update assistant with context
+        assistant._user_context = user_context
+    
     # Load RAG and prefetch data in parallel background tasks
     # This allows the first greeting to happen immediately
     async def load_rag_background():
@@ -1939,110 +2137,8 @@ async def entrypoint(ctx: agents.JobContext):
     # Don't wait too long or participant might disconnect
     await asyncio.sleep(0.3)  # Minimal delay - just enough for session readiness
     
-    # Generate personalized greeting using OpenAI based on last conversation
-    greeting_msg = None
-    try:
-        last_summary = await summary_service.get_last_summary(user_id)
-        
-        if last_summary and last_summary.get('last_conversation_at'):
-            from datetime import datetime, timezone
-            from openai import OpenAI
-            
-            # Calculate time since last conversation
-            last_convo = last_summary.get('last_conversation_at')
-            last_time = datetime.fromisoformat(last_convo.replace('Z', '+00:00'))
-            now = datetime.now(timezone.utc)
-            delta = now - last_time
-            
-            days = delta.days
-            hours = delta.seconds // 3600
-            
-            # Determine time context
-            if days == 0 and hours < 4:
-                time_context = "a few hours ago"
-                recency = "very recent"
-            elif days == 0:
-                time_context = "earlier today"
-                recency = "recent"
-            elif days == 1:
-                time_context = "yesterday"
-                recency = "recent"
-            elif days < 7:
-                time_context = f"{days} days ago"
-                recency = "few days"
-            else:
-                time_context = f"over a week ago"
-                recency = "long time"
-            
-            # Generate personalized greeting using OpenAI
-            print(f"[GREETING] Generating AI greeting (last chat: {time_context})")
-            
-            openai_client = OpenAI(api_key=Config.OPENAI_API_KEY)
-            
-            prompt = f"""You are greeting a returning user as their close friend. Based on context, DECIDE: follow up on last conversation OR ask open-ended question.
-
-**Context:**
-- User: {user_name or 'User'}
-- Last chat: {time_context} ({days} days, {hours} hours ago)
-- Date: {last_convo[:10] if isinstance(last_convo, str) else 'Unknown'}
-
-**Summary of last conversation:**
-{last_summary.get('last_summary', 'No previous conversation')}
-
-**Topics:** {', '.join(last_summary.get('last_topics', [])[:5]) if last_summary.get('last_topics') else 'None'}
-
-**YOUR DECISION: Follow-up OR Open-ended?**
-
-**FOLLOW-UP greeting** (when to use):
-✅ Very recent (< 6 hours) → Check on ongoing situation
-✅ They shared a concern/goal → Natural to ask about progress
-✅ Specific event was discussed → Appropriate to reference
-Example: "واپس آ گئے؟ وہ پروجیکٹ کیسا چل رہا ہے؟"
-
-**OPEN-ENDED greeting** (when to use):
-✅ Been a while (days/weeks) → Fresh start feels better
-✅ Casual topics (not urgent concerns) → No need to follow up
-✅ Want to see where they are now → Let them lead
-Example: "ہیلو Romman! آج کیا چل رہا ہے؟" or "کیسے ہیں؟ سب ٹھیک؟"
-
-**Guidelines:**
-- Greeting style: Vary naturally (السلام علیکم, ہیلو, آئیں, or direct)
-- Length: 1-2 sentences maximum
-- Tone: Warm, casual, like close friend
-- Simple Urdu only
-- If follow-up: Be specific but brief
-- If open-ended: Keep it fresh and inviting
-
-**Decision Examples:**
-2h ago, work deadline → FOLLOW-UP: "واپس آ گئے؟ وہ کام ہو گیا؟"
-Yesterday, casual chat → OPEN: "ہیلو! آج کیسے ہیں؟"  
-3 days ago, discussed cricket → OPEN: "کیا حال ہے؟ سب ٹھیک؟"
-1 week ago → OPEN: "بہت دنوں بعد! کیسے گزر رہے ہیں؟"
-
-Output ONLY the Urdu greeting."""
-
-            response = await asyncio.to_thread(
-                openai_client.chat.completions.create,
-                model="gpt-4o-mini",
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.7,
-                max_tokens=100
-            )
-            
-            greeting_msg = response.choices[0].message.content.strip()
-            print(f"[GREETING] AI-generated: {greeting_msg}")
-            
-    except Exception as e:
-        print(f"[GREETING] ⚠️ AI greeting failed, using default: {e}")
-    
-    # Fallback to default greeting if AI generation fails or no summary
-    if not greeting_msg:
-        if user_name:
-            greeting_msg = f"السلام علیکم {user_name}! آج کیسے ہیں؟"
-        else:
-            greeting_msg = "السلام علیکم! کیسے ہیں آپ؟"
-        print(f"[GREETING] Using default greeting")
-    
+    # Get greeting from user_context (already prepared) or generate default
+    greeting_msg = user_context.get("greeting") if user_context else "السلام علیکم! کیسے ہیں آپ؟"
     print(f"[GREETING] Playing: {greeting_msg}")
     
     try:
