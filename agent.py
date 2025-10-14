@@ -1979,45 +1979,47 @@ async def entrypoint(ctx: agents.JobContext):
             
             openai_client = OpenAI(api_key=Config.OPENAI_API_KEY)
             
-            prompt = f"""You are generating the FIRST greeting for a returning user as their close friend. Use your judgment to create the most natural opening.
+            prompt = f"""You are greeting a returning user as their close friend. Based on context, DECIDE: follow up on last conversation OR ask open-ended question.
 
 **Context:**
-- User's name: {user_name or 'User'}
-- Time since last chat: {time_context} ({days} days, {hours} hours ago)
-- Date of last chat: {last_convo[:10] if isinstance(last_convo, str) else 'Unknown'}
+- User: {user_name or 'User'}
+- Last chat: {time_context} ({days} days, {hours} hours ago)
+- Date: {last_convo[:10] if isinstance(last_convo, str) else 'Unknown'}
 
-**What they discussed last time:**
+**Summary of last conversation:**
 {last_summary.get('last_summary', 'No previous conversation')}
 
 **Topics:** {', '.join(last_summary.get('last_topics', [])[:5]) if last_summary.get('last_topics') else 'None'}
 
-**Your Task:**
-Generate a natural, warm Urdu greeting. YOU DECIDE:
-- How to start (السلام علیکم, or casual like آئیں، ہیلو، or کیسے ہیں straight)
-- Whether to use their name or not
-- Whether to reference past conversation
-- Tone based on time gap and content
+**YOUR DECISION: Follow-up OR Open-ended?**
 
-**Smart Decision Making:**
-- Very recent (< 4h): Can be casual, maybe reference ongoing topic
-- Yesterday: Standard warm greeting, optional subtle reference
-- Few days: Usually just reconnect warmly
-- Week+: Acknowledge gap, don't force old topics
+**FOLLOW-UP greeting** (when to use):
+✅ Very recent (< 6 hours) → Check on ongoing situation
+✅ They shared a concern/goal → Natural to ask about progress
+✅ Specific event was discussed → Appropriate to reference
+Example: "واپس آ گئے؟ وہ پروجیکٹ کیسا چل رہا ہے؟"
+
+**OPEN-ENDED greeting** (when to use):
+✅ Been a while (days/weeks) → Fresh start feels better
+✅ Casual topics (not urgent concerns) → No need to follow up
+✅ Want to see where they are now → Let them lead
+Example: "ہیلو Romman! آج کیا چل رہا ہے؟" or "کیسے ہیں؟ سب ٹھیک؟"
 
 **Guidelines:**
-- Natural and varied (not always السلام علیکم!)
-- Brief: 1-2 sentences max
-- Warm, like a close friend
-- Simple Urdu, no complex words
-- If referencing past: be subtle and natural
+- Greeting style: Vary naturally (السلام علیکم, ہیلو, آئیں, or direct)
+- Length: 1-2 sentences maximum
+- Tone: Warm, casual, like close friend
+- Simple Urdu only
+- If follow-up: Be specific but brief
+- If open-ended: Keep it fresh and inviting
 
-**Examples of good greetings:**
-- "ہیلو! کیسے ہیں؟" (casual, simple)
-- "آئیں {user_name}! کیا حال ہے؟" (warm, uses name)
-- "واپس آ گئے؟ سب ٹھیک؟" (very recent return)
-- "بہت دنوں بعد! کیسے گزر رہے ہیں؟" (after long gap)
+**Decision Examples:**
+2h ago, work deadline → FOLLOW-UP: "واپس آ گئے؟ وہ کام ہو گیا؟"
+Yesterday, casual chat → OPEN: "ہیلو! آج کیسے ہیں؟"  
+3 days ago, discussed cricket → OPEN: "کیا حال ہے؟ سب ٹھیک؟"
+1 week ago → OPEN: "بہت دنوں بعد! کیسے گزر رہے ہیں؟"
 
-Output ONLY the Urdu greeting text, nothing else."""
+Output ONLY the Urdu greeting."""
 
             response = await asyncio.to_thread(
                 openai_client.chat.completions.create,
