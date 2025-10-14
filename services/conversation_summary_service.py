@@ -290,6 +290,7 @@ Be specific and concise."""
         """
         Format summary for ChatContext injection.
         Makes it actionable and easy for LLM to use naturally.
+        Includes time since last conversation to help LLM assess relevance.
         
         Args:
             summary_data: Dict from conversation_state (last_summary, last_topics, last_conversation_at)
@@ -302,11 +303,57 @@ Be specific and concise."""
         
         parts = ["## Last Conversation Context\n"]
         
-        # Add timestamp for temporal awareness
+        # Calculate time since last conversation
         last_convo = summary_data.get("last_conversation_at")
+        time_context = ""
+        
         if last_convo:
-            date_str = last_convo[:10] if isinstance(last_convo, str) else str(last_convo)[:10]
-            parts.append(f"**When:** {date_str}\n")
+            try:
+                from datetime import datetime, timezone
+                
+                # Parse the timestamp
+                if isinstance(last_convo, str):
+                    last_time = datetime.fromisoformat(last_convo.replace('Z', '+00:00'))
+                else:
+                    last_time = last_convo
+                
+                # Calculate time difference
+                now = datetime.now(timezone.utc)
+                delta = now - last_time
+                
+                # Format time difference
+                days = delta.days
+                hours = delta.seconds // 3600
+                
+                if days == 0:
+                    if hours == 0:
+                        time_context = "earlier today"
+                    elif hours == 1:
+                        time_context = "1 hour ago"
+                    else:
+                        time_context = f"{hours} hours ago"
+                elif days == 1:
+                    time_context = "yesterday"
+                elif days < 7:
+                    time_context = f"{days} days ago"
+                elif days < 30:
+                    weeks = days // 7
+                    time_context = f"{weeks} week{'s' if weeks > 1 else ''} ago"
+                elif days < 365:
+                    months = days // 30
+                    time_context = f"{months} month{'s' if months > 1 else ''} ago"
+                else:
+                    years = days // 365
+                    time_context = f"{years} year{'s' if years > 1 else ''} ago"
+                
+                # Add date with time context
+                date_str = last_convo[:10] if isinstance(last_convo, str) else str(last_convo)[:10]
+                parts.append(f"**When:** {date_str} ({time_context})\n")
+                
+            except Exception as e:
+                # Fallback to just date if time calculation fails
+                date_str = last_convo[:10] if isinstance(last_convo, str) else str(last_convo)[:10]
+                parts.append(f"**When:** {date_str}\n")
         
         # Add the summary
         parts.append(f"**What was discussed:**\n{summary_data['last_summary']}")
@@ -324,8 +371,18 @@ Be specific and concise."""
             if isinstance(topics, list) and topics:
                 parts.append(f"\n**Key topics:** {', '.join(topics[:5])}")
         
-        # Add usage guidance
-        parts.append("\n*Use this context naturally when relevant. Don't force references to old topics.*")
+        # Add usage guidance based on recency
+        if time_context:
+            if "hour" in time_context or "today" in time_context:
+                parts.append("\n*Recent conversation - highly relevant. Reference naturally.*")
+            elif "yesterday" in time_context or "days ago" in time_context:
+                parts.append("\n*Recent conversation - reference when topic aligns.*")
+            elif "week" in time_context:
+                parts.append("\n*Last week - use for context, don't force if user wants to move on.*")
+            else:
+                parts.append("\n*Older conversation - use only if user brings up related topics.*")
+        else:
+            parts.append("\n*Use this context naturally when relevant. Don't force references to old topics.*")
         
         return "\n".join(parts)
 
