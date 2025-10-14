@@ -1697,11 +1697,22 @@ async def entrypoint(ctx: agents.JobContext):
             # Build optimized initial context message with better structure
             context_parts = []
             
+            # STEP 1: Load last conversation summary (if exists)
+            summary_service = ConversationSummaryService(supabase)
+            last_summary = await summary_service.get_last_summary(user_id)
+            
+            if last_summary:
+                formatted_summary = summary_service.format_summary_for_context(last_summary)
+                if formatted_summary:
+                    context_parts.append(formatted_summary)
+                    print(f"[CONTEXT]   ✓ Last conversation summary loaded")
+            
+            # STEP 2: Add current profile
             if profile and len(profile.strip()) > 0:
                 context_parts.append(f"## User Profile\n{profile[:400]}...")  # Increased from 300
                 print(f"[CONTEXT]   ✓ Profile loaded ({len(profile)} chars)")
             
-            # Add memories by category with clear structure
+            # STEP 3: Add memories by category with clear structure
             memory_count = 0
             for category, mems in recent_memories.items():
                 if mems:
