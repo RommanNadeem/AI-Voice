@@ -289,6 +289,7 @@ Be specific and concise."""
     def format_summary_for_context(self, summary_data: Dict) -> str:
         """
         Format summary for ChatContext injection.
+        Makes it actionable and easy for LLM to use naturally.
         
         Args:
             summary_data: Dict from conversation_state (last_summary, last_topics, last_conversation_at)
@@ -299,18 +300,18 @@ Be specific and concise."""
         if not summary_data or not summary_data.get("last_summary"):
             return ""
         
-        parts = ["## Last Conversation Summary\n"]
+        parts = ["## Last Conversation Context\n"]
         
-        # Add timestamp if available
+        # Add timestamp for temporal awareness
         last_convo = summary_data.get("last_conversation_at")
         if last_convo:
             date_str = last_convo[:10] if isinstance(last_convo, str) else str(last_convo)[:10]
-            parts.append(f"**Last conversation:** {date_str}\n")
+            parts.append(f"**When:** {date_str}\n")
         
-        # Add summary
-        parts.append(summary_data["last_summary"])
+        # Add the summary
+        parts.append(f"**What was discussed:**\n{summary_data['last_summary']}")
         
-        # Add topics if available
+        # Add topics for quick reference
         topics = summary_data.get("last_topics")
         if topics:
             # Handle both JSONB (list) and string formats
@@ -321,7 +322,10 @@ Be specific and concise."""
                     pass
             
             if isinstance(topics, list) and topics:
-                parts.append(f"\n**Topics:** {', '.join(topics[:5])}")
+                parts.append(f"\n**Key topics:** {', '.join(topics[:5])}")
+        
+        # Add usage guidance
+        parts.append("\n*Use this context naturally when relevant. Don't force references to old topics.*")
         
         return "\n".join(parts)
 
