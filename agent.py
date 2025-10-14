@@ -1939,15 +1939,16 @@ async def entrypoint(ctx: agents.JobContext):
     # Don't wait too long or participant might disconnect
     await asyncio.sleep(0.3)  # Minimal delay - just enough for session readiness
     
-    # Load last conversation summary to personalize greeting
+    # Generate personalized greeting using OpenAI based on last conversation
     greeting_msg = None
     try:
         last_summary = await summary_service.get_last_summary(user_id)
         
         if last_summary and last_summary.get('last_conversation_at'):
             from datetime import datetime, timezone
+            from openai import OpenAI
             
-            # Calculate time since last conversation (reuse logic from format_summary_for_context)
+            # Calculate time since last conversation
             last_convo = last_summary.get('last_conversation_at')
             last_time = datetime.fromisoformat(last_convo.replace('Z', '+00:00'))
             now = datetime.now(timezone.utc)
@@ -1956,33 +1957,68 @@ async def entrypoint(ctx: agents.JobContext):
             days = delta.days
             hours = delta.seconds // 3600
             
-            # Generate context-aware greeting based on time
+            # Determine time context
             if days == 0 and hours < 4:
-                # Very recent (< 4 hours) - acknowledge continuity
-                greeting_msg = f"السلام علیکم {user_name}! واپس آ گئے؟ کیسے ہیں؟" if user_name else "السلام علیکم! واپس آ گئے؟"
+                time_context = "a few hours ago"
+                recency = "very recent"
             elif days == 0:
-                # Same day but hours ago - warm acknowledgment
-                greeting_msg = f"السلام علیکم {user_name}! کیسے ہیں؟" if user_name else "السلام علیکم! کیسے ہیں؟"
+                time_context = "earlier today"
+                recency = "recent"
             elif days == 1:
-                # Yesterday - acknowledge gap
-                greeting_msg = f"السلام علیکم {user_name}! کل کے بعد کیسے ہیں؟" if user_name else "السلام علیکم! کل کے بعد کیسے ہیں؟"
+                time_context = "yesterday"
+                recency = "recent"
             elif days < 7:
-                # Few days - gentle reconnection
-                greeting_msg = f"السلام علیکم {user_name}! کچھ دنوں بعد! کیسے ہیں؟" if user_name else "السلام علیکم! کچھ دنوں بعد! کیسے ہیں؟"
+                time_context = f"{days} days ago"
+                recency = "few days"
             else:
-                # Week+ - warm return
-                greeting_msg = f"السلام علیکم {user_name}! بہت دنوں بعد! کیا حال ہے؟" if user_name else "السلام علیکم! بہت دنوں بعد! کیا حال ہے؟"
+                time_context = f"over a week ago"
+                recency = "long time"
             
-            print(f"[GREETING] Using context-aware greeting (last chat: {days}d {hours}h ago)")
+            # Generate personalized greeting using OpenAI
+            print(f"[GREETING] Generating AI greeting (last chat: {time_context})")
+            
+            openai_client = OpenAI(api_key=Config.OPENAI_API_KEY)
+            
+            prompt = f"""Generate a warm, natural Urdu greeting for a returning user.
+
+Context:
+- User's name: {user_name or 'User'}
+- Last conversation: {time_context}
+- Recency level: {recency}
+- What was discussed: {last_summary.get('last_summary', '')[:150]}
+- Key topics: {', '.join(last_summary.get('last_topics', [])[:3])}
+
+Instructions:
+- Start with السلام علیکم{' ' + user_name if user_name else ''}!
+- Acknowledge the time gap naturally (e.g., واپس آ گئے for recent, بہت دنوں بعد for long gap)
+- Keep it brief (1-2 sentences max)
+- Warm and friendly tone
+- DON'T mention specific topics unless very recent (< 1 day)
+- End with a general check-in like کیسے ہیں or کیا حال ہے
+
+Output ONLY the Urdu greeting, nothing else."""
+
+            response = await asyncio.to_thread(
+                openai_client.chat.completions.create,
+                model="gpt-4o-mini",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.7,
+                max_tokens=100
+            )
+            
+            greeting_msg = response.choices[0].message.content.strip()
+            print(f"[GREETING] AI-generated: {greeting_msg}")
+            
     except Exception as e:
-        print(f"[GREETING] ⚠️ Summary check failed, using default: {e}")
+        print(f"[GREETING] ⚠️ AI greeting failed, using default: {e}")
     
-    # Fallback to default greeting if summary not available or error
+    # Fallback to default greeting if AI generation fails or no summary
     if not greeting_msg:
         if user_name:
             greeting_msg = f"السلام علیکم {user_name}! آج کیسے ہیں؟"
         else:
             greeting_msg = "السلام علیکم! کیسے ہیں آپ؟"
+        print(f"[GREETING] Using default greeting")
     
     print(f"[GREETING] Playing: {greeting_msg}")
     
