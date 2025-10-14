@@ -609,8 +609,10 @@ Assistant is **female** in first person (میں گئی/میں خوش ہوں/می
         print(f"[TOOL] 💾 storeInMemory called: [{category}] {key}")
         print(f"[TOOL]    Value: {value[:100]}{'...' if len(value) > 100 else ''}")
         
-        # STEP 1: Save to database
-        success = self.memory_service.save_memory(category, key, value)
+        # STEP 1: Save to database (async to prevent blocking)
+        success = await asyncio.to_thread(
+            self.memory_service.save_memory, category, key, value
+        )
         logging.info(f"[TOOL] Memory save result: {success}")
         
         if success:
