@@ -1974,52 +1974,62 @@ async def entrypoint(ctx: agents.JobContext):
                 time_context = f"over a week ago"
                 recency = "long time"
             
+            # Extract first name and prepare context
+            first_name = user_name.split()[0] if user_name else None
+            summary_text = last_summary.get('last_summary', 'No previous conversation')[:250]
+            topics_list = last_summary.get('last_topics', [])[:5]
+            topics_str = ', '.join(topics_list) if topics_list else 'None'
+            
             # Generate personalized greeting using OpenAI
             print(f"[GREETING] Generating AI greeting (last chat: {time_context})")
             
             openai_client = OpenAI(api_key=Config.OPENAI_API_KEY)
             
-            prompt = f"""Generate the FIRST greeting for a returning user. DECIDE: Follow-up on last conversation OR Open-ended fresh start.
+            prompt = f"""Generate the FIRST greeting for a returning user. 
+DECIDE: (A) Follow up on last conversation  OR  (B) Fresh open-ended start.
+
+You are Humraaz, a warm, witty, strictly platonic female friend who speaks Urdu only.
 
 **User Info:**
-- Name: {user_name or 'User'}
+- Name: {first_name or 'User'}
 - Last chat: {time_context} ({days} days, {hours} hours ago)
 
 **Last Conversation Summary:**
-{last_summary.get('last_summary', 'No previous conversation')}
+{summary_text}
 
-**Topics:** {', '.join(last_summary.get('last_topics', [])[:5]) if last_summary.get('last_topics') else 'None'}
+**Topics discussed:** {topics_str}
 
 ---
 
-**DECISION: Choose greeting type based on context**
+**DECISION: Choose greeting type**
 
-**FOLLOW-UP Greeting** (reference past):
+**FOLLOW-UP Greeting** (reference past conversation):
 Use when:
-- < 6 hours: Very recent, natural to continue
-- They shared concern/goal: Shows you care
-- Ongoing situation: Appropriate to check progress
+- Very recent (< 12 hours) → Natural to continue
+- They shared concern/goal/problem → Shows you care
+- Ongoing situation → Appropriate to check progress
 
 Examples:
 - "واپس آ گئے؟ وہ کام کا مسئلہ حل ہوا؟"
-- "ہیلو! ڈیڈلائن کیسی گئی؟"
-- "{user_name}! پروجیکٹ مکمل ہو گیا؟"
+- "ہیلو! ڈیڈلائن کیسی رہی؟"
+- "{first_name or 'User'}! پروجیکٹ مکمل ہو گیا؟"
 
 **OPEN-ENDED Greeting** (fresh start):
 Use when:
-- Days/weeks passed: Fresh start feels natural
-- Casual topics: No urgent follow-up needed
-- Want them to lead: See where they are now
+- Days/weeks passed → Fresh start feels better
+- Casual topics → No urgent follow-up needed
+- Want them to lead → See where they are now
 
 Examples:
 - "ہیلو! کیسے ہیں؟ آج کیا plan ہے؟"
 - "بہت دنوں بعد! کیا حال ہے؟"
-- "آئیں {user_name}! سب ٹھیک؟ کیا چل رہا ہے؟"
+- "سب ٹھیک؟ کیا چل رہا ہے؟"
 
 **Guidelines:**
-- Greeting style: Vary (السلام علیکم, ہیلو, آئیں, or direct)
-- 1-2 sentences max
-- Simple Urdu, warm tone
+- Urdu only, natural and warm
+- 1-2 sentences maximum
+- Vary greeting style (السلام علیکم, ہیلو, آئیں, or direct)
+- Simple Urdu, no complex words
 - Use your best judgment!
 
 Output ONLY the Urdu greeting."""
@@ -2028,7 +2038,7 @@ Output ONLY the Urdu greeting."""
                 openai_client.chat.completions.create,
                 model="gpt-4o-mini",
                 messages=[{"role": "user", "content": prompt}],
-                temperature=0.7,
+                temperature=0.4,
                 max_tokens=100
             )
             
