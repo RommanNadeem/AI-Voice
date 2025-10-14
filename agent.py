@@ -945,26 +945,19 @@ To avoid stiffness, prefer simpler words in everyday chat:
             # 4) Play greeting and signal completion
             async def _play_greeting():
                 try:
-                    print(f"[GREETING] 🔊 Starting TTS playback at {time.time():.2f}")
                     await session.say(greeting_text)
-                    print(f"[GREETING] ✅ Playback complete at {time.time():.2f}")
-                    logging.info("[GREETING] Playback complete.")
+                    logging.info("[GREETING] Playback complete")
                 except Exception as e:
-                    print(f"[GREETING] ❌ Playback error: {e}")
                     logging.error(f"[GREETING] Playback error: {e}")
                 finally:
-                    # Signal that greeting is done (success or failure)
                     greeting_complete.set()
             
             # Start greeting playback in background
             asyncio.create_task(_play_greeting())
-            print(f"[GREETING] 🎬 Greeting started (will signal when complete)")
 
         except Exception as e:
-            msg = str(e)
             logging.error(f"[GREETING] Error: {e}")
-            print(f"[GREETING] ❌ Exception: {type(e).__name__}: {msg}")
-            greeting_complete.set()  # Signal completion even on error
+            greeting_complete.set()
             # Fallback to simplest possible greeting
             try:
                 asyncio.create_task(session.say("السلام علیکم!"))
@@ -1888,37 +1881,19 @@ async def entrypoint(ctx: agents.JobContext):
     else:
         greeting_msg = "السلام علیکم! کیسے ہیں آپ؟"
     
-    print("=" * 80)
-    print(f"[GREETING] 📢 Playing: {greeting_msg}")
-    print("=" * 80)
+    print(f"[GREETING] Playing: {greeting_msg}")
     
     try:
-        # Play greeting and wait for it to finish
         await session.say(greeting_msg)
-        print("[GREETING] ✅ Greeting playback complete")
+        print(f"[GREETING] ✅ Complete ({time.time() - start_time:.2f}s)")
     except Exception as e:
-        print(f"[GREETING] ⚠️ Greeting failed: {e}")
+        print(f"[GREETING] ⚠️ Failed: {e}")
     
-    greeting_time = time.time() - start_time
-    print(f"[TIMER] ⏱️  Greeting finished: {greeting_time:.2f}s")
-    
-    # CRITICAL: Set to listening state and ensure VAD is ready
+    # Set to listening state and ensure VAD is ready
     await assistant.broadcast_state("listening")
-    print("💭 [STATE] Broadcasted 'listening' state")
+    await asyncio.sleep(0.5)  # Ensure VAD activates
     
-    # Extra delay to ensure VAD activates properly
-    await asyncio.sleep(0.5)
-    print("👂 [VAD] Waiting for VAD to activate...")
-    
-    # LiveKit Best Practice: Use event-based disconnection detection
-    # Set up disconnection event handler
-    setup_start = time.time()
-    print("=" * 80)
-    print("[ENTRYPOINT] 🎧 Agent is NOW READY TO LISTEN")
-    print("[ENTRYPOINT] ✅ Greeting playback finished - user can now speak")
-    print("[ENTRYPOINT] 👂 VAD is ACTIVE and listening for user voice")
-    print("=" * 80)
-    print("[ENTRYPOINT] Setting up event handlers...")
+    print("[ENTRYPOINT] 🎧 Ready - listening for user")
     
     # Create an event to signal when participant disconnects
     disconnect_event = asyncio.Event()
@@ -1947,25 +1922,10 @@ async def entrypoint(ctx: agents.JobContext):
     ctx.room.on("participant_disconnected", on_participant_disconnected)
     ctx.room.on("track_subscribed", on_track_subscribed)
     ctx.room.on("track_unsubscribed", on_track_unsubscribed)
-    print("[ENTRYPOINT] ✓ Event handlers registered (disconnect, track_subscribed, track_unsubscribed)")
-    setup_elapsed = time.time() - setup_start
-    print(f"[TIMER] ⚡ Setup completed in {setup_elapsed:.3f}s")
-    
-    print("")
-    print("=" * 80)
-    print("📋 EXPECTED FLOW:")
-    print("   1. ✅ Greeting playback complete (already done)")
-    print("   2. 🎤 User speaks → VAD detects → 'USER SPEECH STARTED' log")
-    print("   3. 🗣️  User finishes → 'USER TURN COMPLETED' log")
-    print("   4. 🤖 LLM processes → Tool calls (if needed) → Response generated")
-    print("   5. 🔊 'AGENT SPEECH STARTED' → Agent responds")
-    print("=" * 80)
-    print("")
     
     try:
         ready_time = time.time()
-        print(f"[ENTRYPOINT] 👂 Waiting for user to speak or disconnect...")
-        print(f"[TIMER] ⏰ Ready at: {ready_time:.2f} (Total: {ready_time - start_time:.2f}s from start)")
+        print(f"[ENTRYPOINT] Ready in {ready_time - start_time:.2f}s")
 
         await asyncio.wait_for(disconnect_event.wait(), timeout=3600)  # 1 hour max
         print("[ENTRYPOINT] ✓ Session completed normally (participant disconnected)")
