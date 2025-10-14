@@ -310,7 +310,7 @@ Use the last conversation **smartly and naturally**—never like a log.
 
 ## 🔥 MEMORY MANAGEMENT - CRITICAL (Equal Priority: Store AND Retrieve) 🔥
 
-### **STORAGE (When user shares info):**
+### **STORAGE (When user shares any info worth remembering, do not save everything):**
 **IMMEDIATELY call storeInMemory() when user shares:**
 - Preferences: "مجھے بریانی پسند ہے" → storeInMemory("PREFERENCE", "favorite_food", "بریانی")
 - Interests: "مجھے گانا گانے کا شوق ہے" → storeInMemory("INTEREST", "music_singing", "گانا گانے کا شوق")
@@ -584,6 +584,7 @@ Assistant is **female** in first person (میں گئی/میں خوش ہوں/می
     async def storeInMemory(self, context: RunContext, category: str, key: str, value: str):
         """
         Store user information persistently in memory for future conversations.
+        OPTIMIZED: Returns immediately, saves in background (non-blocking).
         
         Use this when the user shares important personal information that should be remembered.
         Examples: preferences, goals, facts about their life, relationships, etc.
@@ -595,7 +596,7 @@ Assistant is **female** in first person (میں گئی/میں خوش ہوں/می
             value: The actual data to remember (can be in any language, including Urdu)
         
         Returns:
-            Success status and confirmation message
+            Success status (optimistic) - actual save happens in background
         """
         print("=" * 80)
         print(f"🔥 [MEMORY TOOL CALLED] storeInMemory")
@@ -605,36 +606,40 @@ Assistant is **female** in first person (میں گئی/میں خوش ہوں/می
         print("=" * 80)
         
         logging.info(f"[TOOL] 💾 storeInMemory called: [{category}] {key}")
-        logging.info(f"[TOOL]    Value: {value[:100]}{'...' if len(value) > 100 else ''}")
         print(f"[TOOL] 💾 storeInMemory called: [{category}] {key}")
-        print(f"[TOOL]    Value: {value[:100]}{'...' if len(value) > 100 else ''}")
         
-        # STEP 1: Save to database (async to prevent blocking)
-        success = await asyncio.to_thread(
-            self.memory_service.save_memory, category, key, value
-        )
-        logging.info(f"[TOOL] Memory save result: {success}")
+        # Fire-and-forget background save task
+        async def save_in_background():
+            """Save memory in background without blocking LLM response"""
+            try:
+                # Save to database
+                success = await asyncio.to_thread(
+                    self.memory_service.save_memory, category, key, value
+                )
+                
+                if success:
+                    print(f"[MEMORY_BG] ✅ Saved to database: [{category}] {key}")
+                    logging.info(f"[MEMORY_BG] ✅ Saved: [{category}] {key}")
+                else:
+                    print(f"[MEMORY_BG] ❌ Database save failed: [{category}] {key}")
+                    logging.error(f"[MEMORY_BG] ❌ Failed: [{category}] {key}")
+                    
+            except Exception as e:
+                print(f"[MEMORY_BG] ❌ Error saving [{category}] {key}: {e}")
+                logging.error(f"[MEMORY_BG] ❌ Error: {e}")
         
-        if success:
-            print(f"[TOOL] ✅ Memory stored to database")
-            
-            # STEP 2: Also add to RAG for immediate searchability
-            if self.rag_service:
-                try:
-                    await self.rag_service.add_memory_async(
-                        text=value,
-                        category=category,
-                        metadata={"key": key, "explicit_save": True, "important": True}
-                    )
-                    print(f"[TOOL] ✅ Memory indexed in RAG")
-                except Exception as e:
-                    print(f"[TOOL] ⚠️ RAG indexing failed (non-critical): {e}")
-        else:
-            print(f"[TOOL] ❌ Memory storage failed")
+        # Start background task (don't await - fire and forget!)
+        task = asyncio.create_task(save_in_background())
         
+        # Track task to prevent garbage collection
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+        
+        # Return immediately - LLM can continue generating response!
+        print(f"[TOOL] ⚡ Memory save queued (background) - returning immediately")
         return {
-            "success": success, 
-            "message": f"Memory [{category}] {key} saved and indexed" if success else "Failed to save memory"
+            "success": True,  # Optimistic response
+            "message": f"Saving memory in background: [{category}] {key}"
         }
 
     @function_tool()
