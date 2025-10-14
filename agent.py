@@ -2002,11 +2002,16 @@ async def entrypoint(ctx: agents.JobContext):
             # Format relative time (last_seen_relative)
             last_seen_relative = time_context
             
-            # Load user gender from onboarding
+            # Load user gender from onboarding_details table
             user_gender_value = 'unknown'
             try:
-                onboarding_svc = OnboardingService(supabase)
-                onboarding_result = await onboarding_svc.get_onboarding_async(user_id)
+                onboarding_result = await asyncio.to_thread(
+                    lambda: supabase.table("onboarding_details")
+                    .select("gender")
+                    .eq("user_id", user_id)
+                    .limit(1)
+                    .execute()
+                )
                 if onboarding_result and onboarding_result.data:
                     user_gender_value = onboarding_result.data[0].get("gender", "unknown")
             except Exception as e:
